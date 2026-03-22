@@ -1,0 +1,16 @@
+[package]
+name = "image-builder"
+version.workspace = true
+edition.workspace = true
+description = "Host tool: wraps the NodeAI kernel ELF in a bootable BIOS/UEFI disk image"
+
+# This crate is a HOST tool and must be built for the host platform.
+# Always invoke it with: cargo build -p image-builder --target x86_64-pc-windows-msvc
+# The workspace default target (x86_64-unknown-none) MUST be overridden on the CLI.
+
+[[bin]]
+name = "image-builder"
+path = "src/main.rs"
+
+[dependencies]
+bootloader = { version = "0.11", features = ["bios"] }

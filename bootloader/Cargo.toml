@@ -1,0 +1,11 @@
+[package]
+name = "nodeai-bootloader"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "nodeai-bootloader"
+path = "src/main.rs"
+
+[dependencies.bootloader]
+version = "0.11"

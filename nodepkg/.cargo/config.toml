@@ -1,0 +1,4 @@
+# nodepkg builds as a normal std binary (targeting NodeAI userspace or Linux for testing).
+# This overrides the workspace-level x86_64-unknown-none target.
+[build]
+target = "x86_64-unknown-linux-musl"

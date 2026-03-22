@@ -1,0 +1,13 @@
+# Kernel-level cargo config.
+# Inherits workspace root config: target = x86_64-unknown-none, linker = rust-lld.
+# This file adds the link-arg for the kernel linker script.
+
+[target.x86_64-unknown-none]
+rustflags = [
+    "-C", "relocation-model=static",
+    # Custom linker script — provides kernel memory layout (higher-half mapping).
+    # Path is relative to the kernel crate directory.
+    "-C", "link-arg=-Tlayout.ld",
+]
+linker = "rust-lld"
+linker-flavor = "ld.lld"

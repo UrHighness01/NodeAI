@@ -1,0 +1,12 @@
+[package]
+name = "ai_subsystem"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+hal = { path = "../hal" }
+
+[dependencies.spin]
+version = "0.9"
+default-features = false
+features = ["once", "mutex", "spin_mutex"]

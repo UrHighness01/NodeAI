@@ -1,0 +1,17 @@
+[package]
+name = "drivers"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+hal = { path = "../hal" }
+
+[dependencies.spin]
+version = "0.9"
+default-features = false
+features = ["once", "mutex", "spin_mutex"]
+
+[dependencies.x86_64]
+version = "0.15"
+default-features = false
+features = ["instructions"]

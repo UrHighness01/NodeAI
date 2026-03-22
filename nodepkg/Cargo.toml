@@ -1,0 +1,16 @@
+[package]
+name = "nodepkg"
+version = "0.1.0"
+edition = "2021"
+description = "NodeAI Package Manager"
+
+# Build as a no_std + alloc binary for the NodeAI userspace
+# To build: cargo build --target x86_64-unknown-linux-musl --release
+# (uses musl for static linkage, no glibc dependency)
+
+[[bin]]
+name = "nodepkg"
+path = "src/main.rs"
+
+[dependencies]
+# no external deps — pure Rust, stdlib only (musl)
