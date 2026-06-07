@@ -332,6 +332,15 @@ pub fn get_parent_pid(pid: Pid) -> Pid {
     TASKS.lock().get(&pid).map(|t| t.parent_pid).unwrap_or(0)
 }
 
+/// Store the robust futex list for a thread (walked on thread death to unlock mutexes).
+pub fn set_robust_list(pid: Pid, head: u64, len: usize) {
+    let mut tasks = TASKS.lock();
+    if let Some(t) = tasks.get_mut(&pid) {
+        t.robust_list_head = head;
+        t.robust_list_len  = len;
+    }
+}
+
 /// Update the CR3 (page table) for a task — called by execve when it creates a new address space.
 pub fn set_task_cr3(pid: Pid, cr3: u64) {
     let mut tasks = TASKS.lock();
@@ -390,18 +399,21 @@ pub fn kill_task(pid: Pid, _code: i32) {
 pub fn spawn_user_thread(parent_pid: Pid, new_stack: u64, tls: u64, settls: bool) -> Option<Pid> {
     let child_pid = alloc_pid();
     let mut tasks = TASKS.lock();
+    // clone_shallow copies parent's interrupt frame and zeroes RAX (child gets 0 from clone).
+    // It does NOT copy page tables — child.cr3 == parent.cr3 (shared address space).
     let mut child = tasks.get(&parent_pid)?.clone_shallow(child_pid)?;
-    // Override stack and return value for thread semantics
-    child.context.rsp = new_stack;
-    child.context.rax = 0; // child sees 0 as return from clone
-    if settls {
-        child.fs_base = tls;
+
+    // Override the user RSP in the saved interrupt frame so the thread starts on new_stack.
+    // Frame layout: [saved_kernel_rsp+120]=RIP, [+128]=CS, [+136]=RFLAGS, [+144]=RSP, [+152]=SS
+    unsafe {
+        let rsp_slot = (child.saved_kernel_rsp + 144) as *mut u64;
+        rsp_slot.write(new_stack);
     }
-    // Thread shares parent tgid (use parent_pid as thread-group leader)
+    if settls { child.fs_base = tls; }
     child.parent_pid = parent_pid;
     tasks.insert(child_pid, child);
     runqueue::enqueue(child_pid);
-    crate::klog!(INFO, "Scheduler: thread spawn parent={} → tid={}", parent_pid, child_pid);
+    crate::klog!(INFO, "Scheduler: thread tid={} parent={} stack={:#x}", child_pid, parent_pid, new_stack);
     Some(child_pid)
 }
 

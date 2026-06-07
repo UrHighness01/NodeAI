@@ -135,6 +135,9 @@ pub struct Task {
     pub parent_pid: Pid,
     /// Exit code set by sys_exit; None while alive.
     pub exit_code: Option<i32>,
+    /// POSIX robust futex list head (set by set_robust_list, walked on thread death).
+    pub robust_list_head: u64,
+    pub robust_list_len:  usize,
     /// Declared scheduling intent via sys_intent (0 = default/unset).
     pub intent: u8,
     /// Hint value accompanying the intent (e.g. I/O stride, memory estimate).
@@ -206,10 +209,12 @@ impl Task {
             euid: 0,
             gid:  0,
             egid: 0,
-            parent_pid:      0,
-            exit_code:       None,
-            intent:          0,
-            intent_hint:     0,
+            parent_pid:          0,
+            exit_code:           None,
+            robust_list_head:    0,
+            robust_list_len:     0,
+            intent:              0,
+            intent_hint:         0,
             pending_signals: 0,
             fpu_state:       FpuState::default_state(),
             user_brk:        0,
@@ -259,10 +264,12 @@ impl Task {
             euid:             self.euid,
             gid:              self.gid,
             egid:             self.egid,
-            parent_pid:       self.pid,
-            exit_code:        None,
-            intent:           self.intent,
-            intent_hint:      self.intent_hint,
+            parent_pid:           self.pid,
+            exit_code:            None,
+            robust_list_head:     0,
+            robust_list_len:      0,
+            intent:               self.intent,
+            intent_hint:          self.intent_hint,
             pending_signals:  0,
             fpu_state:        self.fpu_state, // copy parent's FPU state to child
             user_brk:         self.user_brk,

@@ -94,23 +94,71 @@ fn apply_decision(decision: AiDecision) {
     }
 }
 
-/// Update the AI profile for a task from its scheduler-collected statistics.
-/// Called by the scheduler when a task is descheduled.
-pub fn update_task_profile(pid: u64, profile: &AiProfile) {
-    let features = TaskFeatures {
-        avg_burst_norm:  (profile.ticks_run as f32 / 1000.0).min(1.0),
-        io_fraction:     0.1, // TODO: track I/O waits in later phase
-        cache_miss_rate: 0.0, // TODO: read from IA32_PERF_CTR when PMCs are configured
-        priority_norm:   0.5,
-        wait_time_norm:  0.0,
-    };
-    let decision = scheduler_ai::predict(&features);
+/// Per-task previous prediction record — needed for SGD feedback.
+struct PredRecord { predicted_burst_us: u64, features: alloc::vec::Vec<f32> }
+static LAST_PRED: spin::Mutex<alloc::collections::BTreeMap<u64, PredRecord>>
+    = spin::Mutex::new(alloc::collections::BTreeMap::new());
 
-    // Post the decision back to the bus for application
+/// Learning rate for online SGD (small — 100 Hz × many tasks = fast convergence).
+const LR: f32 = 0.0005;
+
+/// Update the AI profile for a task from scheduler-collected statistics.
+/// Runs one step of vanilla SGD on the scheduler model using the actual burst
+/// as the supervision signal, then produces the next prediction.
+pub fn update_task_profile(pid: u64, profile: &AiProfile) {
+    let features = alloc::vec![
+        (profile.ticks_run as f32 / 1000.0).min(1.0), // avg burst (normalised)
+        0.1f32,  // io_fraction placeholder (PMC in future)
+        0.0f32,  // cache_miss_rate placeholder
+        0.5f32,  // priority (normalised to [-1,1] later)
+        0.0f32,  // wait_time placeholder
+    ];
+
+    // ── Online SGD step ─────────────────────────────────────────────────────
+    // If we have a previous prediction for this task, use the actual burst to
+    // compute error and update the model weights (one gradient descent step).
+    let actual_burst_us = profile.ticks_run * 10_000; // ticks × 10ms → μs approx
+    {
+        let mut preds = LAST_PRED.lock();
+        if let Some(prev) = preds.get(&pid) {
+            let pred_burst = prev.predicted_burst_us as f32;
+            let actual     = actual_burst_us as f32;
+            let error      = pred_burst - actual;
+
+            // Apply SGD to the scheduler model's output layer.
+            if let Some(model) = LLM_MODEL.lock().as_mut() {
+                if let Some(layer) = model.layers.last_mut() {
+                    for (w, &x) in layer.weights.iter_mut().zip(prev.features.iter()) {
+                        *w -= LR * 2.0 * error * x;
+                    }
+                    for b in layer.biases.iter_mut() {
+                        *b -= LR * 2.0 * error;
+                    }
+                }
+            }
+        }
+    }
+
+    // ── Produce next prediction ─────────────────────────────────────────────
+    let task_feat = TaskFeatures {
+        avg_burst_norm:  features[0],
+        io_fraction:     features[1],
+        cache_miss_rate: features[2],
+        priority_norm:   features[3],
+        wait_time_norm:  features[4],
+    };
+    let decision = scheduler_ai::predict(&task_feat);
+
+    // Store this prediction for the next SGD step.
+    LAST_PRED.lock().insert(pid, PredRecord {
+        predicted_burst_us: decision.predicted_burst_us,
+        features: features,
+    });
+
     event_bus::post_decision(AiDecision::SchedulerAdjust {
         pid,
-        nice_delta:           decision.nice_adjust,
-        predicted_burst_us:   decision.predicted_burst_us,
+        nice_delta:         decision.nice_adjust,
+        predicted_burst_us: decision.predicted_burst_us,
     });
 }
 

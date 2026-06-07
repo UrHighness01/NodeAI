@@ -76,6 +76,7 @@ pub mod nr {
     pub const RT_SIGACTION:    u64 = 13;
     pub const RT_SIGPROCMASK:  u64 = 14;
     pub const RT_SIGRETURN:    u64 = 15;
+    pub const SIGALTSTACK:     u64 = 131;
     pub const IOCTL:           u64 = 16;
     pub const PREAD64:         u64 = 17;
     pub const PWRITE64:        u64 = 18;
@@ -418,6 +419,7 @@ pub unsafe extern "C" fn syscall_dispatch_extern(
         // ── Phase 18 signals ──────────────────────────────────────────────
         nr::RT_SIGACTION  => sys_rt_sigaction(arg0, arg1, arg2),
         nr::RT_SIGPROCMASK=> sys_rt_sigprocmask(arg0, arg1, arg2),
+        nr::SIGALTSTACK   => sys_sigaltstack(arg0, arg1),
         // RT_SIGRETURN is dispatched later in the match (full implementation)
         // ── Phase 18 credentials ─────────────────────────────────────────
         nr::GETUID | nr::GETEUID => sys_getuid(),
@@ -446,7 +448,8 @@ pub unsafe extern "C" fn syscall_dispatch_extern(
         nr::STATFS | nr::FSTATFS => sys_statfs(arg0, arg1),
         // ── Phase 19 futex / threading ───────────────────────────────────
         nr::FUTEX         => sys_futex(arg0, arg1 as i32, arg2 as u32, arg3),
-        nr::SET_ROBUST_LIST | nr::GET_ROBUST_LIST => 0,
+        nr::SET_ROBUST_LIST => sys_set_robust_list(arg0, arg1 as usize),
+        nr::GET_ROBUST_LIST => 0, // not needed for musl hello world
         // ── Phase 19 epoll / event I/O ───────────────────────────────────
         nr::EPOLL_CREATE1 => sys_epoll_create1(arg0),
         nr::EPOLL_CTL     => sys_epoll_ctl(arg0, arg1 as i32, arg2 as i32, arg3),
@@ -1279,13 +1282,14 @@ unsafe fn sys_wait4(_pid: i32, wstatus_ptr: u64, options: u64) -> i64 {
 }
 
 // ── sys_clone ────────────────────────────────────────────────────────────────
-const CLONE_THREAD:  u64 = 0x00010000;
-const CLONE_SETTLS:  u64 = 0x00080000;
+const CLONE_VM:      u64 = 0x00000100; // share address space
+const CLONE_THREAD:  u64 = 0x00010000; // same thread group
+const CLONE_SETTLS:  u64 = 0x00080000; // set TLS from argument
 
 unsafe fn sys_clone(flags: u64, stack_ptr: u64, _ptid: u64, tls: u64, _ctid: u64) -> i64 {
-    if (flags & CLONE_THREAD) != 0 && stack_ptr != 0 {
-        // Thread creation: share address space, new stack
-        let parent_pid = crate::scheduler::current_pid();
+    let parent_pid = crate::scheduler::current_pid();
+    if (flags & CLONE_VM) != 0 {
+        // Thread: shares address space (CR3 not copied), gets new stack.
         let settls = (flags & CLONE_SETTLS) != 0;
         match crate::scheduler::spawn_user_thread(parent_pid, stack_ptr, tls, settls) {
             Some(tid) => tid as i64,
@@ -1753,6 +1757,35 @@ unsafe fn sys_pread64(fd: u64, buf: u64, len: u64, off: u64) -> i64 {
 unsafe fn sys_pwrite64(fd: u64, buf: u64, len: u64, off: u64) -> i64 {
     sys_lseek(fd, off, 0);
     sys_write(fd, buf, len)
+}
+
+// ── sys_set_robust_list ───────────────────────────────────────────────────────
+// musl pthread calls this to register a per-thread robust futex list.
+// On thread death, the kernel walks the list and marks locked futexes as OWNER_DIED.
+unsafe fn sys_set_robust_list(head: u64, len: usize) -> i64 {
+    if len != core::mem::size_of::<u64>() * 3 {
+        return EINVAL; // Linux checks for exactly 24 bytes
+    }
+    let pid = crate::scheduler::current_pid();
+    crate::scheduler::set_robust_list(pid, head, len);
+    0
+}
+
+// ── sys_sigaltstack ──────────────────────────────────────────────────────────
+// musl __init_tls calls sigaltstack(NULL, &old_ss) to query.
+// We return SS_DISABLE (no alt stack active) which is the correct initial state.
+const SS_DISABLE: i32 = 4;
+unsafe fn sys_sigaltstack(ss_ptr: u64, old_ss_ptr: u64) -> i64 {
+    // struct stack_t: { void *ss_sp, int ss_flags, size_t ss_size } = 24 bytes
+    if old_ss_ptr != 0 {
+        if let Ok(p) = validate_user_ptr_mut(old_ss_ptr, 24) {
+            core::ptr::write_bytes(p, 0, 24);
+            // ss_flags at offset 8: SS_DISABLE
+            (p.add(8) as *mut i32).write(SS_DISABLE);
+        }
+    }
+    let _ = ss_ptr; // setting a new alt stack is ignored for now
+    0
 }
 
 // ── sys_rt_sigaction ─────────────────────────────────────────────────────────
