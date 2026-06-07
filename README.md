@@ -31,13 +31,14 @@ The kernel boots, runs preemptively, serves HTTP from userspace, and applies AI 
 | Demand paging (heap + stack, SIGSEGV on invalid address) | ✅ Working |
 | futex (real wait queue, FUTEX_WAIT/WAKE) | ✅ Working |
 
-### Pending
+### Known limitations
 
-- Signal handler delivery (push sigframe, redirect user RIP to handler)
-- fork copy-on-write (child has own L4 but user-space pages not yet deep-copied)
-- epoll (stub — poll() works)
-- TCP congestion control, TLS
-- Self-hosting (Phase 28–29 toolchain on-device)
+- **FPU/SSE state not saved across context switches.** The timer handler saves the 15 integer GPRs but not XMM0–15, MXCSR, or AVX state. Tasks using SSE (musl `memcpy`, float operations, SIMD) can silently corrupt each other's FPU registers. Fix: add `xsave`/`xrstor` to the timer handler. Until then, single-threaded workloads are unaffected.
+- **fork copies pages but not CoW** — both parent and child get independent copies at fork time. Correct, but uses more memory than lazy CoW would.
+- **epoll is a stub** — `poll()` works and is used instead.
+- **Signal handlers**: user-space handlers work; nested signal delivery (signal while handling signal) is not yet supported.
+- **TCP**: no congestion control, no TLS.
+- **Self-hosting**: on-device Rust compilation is the next major milestone.
 
 ## Quick Start
 
