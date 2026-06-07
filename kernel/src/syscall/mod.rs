@@ -1691,55 +1691,72 @@ unsafe fn sys_dup2(oldfd: u64, newfd: u64) -> i64 {
 }
 
 // ── sys_pipe2 ────────────────────────────────────────────────────────────────
-const PIPE_BUF: usize = 4096;
-struct Pipe {
-    buf:  [u8; PIPE_BUF],
-    head: usize,
-    tail: usize,
-    len:  usize,
+//
+// Pipe state is shared via an Arc<Mutex<PipeState>> between the read and write
+// ends. When the write end is closed, writer_count drops to 0 and reads on an
+// empty pipe return 0 (EOF) rather than blocking forever.
+
+struct PipeState {
+    buf:          alloc::vec::Vec<u8>,
+    writer_count: u32, // number of open write fds for this pipe
+    reader_count: u32, // number of open read fds
 }
-impl Pipe {
-    const fn new() -> Self { Self { buf: [0u8; PIPE_BUF], head: 0, tail: 0, len: 0 } }
-    fn write_bytes(&mut self, data: &[u8]) -> usize {
-        let mut n = 0;
-        for &b in data {
-            if self.len == PIPE_BUF { break; }
-            self.buf[self.tail] = b;
-            self.tail = (self.tail + 1) % PIPE_BUF;
-            self.len += 1; n += 1;
-        }
-        n
-    }
-    fn read_bytes(&mut self, out: &mut [u8]) -> usize {
-        let mut n = 0;
-        for slot in out.iter_mut() {
-            if self.len == 0 { break; }
-            *slot = self.buf[self.head];
-            self.head = (self.head + 1) % PIPE_BUF;
-            self.len -= 1; n += 1;
-        }
-        n
-    }
+impl PipeState {
+    fn new() -> Self { Self { buf: alloc::vec::Vec::new(), writer_count: 1, reader_count: 1 } }
 }
-static PIPES: spin::Mutex<[Pipe; 8]> = spin::Mutex::new([
-    Pipe::new(), Pipe::new(), Pipe::new(), Pipe::new(),
-    Pipe::new(), Pipe::new(), Pipe::new(), Pipe::new(),
-]);
+
+static PIPE_TABLE: spin::Mutex<alloc::collections::BTreeMap<usize, alloc::sync::Arc<spin::Mutex<PipeState>>>>
+    = spin::Mutex::new(alloc::collections::BTreeMap::new());
 static NEXT_PIPE: AtomicU64 = AtomicU64::new(0);
 
-struct PipeHandle { pipe_idx: usize, is_write: bool }
+struct PipeHandle { pipe_id: usize, is_write: bool }
 impl crate::vfs::FileHandle for PipeHandle {
+    fn bytes_available(&self) -> usize {
+        if self.is_write { return 0; }
+        PIPE_TABLE.lock().get(&self.pipe_id).map(|p| p.lock().buf.len()).unwrap_or(0)
+    }
     fn read(&mut self, buf: &mut [u8]) -> crate::vfs::VfsResult<usize> {
         if self.is_write { return Err(crate::vfs::VfsError::PermissionDenied); }
-        Ok(PIPES.lock()[self.pipe_idx].read_bytes(buf))
+        let state_arc = match PIPE_TABLE.lock().get(&self.pipe_id).cloned() {
+            Some(a) => a,
+            None    => return Ok(0),
+        };
+        let mut state = state_arc.lock();
+        if state.buf.is_empty() {
+            // EOF if all writers closed; EAGAIN-equivalent (0 bytes) otherwise.
+            return Ok(0);
+        }
+        let n = buf.len().min(state.buf.len());
+        buf[..n].copy_from_slice(&state.buf[..n]);
+        state.buf.drain(..n);
+        Ok(n)
     }
     fn write(&mut self, buf: &[u8]) -> crate::vfs::VfsResult<usize> {
         if !self.is_write { return Err(crate::vfs::VfsError::PermissionDenied); }
-        Ok(PIPES.lock()[self.pipe_idx].write_bytes(buf))
+        let state_arc = match PIPE_TABLE.lock().get(&self.pipe_id).cloned() {
+            Some(a) => a,
+            None    => return Err(crate::vfs::VfsError::IoError),
+        };
+        state_arc.lock().buf.extend_from_slice(buf);
+        Ok(buf.len())
     }
     fn seek(&mut self, _: u64) -> crate::vfs::VfsResult<u64> { Ok(0) }
     fn stat(&self) -> crate::vfs::VfsResult<crate::vfs::Stat> {
-        Ok(crate::vfs::Stat { ino: 0, size: 0, is_dir: false, nlink: 2, uid: 0, gid: 0, mode: 0o622 })
+        Ok(crate::vfs::Stat { ino: 0, size: 0, is_dir: false, nlink: 2,
+                              uid: 0, gid: 0, mode: 0o622 })
+    }
+}
+impl Drop for PipeHandle {
+    fn drop(&mut self) {
+        let mut tbl = PIPE_TABLE.lock();
+        if let Some(arc) = tbl.get(&self.pipe_id).cloned() {
+            let mut state = arc.lock();
+            if self.is_write { state.writer_count = state.writer_count.saturating_sub(1); }
+            else              { state.reader_count = state.reader_count.saturating_sub(1); }
+            let dead = state.writer_count == 0 && state.reader_count == 0;
+            drop(state);
+            if dead { tbl.remove(&self.pipe_id); }
+        }
     }
 }
 
@@ -1748,14 +1765,15 @@ unsafe fn sys_pipe2(fds_ptr: u64, _flags: u64) -> i64 {
         Ok(p)  => p as *mut u32,
         Err(e) => return e,
     };
-    let idx = (NEXT_PIPE.fetch_add(1, Ordering::Relaxed) % 8) as usize;
+    let pipe_id = NEXT_PIPE.fetch_add(1, Ordering::Relaxed) as usize;
+    PIPE_TABLE.lock().insert(pipe_id, alloc::sync::Arc::new(spin::Mutex::new(PipeState::new())));
     let pid = crate::scheduler::current_pid();
     let rfd = alloc_fd(pid);
     let wfd = alloc_fd(pid);
     {
         let mut table = FD_TABLE.lock();
-        table.insert((pid, rfd), alloc::boxed::Box::new(PipeHandle { pipe_idx: idx, is_write: false }));
-        table.insert((pid, wfd), alloc::boxed::Box::new(PipeHandle { pipe_idx: idx, is_write: true  }));
+        table.insert((pid, rfd), alloc::boxed::Box::new(PipeHandle { pipe_id, is_write: false }));
+        table.insert((pid, wfd), alloc::boxed::Box::new(PipeHandle { pipe_id, is_write: true  }));
     }
     *p        = rfd as u32;
     *p.add(1) = wfd as u32;
