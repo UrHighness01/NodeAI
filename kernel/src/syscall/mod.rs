@@ -498,25 +498,44 @@ unsafe fn validate_user_ptr_mut(ptr: u64, len: u64) -> Result<*mut u8, i64> {
 
 unsafe fn sys_read(fd: u64, buf_ptr: u64, len: u64) -> i64 {
     if len == 0 { return 0; }
-    let buf = match validate_user_ptr_mut(buf_ptr, len) {
+    let safe_len = len.min(65536) as usize;
+    let buf = match validate_user_ptr_mut(buf_ptr, safe_len as u64) {
         Ok(p) => p,
         Err(e) => return e,
     };
 
-    // fd 0 = stdin: not implemented yet (no terminal emulator)
     match fd {
         0 => {
-            // Try PS/2 keyboard driver
+            // stdin: poll PS/2 keyboard
             if let Some(ev) = drivers::input::poll_event() {
                 if let Some(ch) = ev.ascii {
-                    let b = ch as u8;
-                    core::ptr::write(buf, b);
+                    core::ptr::write(buf, ch as u8);
                     return 1;
                 }
             }
-            0   // no data available (EAGAIN would be -11)
+            0   // no data available
         }
-        _ => EBADF,
+        _ => {
+            // Get handle pointer and drop the table lock before doing I/O
+            // (avoids holding the lock across a potentially blocking VFS read).
+            let pid = crate::scheduler::current_pid();
+            let handle_ptr: usize = {
+                let mut table = FD_TABLE.lock();
+                match table.get_mut(&(pid, fd)) {
+                    Some(h) => h as *mut alloc::boxed::Box<dyn crate::vfs::FileHandle> as usize,
+                    None    => return EBADF,
+                }
+            };
+            let h = &mut *(handle_ptr as *mut alloc::boxed::Box<dyn crate::vfs::FileHandle>);
+            let mut tmp = alloc::vec![0u8; safe_len];
+            match h.read(&mut tmp) {
+                Ok(n) => {
+                    core::ptr::copy_nonoverlapping(tmp.as_ptr(), buf, n);
+                    n as i64
+                }
+                Err(_) => EINVAL,
+            }
+        }
     }
 }
 
@@ -524,7 +543,6 @@ unsafe fn sys_read(fd: u64, buf_ptr: u64, len: u64) -> i64 {
 
 unsafe fn sys_write(fd: u64, buf_ptr: u64, len: u64) -> i64 {
     if len == 0 { return 0; }
-    // Cap at 64 KiB for a single write to limit kernel time.
     let safe_len = len.min(65536) as usize;
     let buf = match validate_user_ptr(buf_ptr, safe_len as u64) {
         Ok(p) => p,
@@ -535,13 +553,26 @@ unsafe fn sys_write(fd: u64, buf_ptr: u64, len: u64) -> i64 {
     match fd {
         1 | 2 => {
             // stdout / stderr → kernel log (serial + VGA)
-            // We write byte-by-byte to the logger to avoid format! allocation
             for &byte in slice {
                 crate::logger::write_byte(byte);
             }
             safe_len as i64
         }
-        _ => EBADF,
+        _ => {
+            let pid = crate::scheduler::current_pid();
+            let handle_ptr: usize = {
+                let mut table = FD_TABLE.lock();
+                match table.get_mut(&(pid, fd)) {
+                    Some(h) => h as *mut alloc::boxed::Box<dyn crate::vfs::FileHandle> as usize,
+                    None    => return EBADF,
+                }
+            };
+            let h = &mut *(handle_ptr as *mut alloc::boxed::Box<dyn crate::vfs::FileHandle>);
+            match h.write(slice) {
+                Ok(n)  => n as i64,
+                Err(_) => EINVAL,
+            }
+        }
     }
 }
 
