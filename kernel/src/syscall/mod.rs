@@ -50,6 +50,10 @@ static NEXT_FD:  Mutex<BTreeMap<u64, u64>> = Mutex::new(BTreeMap::new());
 /// Bound port for socket fds — separate from FD_TABLE to avoid trait-object downcast.
 static SOCKET_PORTS: Mutex<BTreeMap<FdKey, u16>> = Mutex::new(BTreeMap::new());
 
+/// VfsNode for directory fds — used by getdents64 to call readdir().
+static DIR_NODES: spin::Mutex<BTreeMap<FdKey, alloc::sync::Arc<dyn crate::vfs::VfsNode>>>
+    = spin::Mutex::new(BTreeMap::new());
+
 /// Allocate the next available fd for a given pid (first-fit above 2).
 fn alloc_fd(pid: u64) -> u64 {
     let mut map = NEXT_FD.lock();
@@ -862,6 +866,11 @@ unsafe fn sys_open(path_ptr: u64, path_len: u64, _flags: u64) -> i64 {
     };
     let pid = crate::scheduler::current_pid();
     let fd  = alloc_fd(pid);
+    // For directories: also store the VfsNode for getdents64 readdir calls.
+    let is_dir = node.stat().map(|s| s.is_dir).unwrap_or(false);
+    if is_dir {
+        DIR_NODES.lock().insert((pid, fd), node);
+    }
     FD_TABLE.lock().insert((pid, fd), handle);
     fd as i64
 }
@@ -870,6 +879,7 @@ unsafe fn sys_open(path_ptr: u64, path_len: u64, _flags: u64) -> i64 {
 
 unsafe fn sys_close(fd: u64) -> i64 {
     let pid = crate::scheduler::current_pid();
+    DIR_NODES.lock().remove(&(pid, fd)); // no-op if not a directory
     if FD_TABLE.lock().remove(&(pid, fd)).is_some() { 0 } else { EBADF }
 }
 
@@ -991,34 +1001,68 @@ unsafe fn sys_munmap(addr: u64, len: u64) -> i64 {
 
 // ── sys_getdents64 ───────────────────────────────────────────────────────────
 //
-// Fills a user buffer with linux_dirent64 records for the given fd (must be a dir).
-// linux_dirent64 layout:
-//    u64  d_ino
-//    i64  d_off
-//    u16  d_reclen
-//    u8   d_type  (4 = DT_DIR, 8 = DT_REG)
-//    char d_name[...] (null-terminated, padded)
-
+// linux_dirent64 layout (packed, variable-length records):
+//   u64  d_ino     (8 bytes)
+//   i64  d_off     (8 bytes — offset of NEXT entry, or u64::MAX for last)
+//   u16  d_reclen  (2 bytes — total record size including name + null + padding)
+//   u8   d_type    (1 byte  — DT_REG=8, DT_DIR=4, DT_UNKNOWN=0)
+//   char d_name[]  (null-terminated, padded to 8-byte alignment)
+//   Total header before name: 19 bytes.
 unsafe fn sys_getdents64(fd: u64, buf_ptr: u64, buf_len: u64) -> i64 {
     let pid = crate::scheduler::current_pid();
-    let mut table = FD_TABLE.lock();
-    let handle = match table.get_mut(&(pid, fd)) {
-        Some(h) => h,
+    // Look up the VfsNode stored at open() time.
+    let node = {
+        let nodes = DIR_NODES.lock();
+        nodes.get(&(pid, fd)).cloned()
+    };
+    let node = match node {
+        Some(n) => n,
         None    => return EBADF,
     };
-    let stat = match handle.stat() {
-        Ok(s) if s.is_dir => s,
-        _ => return EBADF,
+    let entries = match node.readdir() {
+        Ok(e)  => e,
+        Err(_) => return ENOTDIR,
     };
 
-    // Re-open via VFS to read directory entries (current file handle may be dir handle).
-    // For simplicity, use ino to look up path — not ideal but functional for procfs.
-    let _ = stat;
+    let buf = match validate_user_ptr_mut(buf_ptr, buf_len) {
+        Ok(p)  => p,
+        Err(e) => return e,
+    };
+    let buf_end = buf_ptr + buf_len;
+    let mut pos: u64 = buf_ptr;
+    let mut total: i64 = 0;
 
-    // Write a minimal response: write zero bytes (empty directory iteration).
-    let _ = (buf_ptr, buf_len);
-    0
+    for (idx, entry) in entries.iter().enumerate() {
+        let name_bytes = entry.name.as_bytes();
+        let name_len   = name_bytes.len();
+        // reclen = 8+8+2+1 + name_len+1, rounded up to next 8-byte boundary
+        let raw_len = 19usize + name_len + 1;
+        let reclen  = (raw_len + 7) & !7;
+        if pos + reclen as u64 > buf_end { break; }
+
+        let p = pos as *mut u8;
+        // d_ino (8)
+        (p as *mut u64).write_unaligned(entry.ino);
+        // d_off (8) — offset of next record
+        ((p as u64 + 8) as *mut i64).write_unaligned(
+            (idx + 1) as i64 * reclen as i64
+        );
+        // d_reclen (2)
+        ((p as u64 + 16) as *mut u16).write_unaligned(reclen as u16);
+        // d_type (1)
+        *p.add(18) = if entry.is_dir { 4 } else { 8 };
+        // d_name (null-terminated, zero-padded to reclen)
+        let name_dst = p.add(19);
+        core::ptr::write_bytes(name_dst, 0, reclen - 19);
+        core::ptr::copy_nonoverlapping(name_bytes.as_ptr(), name_dst, name_len);
+
+        pos   += reclen as u64;
+        total += reclen as i64;
+    }
+    total
 }
+
+const ENOTDIR: i64 = -20;
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  Phase 18 — Ring-3 Process Launch
@@ -1377,14 +1421,16 @@ unsafe fn sys_uname(buf_ptr: u64) -> i64 {
 }
 
 // ── sys_nanosleep ─────────────────────────────────────────────────────────────
+// Previously busy-spun — now yields the CPU per tick so other tasks run.
 unsafe fn sys_nanosleep(req_ptr: u64, _rem_ptr: u64) -> i64 {
     if req_ptr == 0 { return EFAULT; }
     let secs  = *(req_ptr as *const u64);
     let nsecs = *((req_ptr + 8) as *const u64);
     let ms    = secs * 1000 + nsecs / 1_000_000;
-    let start = crate::scheduler::uptime_ms();
-    while crate::scheduler::uptime_ms().wrapping_sub(start) < ms {
-        core::hint::spin_loop();
+    if ms == 0 { return 0; }
+    let deadline = crate::scheduler::uptime_ms() + ms;
+    while crate::scheduler::uptime_ms() < deadline {
+        crate::scheduler::yield_cpu(); // hand CPU to other tasks while sleeping
     }
     0
 }
