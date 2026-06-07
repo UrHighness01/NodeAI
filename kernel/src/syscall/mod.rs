@@ -752,9 +752,24 @@ unsafe fn sys_mmap(addr: u64, len: u64, prot: u64, flags: u64, _fd: i64, _offset
 
 // ── sys_munmap ───────────────────────────────────────────────────────────────
 
-unsafe fn sys_munmap(_addr: u64, _len: u64) -> i64 {
-    // TODO: unmap the pages with vmm::unmap_page when a full TLB shootdown is ready.
-    // For now accept the call silently (no-op is safe — pages remain but that's OK for early POSIX).
+unsafe fn sys_munmap(addr: u64, len: u64) -> i64 {
+    if len == 0 { return 0; }
+    use x86_64::structures::paging::{Page, Size4KiB};
+    use x86_64::VirtAddr;
+
+    let page_sz = crate::memory::PAGE_SIZE;
+    let addr_aligned = addr & !(page_sz - 1);
+    let pages = (len + page_sz - 1) / page_sz;
+
+    for i in 0..pages {
+        let virt = addr_aligned + i * page_sz;
+        let page: Page<Size4KiB> = Page::containing_address(VirtAddr::new(virt));
+        if let Ok(frame) = crate::memory::vmm::unmap_page(page) {
+            // Free the backing physical frame.
+            unsafe { crate::memory::pmm::free_frame(frame.start_address().as_u64()); }
+        }
+        // If unmap_page fails the page was never mapped — not an error (POSIX says so).
+    }
     0
 }
 
@@ -999,9 +1014,32 @@ unsafe fn sys_fork() -> i64 {
 }
 
 // ── sys_wait4 ────────────────────────────────────────────────────────────────
-unsafe fn sys_wait4(_pid: i32, wstatus_ptr: u64, _options: u64) -> i64 {
+unsafe fn sys_wait4(_pid: i32, wstatus_ptr: u64, options: u64) -> i64 {
+    const WNOHANG: u64 = 1;
     let parent_pid = crate::scheduler::current_pid();
-    match crate::scheduler::wait_for_child(parent_pid) {
+
+    // Check immediately for a zombie child.
+    if let Some((child_pid, code)) = crate::scheduler::reap_zombie_child(parent_pid) {
+        if wstatus_ptr != 0 {
+            if let Ok(p) = validate_user_ptr_mut(wstatus_ptr, 4) {
+                let status: i32 = (code & 0xFF) << 8;
+                *(p as *mut i32) = status;
+            }
+        }
+        return child_pid as i64;
+    }
+
+    // WNOHANG: don't block, return 0 immediately if no zombie.
+    if options & WNOHANG != 0 {
+        return 0;
+    }
+
+    // Sleep until a child exits and wakes us.
+    crate::scheduler::sleep_current();
+    crate::scheduler::yield_cpu();
+
+    // Re-check after wakeup.
+    match crate::scheduler::reap_zombie_child(parent_pid) {
         Some((child_pid, code)) => {
             if wstatus_ptr != 0 {
                 if let Ok(p) = validate_user_ptr_mut(wstatus_ptr, 4) {
@@ -1011,7 +1049,7 @@ unsafe fn sys_wait4(_pid: i32, wstatus_ptr: u64, _options: u64) -> i64 {
             }
             child_pid as i64
         }
-        None => -10, // ECHILD
+        None => -10, // ECHILD (no children)
     }
 }
 
@@ -1711,24 +1749,43 @@ const FUTEX_WAIT:    i32 = 0;
 const FUTEX_WAKE:    i32 = 1;
 const FUTEX_PRIVATE: i32 = 128;
 
+/// Futex wait queue: uaddr → list of sleeping PIDs.
+static FUTEX_WAITERS: spin::Mutex<alloc::collections::BTreeMap<u64, alloc::vec::Vec<u64>>>
+    = spin::Mutex::new(alloc::collections::BTreeMap::new());
+
 unsafe fn sys_futex(uaddr: u64, op: i32, val: u32, _timeout: u64) -> i64 {
     let op_code = op & !FUTEX_PRIVATE;
     match op_code {
         FUTEX_WAIT => {
             if uaddr == 0 { return EFAULT; }
-            let cur = *(uaddr as *const u32);
-            if cur != val { return -11; } // EAGAIN
-            let start = crate::scheduler::uptime_ms();
-            while *(uaddr as *const u32) == val {
-                core::hint::spin_loop();
-                if crate::scheduler::uptime_ms().wrapping_sub(start) > 1 {
-                    return -110; // ETIMEDOUT
-                }
-            }
+            // Atomically check *uaddr == val; if not, return EAGAIN.
+            let cur = core::ptr::read_volatile(uaddr as *const u32);
+            if cur != val { return EAGAIN; }
+            // Register this task in the futex wait queue then sleep.
+            let pid = crate::scheduler::current_pid();
+            FUTEX_WAITERS.lock().entry(uaddr).or_default().push(pid);
+            crate::scheduler::sleep_current();
+            crate::scheduler::yield_cpu();
             0
         }
-        FUTEX_WAKE => 0,
-        _          => ENOSYS,
+        FUTEX_WAKE => {
+            // Wake up to `val` waiters on this address.
+            let to_wake = val as usize;
+            let pids: alloc::vec::Vec<u64> = {
+                let mut wq = FUTEX_WAITERS.lock();
+                if let Some(list) = wq.get_mut(&uaddr) {
+                    let woke: alloc::vec::Vec<u64> = list.drain(..list.len().min(to_wake)).collect();
+                    if list.is_empty() { wq.remove(&uaddr); }
+                    woke
+                } else {
+                    alloc::vec::Vec::new()
+                }
+            };
+            let n = pids.len() as i64;
+            for pid in pids { crate::scheduler::wake_pid(pid); }
+            n
+        }
+        _ => ENOSYS,
     }
 }
 
@@ -1755,14 +1812,66 @@ unsafe fn sys_eventfd2(_initval: u64, _flags: i32) -> i64 {
     alloc_fd(pid) as i64
 }
 
-// ── sys_poll / sys_select ─────────────────────────────────────────────────────
-unsafe fn sys_poll(_fds: u64, _nfds: u64, timeout_ms: i32) -> i64 {
-    if timeout_ms > 0 {
-        let start = crate::scheduler::uptime_ms();
-        let wait = (timeout_ms as u64).min(10);
-        while crate::scheduler::uptime_ms().wrapping_sub(start) < wait { core::hint::spin_loop(); }
+// ── sys_poll ─────────────────────────────────────────────────────────────────
+// struct pollfd: fd(i32)+events(i16)+revents(i16) = 8 bytes, but compiler may pad.
+// Linux packs it tightly; we use byte offsets.
+const POLLIN:  u16 = 0x0001;
+const POLLOUT: u16 = 0x0004;
+const POLLERR: u16 = 0x0008;
+
+unsafe fn sys_poll(fds_ptr: u64, nfds: u64, timeout_ms: i32) -> i64 {
+    if fds_ptr == 0 || nfds == 0 { return 0; }
+    let struct_sz: u64 = 8; // sizeof(struct pollfd)
+    let buf_len = nfds.saturating_mul(struct_sz);
+    let buf = match validate_user_ptr_mut(fds_ptr, buf_len) {
+        Ok(p)  => p,
+        Err(e) => return e,
+    };
+    let pid = crate::scheduler::current_pid();
+    let deadline = if timeout_ms < 0 {
+        u64::MAX
+    } else {
+        crate::scheduler::uptime_ms() + timeout_ms as u64
+    };
+
+    loop {
+        let mut ready = 0i64;
+        for i in 0..nfds {
+            let entry = buf.add((i * struct_sz) as usize);
+            let fd    = core::ptr::read_unaligned(entry as *const i32) as u64;
+            let events= core::ptr::read_unaligned(entry.add(4) as *const u16);
+            // Clear revents
+            core::ptr::write_unaligned(entry.add(6) as *mut u16, 0);
+            if fd as i32 < 0 { continue; }
+
+            let mut revents: u16 = 0;
+            // fd=1/2: always writable
+            if fd == 1 || fd == 2 {
+                if events & POLLOUT != 0 { revents |= POLLOUT; }
+            } else {
+                // Check if handle has data (for sockets: peek rx_buf len)
+                let has_data = {
+                    let mut table = FD_TABLE.lock();
+                    if let Some(h) = table.get_mut(&(pid, fd)) {
+                        let mut tmp = [0u8; 1];
+                        match h.read(&mut tmp) {
+                            Ok(n) if n > 0 => true,
+                            _ => false,
+                        }
+                    } else { false }
+                };
+                if events & POLLIN  != 0 && has_data { revents |= POLLIN;  }
+                if events & POLLOUT != 0              { revents |= POLLOUT; }
+            }
+            if revents != 0 {
+                core::ptr::write_unaligned(entry.add(6) as *mut u16, revents);
+                ready += 1;
+            }
+        }
+        if ready > 0 || crate::scheduler::uptime_ms() >= deadline { return ready; }
+        // Yield and retry.
+        crate::scheduler::yield_cpu();
     }
-    0
 }
 unsafe fn sys_select(_n: i32, _r: u64, _w: u64, _e: u64, tv: u64) -> i64 {
     if tv != 0 {

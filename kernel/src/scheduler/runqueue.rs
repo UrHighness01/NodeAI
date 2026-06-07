@@ -81,6 +81,15 @@ pub fn current_pid() -> Option<Pid> {
     RUNQUEUE.lock().current()
 }
 
+/// Remove a PID from the queue (e.g. when putting a task to sleep).
+pub fn remove(pid: Pid) {
+    let mut rq = RUNQUEUE.lock();
+    rq.queue.retain(|&p| p != pid);
+    if rq.current_pid == Some(pid) {
+        rq.current_pid = None;
+    }
+}
+
 /// Called from the APIC timer interrupt.
 /// Returns the next `Pid` to switch to if preemption is needed.
 pub fn tick() -> Option<Pid> {

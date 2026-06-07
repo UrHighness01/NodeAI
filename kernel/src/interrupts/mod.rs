@@ -75,10 +75,48 @@ extern "x86-interrupt" fn page_fault_handler(
     let cr2 = x86_64::registers::control::Cr2::read()
         .map(|a| a.as_u64())
         .unwrap_or(0xdeadbeef);
-    crate::klog!(ERROR, "#PF {:#x} (code {:?}) ip={:#x}",
-        cr2, error_code, frame.instruction_pointer.as_u64(),
-    );
-    // TODO Phase 3: hand off to VMM demand-paging / CoW handler
+
+    // Demand-paging: attempt to map the faulting page if it falls in a
+    // valid user region (heap or stack).  Kernel faults are always fatal.
+    let ip  = frame.instruction_pointer.as_u64();
+    let is_user = error_code.contains(PageFaultErrorCode::USER_MODE);
+    let is_present = error_code.contains(PageFaultErrorCode::PROTECTION_VIOLATION);
+
+    if is_user && !is_present {
+        // Not-present fault in user mode — try demand allocation.
+        let page_sz = crate::memory::PAGE_SIZE;
+        let page_virt = cr2 & !(page_sz - 1);
+        let pid = crate::scheduler::current_pid();
+        let brk = crate::scheduler::get_user_brk(pid);
+
+        // Valid regions: heap (0x40_0000_0000 .. brk) and stack (7FFF_F800_0000 .. 7FFF_FFFF_F000)
+        const HEAP_BASE:    u64 = 0x0000_0040_0000_0000;
+        const STACK_BOTTOM: u64 = 0x0000_7FFF_F000_0000;
+        const STACK_TOP:    u64 = 0x0000_7FFF_FFFF_F000;
+
+        let in_heap  = brk > HEAP_BASE && page_virt >= HEAP_BASE && page_virt < brk;
+        let in_stack = page_virt >= STACK_BOTTOM && page_virt < STACK_TOP;
+
+        if in_heap || in_stack {
+            match crate::memory::map_user_range(page_virt, page_sz, true, false) {
+                Ok(()) => {
+                    crate::klog!(DEBUG, "#PF demand-map {:#x} ok (pid={})", page_virt, pid);
+                    return; // handled — resume faulting instruction
+                }
+                Err(e) => {
+                    crate::klog!(ERROR, "#PF demand-map {:#x} failed: {}", page_virt, e);
+                }
+            }
+        }
+        // Address is out of valid range — kill the process.
+        crate::klog!(ERROR, "#PF SIGSEGV pid={} addr={:#x} ip={:#x}", pid, cr2, ip);
+        crate::scheduler::kill_task(pid, -11); // SIGSEGV = 11
+        crate::scheduler::yield_cpu();
+        return;
+    }
+
+    // Kernel fault or protection violation — unrecoverable.
+    crate::klog!(ERROR, "#PF FATAL {:#x} (code {:?}) ip={:#x}", cr2, error_code, ip);
     loop { x86_64::instructions::hlt(); }
 }
 

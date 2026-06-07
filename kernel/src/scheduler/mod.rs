@@ -146,6 +146,32 @@ pub fn yield_cpu() {
     x86_64::instructions::interrupts::enable();
 }
 
+/// Put the current task to sleep (remove from run queue).
+/// The task will not be scheduled again until `wake_pid` is called.
+/// Caller must yield immediately after to hand off the CPU.
+pub fn sleep_current() {
+    if let Some(pid) = runqueue::current_pid() {
+        let mut tasks = TASKS.lock();
+        if let Some(t) = tasks.get_mut(&pid) {
+            t.state = crate::scheduler::task::TaskState::Sleeping;
+        }
+        runqueue::remove(pid);
+    }
+}
+
+/// Wake a sleeping task — mark Runnable and re-add to run queue.
+/// No-op if the task is not sleeping.
+pub fn wake_pid(pid: Pid) {
+    let mut tasks = TASKS.lock();
+    if let Some(t) = tasks.get_mut(&pid) {
+        if t.state == crate::scheduler::task::TaskState::Sleeping {
+            t.state = crate::scheduler::task::TaskState::Runnable;
+            drop(tasks);
+            runqueue::enqueue(pid);
+        }
+    }
+}
+
 /// Return the PID of the currently running task, or 1 (init) as default.
 pub fn current_pid() -> Pid {
     runqueue::current_pid().unwrap_or(1)
@@ -156,21 +182,45 @@ pub fn task_count() -> usize {
     TASKS.lock().len()
 }
 
-/// Mark the current task as a zombie and yield the CPU.
-/// This is called from `sys_exit`; control does not return here.
+/// Mark the current task as a zombie, wake a waiting parent, and halt.
+/// Called from `sys_exit`; never returns.
 pub fn exit_current(code: i32) -> ! {
-    crate::klog!(INFO, "Scheduler: exit_current(code={}) — halting task", code);
-    // Mark task zombie in the task table if we can identify it.
-    if let Some(pid) = runqueue::current_pid() {
+    crate::klog!(INFO, "Scheduler: exit_current(code={})", code);
+    let parent_pid = if let Some(pid) = runqueue::current_pid() {
         let mut tasks = TASKS.lock();
+        let ppid = tasks.get(&pid).map(|t| t.parent_pid).unwrap_or(0);
         if let Some(task) = tasks.get_mut(&pid) {
             task.state     = crate::scheduler::task::TaskState::Zombie;
             task.exit_code = Some(code);
         }
+        drop(tasks);
+        runqueue::remove(pid);
+        ppid
+    } else {
+        0
+    };
+
+    // Wake the parent if it is sleeping in wait4.
+    if parent_pid != 0 {
+        wake_pid(parent_pid);
     }
-    loop {
-        x86_64::instructions::hlt();
+
+    loop { x86_64::instructions::hlt(); }
+}
+
+/// Find and remove one zombie child of `parent_pid`.
+/// Returns `(child_pid, exit_code)` if found, `None` otherwise.
+pub fn reap_zombie_child(parent_pid: Pid) -> Option<(Pid, i32)> {
+    let mut tasks = TASKS.lock();
+    let entry = tasks
+        .iter()
+        .find(|(_, t)| t.parent_pid == parent_pid
+            && t.state == crate::scheduler::task::TaskState::Zombie)
+        .map(|(&pid, t)| (pid, t.exit_code.unwrap_or(0)));
+    if let Some((cpid, _)) = entry {
+        tasks.remove(&cpid);
     }
+    entry
 }
 
 /// Fork: create a shallow clone of `parent_pid` and return the new child PID.
@@ -186,35 +236,6 @@ pub fn fork_task(parent_pid: Pid) -> Option<Pid> {
     Some(child_pid)
 }
 
-/// Wait for any zombie child of `parent_pid`.  Returns (child_pid, exit_code).
-/// Spins (without yielding CPU) until a zombie child is found or timeout.
-pub fn wait_for_child(parent_pid: Pid) -> Option<(Pid, i32)> {
-    // Up to 10 seconds of spinning at 100 Hz ticks (1 000 000 iterations).
-    for _ in 0..1_000_000u32 {
-        let result = {
-            let mut tasks = TASKS.lock();
-            let child_entry = tasks
-                .iter()
-                .find(|(_, t)| t.parent_pid == parent_pid
-                    && t.state == crate::scheduler::task::TaskState::Zombie)
-                .map(|(&pid, t)| (pid, t.exit_code.unwrap_or(0)));
-            if let Some((cpid, code)) = child_entry {
-                tasks.remove(&cpid);
-                Some((cpid, code))
-            } else {
-                None
-            }
-        };
-        if result.is_some() {
-            return result;
-        }
-        // Light pause to avoid hammering the lock
-        for _ in 0..1000u32 {
-            core::hint::spin_loop();
-        }
-    }
-    None
-}
 
 /// Set the user-space program break for `pid`.
 pub fn set_user_brk(pid: Pid, brk: u64) {
