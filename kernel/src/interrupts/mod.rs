@@ -163,10 +163,16 @@ extern "x86-interrupt" fn segment_not_present_handler(frame: InterruptStackFrame
 /// Push order (first push = highest addr, last push = lowest addr):
 ///   rax, rcx, rdx, rsi, rdi, r8, r9, r10, r11, rbx, rbp, r12, r13, r14, r15
 /// So after all pushes: rsp → r15 slot (offset 0), rax slot is at offset +112.
+/// Offset of fpu_ptr within PercpuData (gs-relative).
+/// gs:0=self_ptr, gs:8=cpu_id+pad, gs:16=kernel_rsp, gs:24=user_rsp,
+/// gs:32=ticks_per_ms+pad, gs:40=signal_new_rip, gs:48=signal_new_rsp,
+/// gs:56=signal_new_rflags, gs:64=signal_signum, gs:72=fpu_ptr.
+const GS_FPU_PTR: usize = 72;
+
 #[naked]
 unsafe extern "C" fn timer_handler() {
     core::arch::asm!(
-        // Save all GPRs (in order matching FRAME_* offsets in task.rs).
+        // ── Save GPRs ─────────────────────────────────────────────────────
         "push rax",
         "push rcx",
         "push rdx",
@@ -182,13 +188,28 @@ unsafe extern "C" fn timer_handler() {
         "push r13",
         "push r14",
         "push r15",
-        // Call schedule_from_interrupt(old_rsp=rsp).
-        // System V: first arg in rdi, return in rax.
+
+        // ── Save FPU/SSE state (fxsave64) ─────────────────────────────────
+        // r11 is already saved on stack; safe to use as scratch here.
+        "mov r11, qword ptr gs:[{fpu_off}]", // load fpu_ptr (0 if not yet set)
+        "test r11, r11",
+        "jz 1f",
+        "fxsave64 [r11]",
+        "1:",
+
+        // ── Schedule ─────────────────────────────────────────────────────
         "mov rdi, rsp",
-        "call {schedule}",
-        // rax = new_rsp (may equal old rsp if no switch).
+        "call {schedule}",         // rax = new_rsp; also updates gs:fpu_ptr
         "mov rsp, rax",
-        // Restore all GPRs from new stack.
+
+        // ── Restore FPU/SSE state (fxrstor64) ─────────────────────────────
+        "mov r11, qword ptr gs:[{fpu_off}]", // new task's fpu_ptr
+        "test r11, r11",
+        "jz 2f",
+        "fxrstor64 [r11]",
+        "2:",
+
+        // ── Restore GPRs and return ────────────────────────────────────────
         "pop r15",
         "pop r14",
         "pop r13",
@@ -204,9 +225,10 @@ unsafe extern "C" fn timer_handler() {
         "pop rdx",
         "pop rcx",
         "pop rax",
-        // Return to the task (new or same) via IRETQ.
         "iretq",
+
         schedule = sym crate::scheduler::schedule_from_interrupt,
+        fpu_off  = const GS_FPU_PTR,
         options(noreturn),
     );
 }

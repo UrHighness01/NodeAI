@@ -107,6 +107,7 @@ pub const MSR_PLATFORM_INFO:u32 = 0x0000_00CE;
 /// gs:48  signal_new_rsp    u64
 /// gs:56  signal_new_rflags u64
 /// gs:64  signal_signum     u64  (signum → handler's rdi)
+/// gs:72  fpu_ptr           u64  (ptr to current task's 512-byte FXSAVE area)
 #[repr(C)]
 pub struct PercpuData {
     pub self_ptr:  u64,
@@ -116,13 +117,14 @@ pub struct PercpuData {
     pub user_rsp:   u64,
     pub ticks_per_ms: u32,
     pub _pad2:     u32,
-    /// Set by maybe_deliver_signal / sys_rt_sigreturn to override the RIP
-    /// returned to user space by SYSRETQ.  0 means no override.
     pub signal_new_rip:    u64,
     pub signal_new_rsp:    u64,
     pub signal_new_rflags: u64,
-    /// Signum passed to the handler in RDI (only meaningful when signal_new_rip != 0).
     pub signal_signum:     u64,
+    /// Pointer to the current task's 512-byte, 16-byte-aligned FXSAVE area.
+    /// Updated by schedule_from_interrupt on every context switch.
+    /// 0 before the first switch — timer handler skips save/restore if zero.
+    pub fpu_ptr: u64,
 }
 
 /// Set the GS base to point at a per-CPU data structure.

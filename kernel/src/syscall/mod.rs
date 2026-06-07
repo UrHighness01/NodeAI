@@ -223,6 +223,7 @@ static mut BOOT_PERCPU: PercpuData = PercpuData {
     signal_new_rsp:    0,
     signal_new_rflags: 0,
     signal_signum:     0,
+    fpu_ptr:           0, // set to boot task's FPU area during init_lstar
 };
 
 // ── Assembly syscall entry stub ───────────────────────────────────────────────

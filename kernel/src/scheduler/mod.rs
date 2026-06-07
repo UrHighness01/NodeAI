@@ -99,8 +99,6 @@ pub unsafe extern "C" fn schedule_from_interrupt(old_rsp: u64) -> u64 {
     // Step 4: set up the incoming task and return its kernel RSP.
     crate::klog!(TRACE, "Scheduler: {:?} → {}", old_pid, next_pid);
 
-    // Log BEFORE loading new CR3 — after the load, old stack may be unmapped
-    // (matters once per-process page tables are active).
     let next_rsp = {
         let mut tasks = TASKS.lock();
         match tasks.get_mut(&next_pid) {
@@ -110,7 +108,11 @@ pub unsafe extern "C" fn schedule_from_interrupt(old_rsp: u64) -> u64 {
                 let cr3    = t.cr3;
                 let fs     = t.fs_base;
                 let rsp    = t.saved_kernel_rsp;
-                // Load new page table last — after all stack accesses.
+                // Point percpu fpu_ptr at the new task's FPU state area.
+                let fpu_ptr = &mut t.fpu_state as *mut _ as u64;
+                let cpu = hal::arch_x86_64::gs_cpu_data();
+                (*cpu).fpu_ptr = fpu_ptr;
+                // Load CR3 last — after all stack accesses.
                 core::arch::asm!("mov cr3, {}", in(reg) cr3, options(nostack, nomem));
                 if fs != 0 {
                     x86_64::registers::model_specific::FsBase::write(

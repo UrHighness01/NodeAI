@@ -3,6 +3,27 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
+/// 512-byte FXSAVE area — saves x87 FPU + SSE state.
+/// Must be 16-byte aligned; repr(C,align(16)) ensures this.
+#[repr(C, align(16))]
+#[derive(Clone, Copy)]
+pub struct FpuState(pub [u8; 512]);
+
+impl FpuState {
+    /// A valid reset state: FCW=0x037F (all exceptions masked), MXCSR=0x1F80.
+    /// Captured once at boot via capture_init_fpu_state() and copied to every new task.
+    pub const fn default_state() -> Self {
+        let mut s = [0u8; 512];
+        // x87 FCW: offset 0, value 0x037F (little-endian)
+        s[0] = 0x7F; s[1] = 0x03;
+        // MXCSR: offset 24, value 0x00001F80
+        s[24] = 0x80; s[25] = 0x1F;
+        // MXCSR_MASK: offset 28, value 0xFFFF
+        s[28] = 0xFF; s[29] = 0xFF;
+        Self(s)
+    }
+}
+
 // ── Synthetic interrupt-frame layout constants ────────────────────────────────
 //
 // The naked timer handler pushes GPRs in this order (first push is highest addr):
@@ -116,6 +137,8 @@ pub struct Task {
     pub exit_code: Option<i32>,
     /// Pending signal bitmap (bit N = signal N is pending delivery).
     pub pending_signals: u64,
+    /// Per-task FPU/SSE state — saved/restored by the timer handler via fxsave64/fxrstor64.
+    pub fpu_state: FpuState,
     /// User-space program break (top of heap) for sys_brk.
     pub user_brk: u64,
     /// Thread-local storage FS base (ARCH_SET_FS).
@@ -182,6 +205,7 @@ impl Task {
             parent_pid:      0,
             exit_code:       None,
             pending_signals: 0,
+            fpu_state:       FpuState::default_state(),
             user_brk:        0,
             fs_base:         0,
         }
@@ -232,6 +256,7 @@ impl Task {
             parent_pid:       self.pid,
             exit_code:        None,
             pending_signals:  0,
+            fpu_state:        self.fpu_state, // copy parent's FPU state to child
             user_brk:         self.user_brk,
             fs_base:          self.fs_base,
         })
