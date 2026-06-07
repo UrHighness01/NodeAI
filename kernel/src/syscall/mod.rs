@@ -29,12 +29,14 @@ use hal::arch_x86_64::{
 };
 
 // ── Error numbers (POSIX subset) ──────────────────────────────────────────────
-pub const EPERM:   i64 = -1;
-pub const ENOENT:  i64 = -2;
-pub const EBADF:   i64 = -9;
-pub const EFAULT:  i64 = -14;
-pub const EINVAL:  i64 = -22;
-pub const ENOSYS:  i64 = -38;
+pub const EPERM:    i64 = -1;
+pub const ENOENT:   i64 = -2;
+pub const EBADF:    i64 = -9;
+pub const EFAULT:   i64 = -14;
+pub const EINVAL:   i64 = -22;
+pub const EAGAIN:   i64 = -11;
+pub const ENOTSOCK: i64 = -88;
+pub const ENOSYS:   i64 = -38;
 
 // ── Global file-descriptor table ─────────────────────────────────────────────
 //
@@ -45,6 +47,8 @@ type FdKey = (u64, u64);
 static FD_TABLE: Mutex<BTreeMap<FdKey, alloc::boxed::Box<dyn crate::vfs::FileHandle>>>
     = Mutex::new(BTreeMap::new());
 static NEXT_FD:  Mutex<BTreeMap<u64, u64>> = Mutex::new(BTreeMap::new());
+/// Bound port for socket fds — separate from FD_TABLE to avoid trait-object downcast.
+static SOCKET_PORTS: Mutex<BTreeMap<FdKey, u16>> = Mutex::new(BTreeMap::new());
 
 /// Allocate the next available fd for a given pid (first-fit above 2).
 fn alloc_fd(pid: u64) -> u64 {
@@ -1773,8 +1777,8 @@ unsafe fn sys_select(_n: i32, _r: u64, _w: u64, _e: u64, tv: u64) -> i64 {
 const AF_INET:     u64 = 2;
 const SOCK_STREAM: u64 = 1;
 
-struct SocketHandle { _d: u8 }
-impl SocketHandle { const fn new() -> Self { Self { _d: 0 } } }
+/// Listening socket fd — placeholder in FD_TABLE; bound port lives in SOCKET_PORTS.
+struct SocketHandle;
 impl crate::vfs::FileHandle for SocketHandle {
     fn read(&mut self,  b: &mut [u8]) -> crate::vfs::VfsResult<usize> { let _ = b; Ok(0) }
     fn write(&mut self, b: &[u8])     -> crate::vfs::VfsResult<usize> { Ok(b.len()) }
@@ -1784,22 +1788,88 @@ impl crate::vfs::FileHandle for SocketHandle {
     }
 }
 
+/// Connected socket fd — wraps a TcpSocketKey for an Established connection.
+struct ConnectedSocketHandle {
+    local_port:  u16,
+    remote_ip:   [u8; 4],
+    remote_port: u16,
+}
+impl crate::vfs::FileHandle for ConnectedSocketHandle {
+    fn read(&mut self, buf: &mut [u8]) -> crate::vfs::VfsResult<usize> {
+        Ok(crate::net::tcp::recv(self.local_port, self.remote_ip, self.remote_port, buf))
+    }
+    fn write(&mut self, buf: &[u8]) -> crate::vfs::VfsResult<usize> {
+        let n = crate::net::tcp::send(self.local_port, self.remote_ip, self.remote_port, buf);
+        Ok(n)
+    }
+    fn seek(&mut self, _: u64) -> crate::vfs::VfsResult<u64> { Ok(0) }
+    fn stat(&self) -> crate::vfs::VfsResult<crate::vfs::Stat> {
+        Ok(crate::vfs::Stat { ino: 0, size: 0, is_dir: false, nlink: 1, uid: 0, gid: 0, mode: 0o600 })
+    }
+}
+
 unsafe fn sys_socket(domain: u64, sock_type: u64, _proto: u64) -> i64 {
     if domain == AF_INET && (sock_type & 0xF) == SOCK_STREAM {
         let pid = crate::scheduler::current_pid();
         let fd  = alloc_fd(pid);
-        FD_TABLE.lock().insert((pid, fd), alloc::boxed::Box::new(SocketHandle::new()));
+        FD_TABLE.lock().insert((pid, fd), alloc::boxed::Box::new(SocketHandle));
         return fd as i64;
     }
     ENOSYS
 }
+
 unsafe fn sys_connect(_sockfd: u64, addr_ptr: u64, _alen: u64) -> i64 {
     if addr_ptr == 0 { return EFAULT; }
-    0 // stub: connection assumed success
+    0 // stub: outbound connect not yet implemented
 }
-unsafe fn sys_bind(_s: u64, _a: u64, _l: u64) -> i64 { 0 }
-unsafe fn sys_listen(_s: u64, _b: u64) -> i64 { 0 }
-unsafe fn sys_accept(_s: u64, _a: u64, _l: u64) -> i64 { ENOSYS }
+
+/// Parse port from sockaddr_in: family(u16) + port(u16 big-endian) at offset 2.
+unsafe fn sys_bind(sockfd: u64, addr_ptr: u64, alen: u64) -> i64 {
+    if addr_ptr == 0 || alen < 4 { return EFAULT; }
+    let p = match validate_user_ptr(addr_ptr, 4) {
+        Ok(p)  => p,
+        Err(e) => return e,
+    };
+    let port_be = core::ptr::read_unaligned(p.add(2) as *const u16);
+    let port = u16::from_be(port_be);
+    let pid = crate::scheduler::current_pid();
+    // Verify the fd exists before recording the port.
+    if !FD_TABLE.lock().contains_key(&(pid, sockfd)) { return EBADF; }
+    SOCKET_PORTS.lock().insert((pid, sockfd), port);
+    0
+}
+
+unsafe fn sys_listen(sockfd: u64, _backlog: u64) -> i64 {
+    let pid = crate::scheduler::current_pid();
+    let port = SOCKET_PORTS.lock().get(&(pid, sockfd)).copied();
+    match port {
+        Some(p) => { crate::net::tcp::listen(p); 0 }
+        None    => EINVAL,
+    }
+}
+
+/// Non-blocking accept: returns EAGAIN if no Established connection is ready.
+/// TODO: add accept queue for O(1) lookup when connection count grows.
+unsafe fn sys_accept(sockfd: u64, _addr: u64, _alen: u64) -> i64 {
+    let pid = crate::scheduler::current_pid();
+    let port = SOCKET_PORTS.lock().get(&(pid, sockfd)).copied();
+    let port = match port { Some(p) => p, None => return EINVAL };
+    match crate::net::tcp::accept(port) {
+        None => EAGAIN,
+        Some(key) => {
+            let conn = ConnectedSocketHandle {
+                local_port:  key.local_port,
+                remote_ip:   key.remote_ip,
+                remote_port: key.remote_port,
+            };
+            let new_fd = alloc_fd(pid);
+            FD_TABLE.lock().insert((pid, new_fd), alloc::boxed::Box::new(conn));
+            crate::klog!(INFO, "sys_accept: new conn fd={} port {}↔{}", new_fd, port, key.remote_port);
+            new_fd as i64
+        }
+    }
+}
+
 unsafe fn sys_sendto(s: u64, b: u64, l: u64, _f: u64, _a: u64, _al: u64) -> i64 { sys_write(s, b, l) }
 unsafe fn sys_recvfrom(s: u64, b: u64, l: u64, _f: u64, _a: u64, _al: u64) -> i64 { sys_read(s, b, l) }
 

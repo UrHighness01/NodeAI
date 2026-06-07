@@ -1218,6 +1218,7 @@ pub mod tcp {
         SynSent,      // client: SYN sent, waiting for SYN-ACK
         SynReceived,  // server: SYN received, SYN-ACK sent, waiting for ACK
         Established,
+        Accepted,     // Established and handed to a userspace fd via sys_accept
         FinWait1,
         FinWait2,
         CloseWait,
@@ -1481,7 +1482,7 @@ pub mod tcp {
         if let Some(sock) = sockets.get_mut(&key) {
             crate::klog!(DEBUG, "TCP: send {} bytes port {}\u{2194}{} seq={} ack={} state={:?}",
                 data.len(), local_port, remote_port, sock.snd_nxt, sock.rcv_nxt, sock.state);
-            if sock.state != TcpState::Established { return 0; }
+            if sock.state != TcpState::Established && sock.state != TcpState::Accepted { return 0; }
             let seg = TcpHeader::build(
                 local_port, remote_port,
                 sock.snd_nxt, sock.rcv_nxt,
@@ -1499,6 +1500,33 @@ pub mod tcp {
             return data.len();
         }
         0
+    }
+
+    /// Find the first Established connection on `port`, mark it Accepted, and
+    /// return its key. Returns None if no connection is ready (caller: EAGAIN).
+    pub fn accept(port: u16) -> Option<TcpSocketKey> {
+        let mut sockets = SOCKETS.lock();
+        let key = sockets.iter()
+            .find(|(k, s)| k.local_port == port && s.state == TcpState::Established)
+            .map(|(k, _)| k.clone())?;
+        if let Some(sock) = sockets.get_mut(&key) {
+            sock.state = TcpState::Accepted;
+        }
+        Some(key)
+    }
+
+    /// Drain up to `buf.len()` bytes from the socket's receive buffer.
+    pub fn recv(local_port: u16, remote_ip: [u8; 4], remote_port: u16, buf: &mut [u8]) -> usize {
+        let key = TcpSocketKey { local_port, remote_ip, remote_port };
+        let mut sockets = SOCKETS.lock();
+        if let Some(sock) = sockets.get_mut(&key) {
+            let n = buf.len().min(sock.rcv_buf.len());
+            buf[..n].copy_from_slice(&sock.rcv_buf[..n]);
+            sock.rcv_buf.drain(..n);
+            n
+        } else {
+            0
+        }
     }
 
     /// Send a FIN+ACK to close a connection, then mark state.
