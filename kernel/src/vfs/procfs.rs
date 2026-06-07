@@ -28,7 +28,8 @@ pub fn init() {
     write_file("/ai", "anomalies",    crate::anomaly::format_report());
     write_file("/ai", "tunables",     crate::tunables::format_table());
     write_file("/ai", "fingerprints",  crate::fingerprint::format_report());
-    write_file("/ai", "causal_graph",  crate::causal::format_report());
+    write_file("/ai", "causal_graph",      crate::causal::format_report());
+    write_file("/ai", "transformer_sched", crate::transformer_sched::format_report());
 
     crate::klog!(INFO, "procfs: /proc and /ai populated");
 }
@@ -41,7 +42,8 @@ pub fn refresh() {
     write_file("/ai",   "tunables",      crate::tunables::format_table());
     write_file("/ai",   "status",        ai_status());
     write_file("/ai",   "fingerprints",  crate::fingerprint::format_report());
-    write_file("/ai",   "causal_graph",  crate::causal::format_report());
+    write_file("/ai",   "causal_graph",      crate::causal::format_report());
+    write_file("/ai",   "transformer_sched", crate::transformer_sched::format_report());
 }
 
 // ── Content generators ────────────────────────────────────────────────────────

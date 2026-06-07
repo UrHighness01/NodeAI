@@ -97,6 +97,32 @@ pub fn last_waker(pid: u64) -> Option<u64> {
     GRAPH.lock().last_waker(pid)
 }
 
+/// Predict which PIDs are likely to need the CPU soon because `waker_pid` is
+/// about to run. Looks backwards through the edge buffer for any PID that
+/// `waker_pid` has woken ≥2 times in the last 64 edges — those are its
+/// habitual consumers (pipe readers, futex waiters, etc.).
+///
+/// Returns at most 4 candidates (cheapest to pre-enqueue).
+pub fn predict_successors(waker_pid: u64) -> alloc::vec::Vec<u64> {
+    use alloc::collections::BTreeMap;
+    let graph = GRAPH.lock();
+    let len = graph.count.min(N_EDGES).min(64); // scan last 64 edges
+    let mut freq: BTreeMap<u64, u32> = BTreeMap::new();
+    for i in 0..len {
+        let idx = (graph.head + N_EDGES - 1 - i) % N_EDGES;
+        let e = &graph.edges[idx];
+        if e.waker == waker_pid && e.wakee != 0 {
+            *freq.entry(e.wakee).or_insert(0) += 1;
+        }
+    }
+    let mut candidates: alloc::vec::Vec<(u64, u32)> = freq.into_iter()
+        .filter(|(_, count)| *count >= 2)
+        .collect();
+    candidates.sort_by(|a, b| b.1.cmp(&a.1)); // most frequent first
+    candidates.truncate(4);
+    candidates.into_iter().map(|(pid, _)| pid).collect()
+}
+
 /// Format for /ai/causal_graph.
 pub fn format_report() -> alloc::vec::Vec<u8> {
     let now = crate::scheduler::uptime_ms();

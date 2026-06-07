@@ -375,8 +375,9 @@ pub unsafe extern "C" fn syscall_dispatch_extern(
 ) -> i64 {
     SYSCALL_COUNT.fetch_add(1, Ordering::Relaxed);
     let pid = crate::scheduler::current_pid();
-    // Per-task histogram and anomaly detection (both non-blocking).
+    // Per-task histogram, anomaly detection, and transformer context (all O(1)).
     crate::syscall_stats::record(pid, nr);
+    crate::transformer_sched::record_syscall(pid, nr);
     let (alert, score) = crate::anomaly::observe(pid, nr);
     if alert {
         crate::klog!(WARN, "ANOMALY: pid={} score={:.3} nr={}", pid, score, nr);
@@ -780,9 +781,13 @@ unsafe fn sys_exit(code: i32) -> i64 {
 // ── sys_ai_query ─────────────────────────────────────────────────────────────
 
 // sys_ai_query query types:
-//   0 = QUERY_STATUS:      returns AI subsystem health (audit count)
-//   1 = QUERY_ANOMALY:     returns current pid's anomaly score × 1000 (i32 fixed-point)
-//   2 = QUERY_SET_TUNABLE: arg = ptr to null-terminated "name=value" string; applies live tunable
+//   0 = QUERY_STATUS:       returns AI subsystem health (audit count)
+//   1 = QUERY_ANOMALY:      returns current pid's anomaly score × 1000 (i32 fixed-point)
+//   2 = QUERY_SET_TUNABLE:  arg = ptr to null-terminated "name=value" string; applies live tunable
+//   3 = QUERY_CLUSTER:      returns current pid's behavioral cluster ID [0-7]
+//                           upper 8 bits: cluster nice_adjust (as u8, cast to i8 for sign)
+//                           lower 8 bits: cluster label
+//   4 = QUERY_WAKER:        returns the PID that most recently woke this task (or 0)
 unsafe fn sys_ai_query(query_type: u64, arg: u64) -> i64 {
     match query_type {
         0 => ai_subsystem::audit::entry_count() as i64,
@@ -790,6 +795,19 @@ unsafe fn sys_ai_query(query_type: u64, arg: u64) -> i64 {
             let score = crate::anomaly::score(crate::scheduler::current_pid());
             (score * 1000.0) as i64
         }
+        3 => {
+            let pid = crate::scheduler::current_pid();
+            match crate::fingerprint::classify_task(pid) {
+                Some((cluster, profile)) => {
+                    // Pack: [31:16] = cluster id, [15:8] = nice_adjust as u8, [7:0] = label
+                    ((cluster as i64) << 16)
+                        | (((profile.nice_adjust as u8) as i64) << 8)
+                        | (profile.label as i64)
+                }
+                None => -1,
+            }
+        }
+        4 => crate::causal::last_waker(crate::scheduler::current_pid()).unwrap_or(0) as i64,
         2 => {
             // Parse "name=value" from user pointer.
             let s = match read_user_cstr(arg, 256) {
