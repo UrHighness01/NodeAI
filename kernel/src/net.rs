@@ -1265,12 +1265,16 @@ pub mod tcp {
 
     /// Active connections: key → socket.
     pub static SOCKETS:   Mutex<BTreeMap<TcpSocketKey, TcpSocket>> = Mutex::new(BTreeMap::new());
-    /// Listening ports (passive open).
-    pub static LISTENERS: Mutex<BTreeMap<u16, ()>> = Mutex::new(BTreeMap::new());
+    /// Listening ports → backlog queue of established-connection keys.
+    /// tcp::listen() inserts an empty deque; the SYN+ACK path pushes onto it;
+    /// tcp::accept() pops from the front.
+    pub static LISTENERS: Mutex<BTreeMap<u16, alloc::collections::VecDeque<TcpSocketKey>>>
+        = Mutex::new(BTreeMap::new());
 
     /// Register a local port to accept incoming TCP connections.
     pub fn listen(port: u16) {
-        LISTENERS.lock().insert(port, ());
+        LISTENERS.lock().entry(port)
+            .or_insert_with(alloc::collections::VecDeque::new);
         crate::klog!(INFO, "TCP: listening on port {}", port);
     }
 
@@ -1397,6 +1401,12 @@ pub mod tcp {
                     sock.snd_wnd   = tcph.window;
                     crate::klog!(INFO, "TCP: connection ESTABLISHED port {}↔{}",
                         tcph.dst_port, tcph.src_port);
+                    // Push this connection onto the accept backlog for the listening port.
+                    let conn_key = key.clone();
+                    let port = tcph.dst_port;
+                    if let Some(backlog) = LISTENERS.lock().get_mut(&port) {
+                        backlog.push_back(conn_key);
+                    }
                 }
                 None
             }
@@ -1502,14 +1512,13 @@ pub mod tcp {
         0
     }
 
-    /// Find the first Established connection on `port`, mark it Accepted, and
-    /// return its key. Returns None if no connection is ready (caller: EAGAIN).
+    /// Dequeue the next established connection from the backlog for `port`.
+    /// Returns None (→ EAGAIN) if the backlog is empty.
+    /// Previously scanned SOCKETS (O(n)); now O(1) via the backlog queue.
     pub fn accept(port: u16) -> Option<TcpSocketKey> {
-        let mut sockets = SOCKETS.lock();
-        let key = sockets.iter()
-            .find(|(k, s)| k.local_port == port && s.state == TcpState::Established)
-            .map(|(k, _)| k.clone())?;
-        if let Some(sock) = sockets.get_mut(&key) {
+        let key = LISTENERS.lock().get_mut(&port)?.pop_front()?;
+        // Mark the socket as Accepted so a second accept() doesn't see it.
+        if let Some(sock) = SOCKETS.lock().get_mut(&key) {
             sock.state = TcpState::Accepted;
         }
         Some(key)
