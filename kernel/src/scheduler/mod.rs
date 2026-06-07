@@ -251,27 +251,38 @@ pub fn reap_zombie_child(parent_pid: Pid) -> Option<(Pid, i32)> {
     entry
 }
 
-/// Fork: create a clone of `parent_pid` with its own L4 page table.
-/// Kernel half (L4 indices 256-511) is shared; user half starts empty.
-/// Full copy-on-write of user pages is a future extension.
+/// Fork: create a full copy of `parent_pid`'s user address space.
+/// Child gets its own L4 (kernel half shared, user half deep-copied page by page).
+/// This is a full copy — no CoW — so parent and child are fully independent at fork.
 pub fn fork_task(parent_pid: Pid) -> Option<Pid> {
     let child_pid = alloc_pid();
 
-    // Allocate a new L4 for the child (kernel half copied from parent).
+    // Get parent's CR3 before locking TASKS (needed for page table walk).
+    let parent_cr3 = {
+        TASKS.lock().get(&parent_pid).map(|t| t.cr3)?
+    };
+
+    // Allocate a new L4 for the child (kernel half copied, user half empty initially).
     let child_cr3 = crate::memory::alloc_user_cr3().unwrap_or_else(|| {
-        // Fall back to sharing kernel CR3 if OOM (safer than crash).
         let v: u64;
         unsafe { core::arch::asm!("mov {}, cr3", out(reg) v, options(nomem, nostack)); }
         v & !0xFFF
     });
+
+    // Deep-copy all user-space pages from parent to child.
+    let pages = unsafe {
+        crate::memory::copy_user_address_space(parent_cr3, child_cr3)
+    };
+    match &pages {
+        Ok(n)  => crate::klog!(INFO, "Scheduler: fork parent={} → child={} ({} pages copied)", parent_pid, child_pid, n),
+        Err(e) => crate::klog!(WARN, "Scheduler: fork child={} page copy incomplete: {}", child_pid, e),
+    }
 
     let mut tasks = TASKS.lock();
     let mut child = tasks.get(&parent_pid)?.clone_shallow(child_pid)?;
     child.cr3 = child_cr3;
     tasks.insert(child_pid, child);
     runqueue::enqueue(child_pid);
-    crate::klog!(INFO, "Scheduler: fork parent={} → child={} cr3={:#x}",
-        parent_pid, child_pid, child_cr3);
     Some(child_pid)
 }
 

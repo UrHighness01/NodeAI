@@ -140,6 +140,98 @@ pub unsafe fn map_user_range_in_cr3(
     result
 }
 
+/// Copy all user-space mappings (L4 indices 0–255) from `src_cr3` into `dst_cr3`.
+///
+/// For every present leaf PTE in the source address space this function:
+///   1. Allocates a new physical frame in the destination.
+///   2. Copies the page content.
+///   3. Maps the new frame at the same virtual address with the same flags.
+///
+/// The destination's kernel half (L4 indices 256–511) is left untouched —
+/// it was already filled in by `alloc_user_cr3`.
+///
+/// Returns `Ok(pages_copied)` or `Err` if out of memory mid-copy.
+pub unsafe fn copy_user_address_space(src_cr3: u64, dst_cr3: u64) -> Result<usize, &'static str> {
+    let phys_off = PHYS_OFFSET;
+    let mut pages_copied: usize = 0;
+
+    // Walk source L4, user half only (indices 0–255).
+    let src_l4 = (phys_off + src_cr3) as *const u64;
+    for l4i in 0..256usize {
+        let l4e = *src_l4.add(l4i);
+        if l4e & 1 == 0 { continue; } // not present
+
+        let l3_phys = l4e & 0x000F_FFFF_FFFF_F000;
+        let l3 = (phys_off + l3_phys) as *const u64;
+
+        for l3i in 0..512usize {
+            let l3e = *l3.add(l3i);
+            if l3e & 1 == 0 { continue; }
+            if l3e & (1 << 7) != 0 { continue; } // 1 GiB huge page — skip for now
+
+            let l2_phys = l3e & 0x000F_FFFF_FFFF_F000;
+            let l2 = (phys_off + l2_phys) as *const u64;
+
+            for l2i in 0..512usize {
+                let l2e = *l2.add(l2i);
+                if l2e & 1 == 0 { continue; }
+                if l2e & (1 << 7) != 0 { continue; } // 2 MiB huge page — skip for now
+
+                let l1_phys = l2e & 0x000F_FFFF_FFFF_F000;
+                let l1 = (phys_off + l1_phys) as *const u64;
+
+                for l1i in 0..512usize {
+                    let l1e = *l1.add(l1i);
+                    if l1e & 1 == 0 { continue; }
+
+                    // Reconstruct the virtual address this PTE maps.
+                    let virt: u64 = ((l4i as u64) << 39)
+                        | ((l3i as u64) << 30)
+                        | ((l2i as u64) << 21)
+                        | ((l1i as u64) << 12);
+
+                    // Allocate a fresh frame for the child.
+                    let new_phys = super::pmm::alloc_frame()
+                        .ok_or("copy_user_address_space: OOM")?;
+
+                    // Copy page content from source frame.
+                    let src_frame_phys = l1e & 0x000F_FFFF_FFFF_F000;
+                    let src_virt = phys_off + src_frame_phys;
+                    let dst_virt = phys_off + new_phys;
+                    core::ptr::copy_nonoverlapping(
+                        src_virt as *const u8,
+                        dst_virt as *mut u8,
+                        4096,
+                    );
+
+                    // Map the new frame at the same virtual address in dst_cr3.
+                    // Temporarily switch to dst_cr3 so map_page operates on it.
+                    let old_cr3: u64;
+                    core::arch::asm!("mov {}, cr3", out(reg) old_cr3, options(nomem, nostack));
+                    core::arch::asm!("mov cr3, {}", in(reg) dst_cr3, options(nomem, nostack));
+
+                    use x86_64::{VirtAddr, PhysAddr};
+                    use x86_64::structures::paging::{Page, PhysFrame, Size4KiB, PageTableFlags};
+                    let flags = PageTableFlags::from_bits_truncate(l1e) &
+                        (PageTableFlags::PRESENT
+                        | PageTableFlags::WRITABLE
+                        | PageTableFlags::USER_ACCESSIBLE
+                        | PageTableFlags::NO_EXECUTE);
+                    let page: Page<Size4KiB> = Page::containing_address(VirtAddr::new(virt));
+                    let frame: PhysFrame<Size4KiB> = PhysFrame::containing_address(PhysAddr::new(new_phys));
+                    let _ = map_page(page, frame, flags);
+
+                    core::arch::asm!("mov cr3, {}", in(reg) old_cr3, options(nomem, nostack));
+
+                    pages_copied += 1;
+                }
+            }
+        }
+    }
+
+    Ok(pages_copied)
+}
+
 /// Map an MMIO physical region as write-through, no-cache, writable.
 pub fn map_mmio(phys: u64, virt: u64, size: u64) {
     use x86_64::structures::paging::PageTableFlags as F;
