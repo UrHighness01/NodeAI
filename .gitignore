@@ -17,3 +17,7 @@ target/
 #.idea/
 Alpha8-Protect/
 intelli/
+ROADMAP.MD
+*.vdi
+nodeai_serial*.log
+nodeai-boot.vdi

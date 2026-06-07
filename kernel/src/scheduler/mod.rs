@@ -1,4 +1,4 @@
-//! Scheduler — preemptive round-robin with AI-augmented priority (Phase 4).
+//! Scheduler — preemptive round-robin with AI-augmented priority.
 
 pub mod task;
 mod runqueue;
@@ -251,8 +251,9 @@ pub fn reap_zombie_child(parent_pid: Pid) -> Option<(Pid, i32)> {
     entry
 }
 
-/// Fork: create a clone of `parent_pid` with its own page table (kernel half shared,
-/// user half has a fresh L4 — full CoW copy deferred to Phase 21).
+/// Fork: create a clone of `parent_pid` with its own L4 page table.
+/// Kernel half (L4 indices 256-511) is shared; user half starts empty.
+/// Full copy-on-write of user pages is a future extension.
 pub fn fork_task(parent_pid: Pid) -> Option<Pid> {
     let child_pid = alloc_pid();
 

@@ -1,5 +1,4 @@
 //! Memory subsystem — Physical Memory Manager, Virtual Memory Manager, Kernel Heap.
-//! Phase 3 of the NodeAI kernel roadmap.
 
 use bootloader_api::BootInfo;
 use core::sync::atomic::{AtomicU64, Ordering};

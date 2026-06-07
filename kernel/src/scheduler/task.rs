@@ -80,7 +80,7 @@ pub struct AiProfile {
 #[derive(Debug, Clone)]
 pub struct FdEntry {
     pub fd: u32,
-    // Phase 7: replace with Arc<dyn VfsNode>
+    // TODO: link to VfsNode for per-task fd table (currently managed in syscall FD_TABLE)
 }
 
 /// The Task Control Block.
@@ -99,13 +99,13 @@ pub struct Task {
     pub cr3: u64,
     pub context: CpuContext,
     pub ai_profile: AiProfile,
-    /// File descriptors (Phase 7: link to VFS).
+    /// File descriptors (placeholder — real fd table lives in syscall::FD_TABLE).
     pub fds: Vec<FdEntry>,
     /// Signal mask (64 standard POSIX signals).
     pub signal_mask: u64,
     /// Signal handlers: index = signal number, value = user-space handler VA (0 = default).
     pub signal_handlers: [u64; 64],
-    /// Per-process credentials (Phase 14).
+    /// Per-process credentials.
     pub uid:  u32,
     pub euid: u32,
     pub gid:  u32,

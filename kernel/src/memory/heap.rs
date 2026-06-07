@@ -1,5 +1,5 @@
 //! Kernel heap — backed by a linked-list allocator over a static byte array.
-//! Phase 3: Replace with per-CPU slab allocator for lower latency.
+//! Future: replace with per-CPU slab allocator for lower latency.
 
 use linked_list_allocator::LockedHeap;
 

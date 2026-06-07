@@ -1,4 +1,4 @@
-//! Kernel-side AI engine integration — Phase 8.
+//! Kernel-side AI engine integration.
 //!
 //! This module bridges the kernel and the `ai_subsystem` crate:
 //!   - Initialises the event bus and loads default (untrained) models at boot.
@@ -41,7 +41,7 @@ pub fn process_tick(uptime_ms: u64) {
                 let _ = pid;
             }
             KernelEvent::SyscallIssued { pid, syscall_nr } => {
-                // Feed to security AI (simplified — full integration in Phase 10)
+                // Feed to security AI (simplified — full anomaly detection is future work)
                 let _ = (pid, syscall_nr);
             }
             KernelEvent::TimerTick { .. } => { /* handled above */ }
@@ -98,7 +98,7 @@ pub fn update_task_profile(pid: u64, profile: &AiProfile) {
     let features = TaskFeatures {
         avg_burst_norm:  (profile.ticks_run as f32 / 1000.0).min(1.0),
         io_fraction:     0.1, // TODO: track I/O waits in later phase
-        cache_miss_rate: 0.0, // TODO: PMC-based in Phase 5
+        cache_miss_rate: 0.0, // TODO: read from IA32_PERF_CTR when PMCs are configured
         priority_norm:   0.5,
         wait_time_norm:  0.0,
     };

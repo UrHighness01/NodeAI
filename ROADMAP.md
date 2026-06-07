@@ -35,7 +35,7 @@
 | 12a | Framebuffer & GUI Desktop ✅ | Week 55–65 |
 | 12b | Extended Syscalls & POSIX Basics ✅ | Week 58–68 |
 | 12c | TCP/IP Completion & TLS ✅ | Week 62–72 |
-| 13 | Self-hosting & AI Autonomy ✅ | Week 70+ |
+| 13 | Self-hosting & AI Autonomy | Week 70+ |
 | 14 | Users, Groups & Authentication | Week 72–82 |
 | 15 | Interactive Shell & Terminal | Week 76–86 |
 | 16 | Coreutils & System Administration | Week 80–92 |
@@ -499,7 +499,7 @@
 
 ---
 
-## Phase 13 — Self-Hosting & AI Autonomy ✅ COMPLETE
+## Phase 13 — Self-Hosting & AI Autonomy (IN PROGRESS)
 
 **Goal:** the kernel can observe itself, the AI can propose kernel configuration changes, system becomes increasingly autonomous.
 

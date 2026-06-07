@@ -1,7 +1,7 @@
 //! Run queue — round-robin with AI priority hints.
 //!
-//! Stores tasks directly in a heap-allocated Vec.  Phase 5 will split this
-//! into per-CPU queues once SMP is established.
+//! Single run queue for the current single-CPU kernel.
+//! Per-CPU queues are a future SMP extension.
 
 use alloc::collections::VecDeque;
 use alloc::boxed::Box;

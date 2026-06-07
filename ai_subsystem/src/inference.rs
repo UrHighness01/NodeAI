@@ -4,7 +4,7 @@
 //!   - Dense (fully-connected) layers
 //!   - ReLU, Sigmoid, Tanh activations
 //!   - INT8 / FP32 quantization modes
-//!   - AVX2 accelerated matrix multiply (Phase 8)
+//!   - AVX2 accelerated matrix multiply (future extension)
 
 use alloc::vec::Vec;
 
@@ -28,7 +28,7 @@ pub struct DenseLayer {
 
 impl DenseLayer {
     /// Forward pass: computes output = activation(W * input + b).
-    /// All arithmetic in f32; INT8 quantized path planned for Phase 8.
+    /// All arithmetic in f32; INT8 quantized path is a future extension.
     pub fn forward(&self, input: &[f32], output: &mut Vec<f32>) {
         output.clear();
         output.resize(self.out_size, 0.0f32);
@@ -36,7 +36,7 @@ impl DenseLayer {
         for i in 0..self.out_size {
             let mut sum = self.biases[i];
             let row = &self.weights[i * self.in_size..(i + 1) * self.in_size];
-            // TODO (Phase 8): replace with AVX2 dot-product intrinsic
+            // TODO: replace with AVX2 dot-product intrinsic when SMP/SIMD path is ready
             for (w, x) in row.iter().zip(input.iter()) {
                 sum += w * x;
             }

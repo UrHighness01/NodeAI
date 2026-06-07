@@ -1,4 +1,4 @@
-//! System call fast-path — Phase 11.
+//! System call fast-path (SYSCALL/SYSRET, x86_64).
 //!
 //! Sets up the `SYSCALL`/`SYSRET` mechanism (AMD-64 / Intel 64) by writing:
 //!   - `MSR_IA32_STAR`  — segment selectors used on SYSCALL/SYSRET
@@ -1795,7 +1795,7 @@ unsafe fn sys_sendfile(out_fd: u64, in_fd: u64, _offset: u64, count: u64) -> i64
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-//  Phase 19 — Epoll, Futex, Socket stubs
+//  Epoll (stub), Futex (real wait queue), Sockets (real bind/listen/accept)
 // ─────────────────────────────────────────────────────────────────────────────
 
 // ── sys_futex ────────────────────────────────────────────────────────────────

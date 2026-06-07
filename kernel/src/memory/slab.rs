@@ -4,7 +4,7 @@
 //! Each `SlabCache` manages objects of one fixed size carved out of 4 KiB slabs
 //! obtained from the buddy PMM.
 //!
-//! Phase 3 implementation: single-CPU, no per-CPU caches (added in Phase 5).
+//! Single-CPU implementation; per-CPU caches are a future SMP extension.
 
 use spin::Mutex;
 use crate::memory::pmm::{alloc_frame, free_frame, PAGE_SIZE};
