@@ -84,14 +84,38 @@ pub unsafe extern "C" fn schedule_from_interrupt(old_rsp: u64) -> u64 {
         }
     }
 
+    // Step 2a: fingerprint the outgoing task — update its ai_nice_adjust.
+    if let Some(pid) = old_pid {
+        if let Some((_, profile)) = crate::fingerprint::classify_task(pid) {
+            let mut tasks = TASKS.lock();
+            if let Some(task) = tasks.get_mut(&pid) {
+                if task.intent == 0 {
+                    task.ai_nice_adjust = profile.nice_adjust;
+                }
+            }
+        }
+    }
+
     // Step 2: per-tick subsystem work.
     crate::ai_engine::process_tick(uptime_ms);
     crate::desktop::tick(uptime_ms);
     crate::telemetry::tick(uptime_ms);
     crate::audio::tick();
 
-    // Step 3: advance the run queue.
-    let next_pid = match runqueue::tick() {
+    // Step 3: compute AI-predicted quantum for the incoming task, then tick.
+    // burst_estimate_us is maintained by ai_engine's SGD; 1 tick = 10 ms = 10_000 µs.
+    // We peek at the *front* of the run queue to predict for the next task.
+    let next_burst_ticks: Option<u32> = {
+        let rq_guard  = runqueue::peek_front();
+        let tasks_guard = TASKS.lock();
+        rq_guard.and_then(|pid| {
+            tasks_guard.get(&pid).map(|t| {
+                let us = t.ai_profile.burst_estimate_us;
+                if us == 0 { None } else { Some(((us / 10_000) as u32).max(1)) }
+            }).flatten()
+        })
+    };
+    let next_pid = match runqueue::tick(next_burst_ticks) {
         Some(pid) => pid,
         None      => return old_rsp, // same task, no switch
     };
@@ -235,6 +259,10 @@ pub fn exit_current(code: i32) -> ! {
 
     // Wake the parent and send SIGCHLD.
     if parent_pid != 0 {
+        // Record causal edge: dying child → parent wakeup.
+        if let Some(self_pid) = runqueue::current_pid() {
+            crate::causal::record_wakeup(self_pid, parent_pid);
+        }
         wake_pid(parent_pid);
         send_signal(parent_pid, 17); // SIGCHLD
     }

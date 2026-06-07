@@ -150,6 +150,9 @@ pub struct Task {
     pub user_brk: u64,
     /// Thread-local storage FS base (ARCH_SET_FS).
     pub fs_base: u64,
+    /// Causal wakeup: which PID last woke this task (via futex, pipe, socket, or exit).
+    /// None = self-woken (initial run, or woke from timer with no blocked wait).
+    pub woke_by: Option<Pid>,
 }
 
 impl Task {
@@ -219,6 +222,7 @@ impl Task {
             fpu_state:       FpuState::default_state(),
             user_brk:        0,
             fs_base:         0,
+            woke_by:         None,
         }
     }
 
@@ -274,6 +278,7 @@ impl Task {
             fpu_state:        self.fpu_state, // copy parent's FPU state to child
             user_brk:         self.user_brk,
             fs_base:          self.fs_base,
+            woke_by:          None,
         })
     }
 }

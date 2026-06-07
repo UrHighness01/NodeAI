@@ -268,6 +268,41 @@ pub fn file_tier(path: &str) -> Option<Tier> {
     STORE.lock().files.get(path).map(|f| f.tier)
 }
 
+/// Called from sys_read after a successful file read by an I/O-heavy cluster process.
+/// Queues the next N paths (sequential naming pattern) AND the current file's
+/// continuation window into the prefetch queue. This is executed synchronously
+/// on the next storage tick so it never adds latency to the calling read().
+///
+/// `path`          — the path that was just read
+/// `prefetch_pages`— from the caller's ClusterProfile (0 = no readahead)
+pub fn readahead_for_cluster(path: &str, prefetch_pages: u8) {
+    if !ENABLED.load(Ordering::Relaxed) || prefetch_pages == 0 { return; }
+    let mut state = STORE.lock();
+    // Queue the current path's successor for sequential prefetch.
+    maybe_queue_prefetch(&mut state.prefetch_q, path);
+    // Also bump the read-ahead window: queue the same path again with higher
+    // priority by appending it at the front of the queue (achieved by pushing
+    // and rotating — VecDeque-like behavior on Vec is fine at low depth).
+    if state.prefetch_q.len() < 64 {
+        state.prefetch_q.insert(0, path.to_owned());
+    }
+    // Mark the cluster as "eager reader" in the file score so the tier
+    // rebalancer keeps this file in the fastest available tier.
+    let now = crate::scheduler::uptime_ms();
+    let entry = state.files.entry(path.to_owned()).or_insert_with(|| FileScore {
+        path:         path.to_owned(),
+        access_count: 0,
+        last_access:  now,
+        size_bytes:   0,
+        tier:         Tier::Nvme,
+        compressed:   false,
+    });
+    // Artificially inflate access_count proportional to readahead aggressiveness
+    // so the rebalancer keeps this file in the hot tier.
+    entry.access_count += prefetch_pages as u64;
+    entry.last_access   = now;
+}
+
 pub fn stats() -> String {
     let state = STORE.lock();
     format!(

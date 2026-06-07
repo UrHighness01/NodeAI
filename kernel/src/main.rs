@@ -65,6 +65,8 @@ mod predictive_hibernate;
 pub mod syscall_stats;  // per-task syscall histograms
 pub mod anomaly;        // causal anomaly detector
 pub mod tunables;       // live AI-adjustable kernel parameters
+pub mod fingerprint;    // behavioral cluster classifier
+pub mod causal;         // live causal process wakeup DAG
 
 /// Bootloader configuration — tells the bootloader to map all physical memory
 /// at a dynamic virtual offset so we can access physical frames by VA.
@@ -245,6 +247,7 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
 
     // ── Phase 8: AI subsystem ────────────────────────────────────────────────
     ai_engine::init();
+    fingerprint::init();
 
     // ── Phase 12b: Populate /proc and /ai virtual filesystem entries ──────────
     vfs::procfs::init();

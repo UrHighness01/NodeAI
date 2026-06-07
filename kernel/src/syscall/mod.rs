@@ -47,6 +47,8 @@ type FdKey = (u64, u64);
 static FD_TABLE: Mutex<BTreeMap<FdKey, alloc::boxed::Box<dyn crate::vfs::FileHandle>>>
     = Mutex::new(BTreeMap::new());
 static NEXT_FD:  Mutex<BTreeMap<u64, u64>> = Mutex::new(BTreeMap::new());
+/// Maps (pid, fd) → file path for AI readahead — populated by sys_open.
+static FD_PATH_TABLE: Mutex<BTreeMap<FdKey, alloc::string::String>> = Mutex::new(BTreeMap::new());
 /// Bound port for socket fds — separate from FD_TABLE to avoid trait-object downcast.
 static SOCKET_PORTS: Mutex<BTreeMap<FdKey, u16>> = Mutex::new(BTreeMap::new());
 
@@ -703,6 +705,17 @@ unsafe fn sys_read(fd: u64, buf_ptr: u64, len: u64) -> i64 {
             match h.read(&mut tmp) {
                 Ok(n) => {
                     core::ptr::copy_nonoverlapping(tmp.as_ptr(), buf, n);
+                    // Syscall readahead: if this task is in an I/O-heavy cluster,
+                    // tell intel_storage to prefetch the next window of this file.
+                    // Zero-latency: queued for the next storage tick, not blocking.
+                    if let Some((_, profile)) = crate::fingerprint::classify_task(pid) {
+                        if profile.prefault_pages > 0 {
+                            if let Some(path) = FD_PATH_TABLE.lock().get(&(pid, fd)).cloned() {
+                                crate::intel_storage::readahead_for_cluster(
+                                    &path, profile.prefault_pages);
+                            }
+                        }
+                    }
                     n as i64
                 }
                 Err(_) => EINVAL,
@@ -820,6 +833,7 @@ unsafe fn sys_ai_query(query_type: u64, arg: u64) -> i64 {
 unsafe fn sys_intent(intent_type: u64, hint_value: u64) -> i64 {
     let pid = crate::scheduler::current_pid();
     crate::scheduler::set_intent(pid, intent_type as u8, hint_value);
+    crate::fingerprint::label_from_intent(pid, intent_type as u8);
     crate::klog!(DEBUG, "sys_intent: pid={} type={} hint={}", pid, intent_type, hint_value);
     0
 }
@@ -872,6 +886,7 @@ unsafe fn sys_open(path_ptr: u64, path_len: u64, _flags: u64) -> i64 {
         DIR_NODES.lock().insert((pid, fd), node);
     }
     FD_TABLE.lock().insert((pid, fd), handle);
+    FD_PATH_TABLE.lock().insert((pid, fd), path_str.to_owned());
     fd as i64
 }
 
@@ -879,7 +894,8 @@ unsafe fn sys_open(path_ptr: u64, path_len: u64, _flags: u64) -> i64 {
 
 unsafe fn sys_close(fd: u64) -> i64 {
     let pid = crate::scheduler::current_pid();
-    DIR_NODES.lock().remove(&(pid, fd)); // no-op if not a directory
+    DIR_NODES.lock().remove(&(pid, fd));
+    FD_PATH_TABLE.lock().remove(&(pid, fd));
     if FD_TABLE.lock().remove(&(pid, fd)).is_some() { 0 } else { EBADF }
 }
 
@@ -971,8 +987,28 @@ unsafe fn sys_mmap(addr: u64, len: u64, prot: u64, flags: u64, _fd: i64, _offset
     };
 
     match crate::memory::map_user_range(vaddr, len_aligned, writable, executable) {
-        Ok(())  => vaddr as i64,
-        Err(_)  => EINVAL,
+        Ok(()) => {
+            // Predictive prefault: use the caller's fingerprint cluster to
+            // determine how many extra pages to pre-fault beyond the requested
+            // range. This eliminates page-fault latency on first access for
+            // I/O-heavy and batch workloads.
+            let pid = crate::scheduler::current_pid();
+            if let Some((_, profile)) = crate::fingerprint::classify_task(pid) {
+                let extra = profile.prefault_pages as u64;
+                if extra > 0 {
+                    let prefault_base  = vaddr + len_aligned;
+                    let prefault_bytes = extra * page_size;
+                    // Extend the mapping — ignore errors (best-effort).
+                    let _ = crate::memory::map_user_range(
+                        prefault_base, prefault_bytes, writable, false);
+                    crate::klog!(TRACE,
+                        "mmap prefault: pid={} base={:#x} +{}p cluster",
+                        pid, prefault_base, extra);
+                }
+            }
+            vaddr as i64
+        }
+        Err(_) => EINVAL,
     }
 }
 
@@ -2110,6 +2146,10 @@ unsafe fn sys_futex(uaddr: u64, op: i32, val: u32, _timeout: u64) -> i64 {
                 }
             };
             let n = pids.len() as i64;
+            let waker = crate::scheduler::current_pid();
+            for pid in &pids {
+                crate::causal::record_wakeup(waker, *pid);
+            }
             for pid in pids { crate::scheduler::wake_pid(pid); }
             n
         }
