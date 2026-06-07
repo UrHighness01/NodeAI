@@ -8,6 +8,7 @@ pub mod path;
 pub mod procfs;
 pub mod ramfs;
 pub mod devfs;
+pub mod blockdev;
 
 use alloc::{boxed::Box, string::String, sync::Arc, vec::Vec};
 use spin::RwLock;
@@ -133,14 +134,17 @@ pub fn init() {
 
     unsafe { ROOT = Some(root.clone() as Arc<dyn VfsNode>); }
 
-    // Mount devfs at /dev
-    let dev_node = root.lookup("dev").expect("vfs: /dev missing");
-    let devfs_root = Arc::new(devfs::DevDir::new());
-    mount("/dev", devfs_root);
+    // Mount devfs at /dev — use DevDir::root() to store global reference.
+    let _dev_node = root.lookup("dev").expect("vfs: /dev missing");
+    let devfs_root = devfs::DevDir::root();
+    mount("/dev", devfs_root.clone() as Arc<dyn VfsNode>);
 
     mount("/", root);
 
-    crate::klog!(INFO, "VFS initialized — root ramfs + devfs /dev");
+    // Register block devices (/dev/sdX, /dev/nvmeX).
+    blockdev::register_block_devices(&(devfs_root as Arc<dyn VfsNode>));
+
+    crate::klog!(INFO, "VFS initialized — root ramfs + devfs /dev + block devices");
 }
 
 /// Get the root filesystem node.

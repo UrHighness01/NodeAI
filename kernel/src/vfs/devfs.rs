@@ -368,6 +368,16 @@ impl VfsNode for SndDir {
 
 // ── DevDir (the /dev directory itself) ───────────────────────────────────────
 
+/// Global reference to the mounted devfs root — set by `DevDir::root()`.
+static DEVFS_ROOT: spin::Once<Arc<DevDir>> = spin::Once::new();
+
+/// Register a device node in /dev at runtime (called by block device init).
+pub fn register_node(name: &str, node: Arc<dyn VfsNode>) {
+    if let Some(root) = DEVFS_ROOT.get() {
+        root.children.lock().insert(String::from(name), node);
+    }
+}
+
 pub struct DevDir {
     ino:      u64,
     children: Mutex<BTreeMap<String, Arc<dyn VfsNode>>>,
@@ -386,6 +396,13 @@ impl DevDir {
         ch.insert(String::from("dsp"),      Arc::new(DspNode(alloc_ino())));
         ch.insert(String::from("snd"),      Arc::new(SndDir::new()));
         Self { ino, children: Mutex::new(ch) }
+    }
+
+    /// Create the DevDir, store it as the global devfs root, and return an Arc.
+    pub fn root() -> Arc<Self> {
+        let dir = Arc::new(Self::new());
+        DEVFS_ROOT.call_once(|| dir.clone());
+        dir
     }
 }
 
