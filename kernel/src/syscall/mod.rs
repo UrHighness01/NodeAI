@@ -212,12 +212,17 @@ static mut BOOT_SYSCALL_STACK: AlignedStack = AlignedStack([0u8; SYSCALL_STACK_S
 
 // Per-CPU data area for the boot CPU.
 static mut BOOT_PERCPU: PercpuData = PercpuData {
-    self_ptr:     0,
-    cpu_id:       0,
-    _pad:         0,
-    kernel_rsp:   0,
-    user_rsp:     0,
-    ticks_per_ms: 0,
+    self_ptr:          0,
+    cpu_id:            0,
+    _pad:              0,
+    kernel_rsp:        0,
+    user_rsp:          0,
+    ticks_per_ms:      0,
+    _pad2:             0,
+    signal_new_rip:    0,
+    signal_new_rsp:    0,
+    signal_new_rflags: 0,
+    signal_signum:     0,
 };
 
 // ── Assembly syscall entry stub ───────────────────────────────────────────────
@@ -239,17 +244,13 @@ core::arch::global_asm!(r#"
 .align 16
 _syscall_entry:
     swapgs
-    mov     qword ptr gs:24, rsp        # save user RSP at PercpuData.user_rsp
-    mov     rsp, qword ptr gs:16        # load kernel RSP from PercpuData.kernel_rsp
+    mov     qword ptr gs:24, rsp        # save user RSP → PercpuData.user_rsp
+    mov     rsp, qword ptr gs:16        # load kernel RSP
 
     push    rcx                         # save user RIP
     push    r11                         # save user RFLAGS
-    push    r9                          # save arg5 (original R9) as 7th arg on stack
+    push    r9                          # save arg5
 
-    # Rearrange into C ABI for syscall_dispatch_extern:
-    #   rdi ← rax (syscall nr),  rsi ← rdi (arg0),  rdx ← rsi (arg1)
-    #   rcx ← rdx (arg2),        r8  ← r10 (arg3),  r9  ← r8  (arg4)
-    #   7th arg (arg5, original R9) already on stack
     mov     r9,  r8
     mov     r8,  r10
     mov     rcx, rdx
@@ -257,11 +258,40 @@ _syscall_entry:
     mov     rsi, rdi
     mov     rdi, rax
 
-    call    syscall_dispatch_extern     # return value lands in RAX
+    call    syscall_dispatch_extern     # rax = syscall return value
 
-    add     rsp, 8                      # pop arg5 off stack
-    pop     r11                         # restore user RFLAGS
-    pop     rcx                         # restore user RIP
+    add     rsp, 8                      # discard arg5
+    pop     r11                         # user RFLAGS
+    pop     rcx                         # user RIP
+
+    # ── Signal handler delivery ───────────────────────────────────────────
+    # Pass user context to maybe_deliver_signal so it can push a sigframe.
+    # Returns signum (>0) if delivering to a handler, 0 otherwise.
+    push    rax                         # preserve syscall return value
+    mov     rdi, rcx                    # arg0: user_rip
+    mov     rsi, r11                    # arg1: user_rflags
+    mov     rdx, qword ptr gs:24        # arg2: user_rsp
+    mov     rcx, [rsp]                  # arg3: saved_rax (syscall return, for sigframe)
+    call    maybe_deliver_signal        # rax = signum (0 = no delivery)
+    test    rax, rax
+    jz      .Lcheck_override
+    mov     rdi, rax                    # rdi = signum → handler's first arg
+
+.Lcheck_override:
+    # Apply any pending context override (signal delivery or sigreturn).
+    # signal_new_rip (gs:40) is set by maybe_deliver_signal and sys_rt_sigreturn.
+    mov     r10, qword ptr gs:40
+    test    r10, r10
+    jz      .Lno_override
+    mov     rcx, r10                    # override user RIP
+    mov     r10, qword ptr gs:48
+    mov     qword ptr gs:24, r10        # override user RSP
+    mov     r11, qword ptr gs:56        # override user RFLAGS
+    xor     r10, r10
+    mov     qword ptr gs:40, r10        # clear signal_new_rip for next syscall
+.Lno_override:
+    pop     rax                         # restore syscall return value
+    # ── End signal delivery ───────────────────────────────────────────────
 
     mov     rsp, qword ptr gs:24        # restore user RSP
     swapgs
@@ -376,7 +406,7 @@ pub unsafe extern "C" fn syscall_dispatch_extern(
         // ── Phase 18 signals ──────────────────────────────────────────────
         nr::RT_SIGACTION  => sys_rt_sigaction(arg0, arg1, arg2),
         nr::RT_SIGPROCMASK=> sys_rt_sigprocmask(arg0, arg1, arg2),
-        nr::RT_SIGRETURN  => 0,  // handled by signal delivery, just nop here
+        // RT_SIGRETURN is dispatched later in the match (full implementation)
         // ── Phase 18 credentials ─────────────────────────────────────────
         nr::GETUID | nr::GETEUID => sys_getuid(),
         nr::GETGID | nr::GETEGID => sys_getgid(),
@@ -468,6 +498,7 @@ pub unsafe extern "C" fn syscall_dispatch_extern(
         nr::SIGNALFD4     => { let pid=crate::scheduler::current_pid(); alloc_fd(pid) as i64 }
         nr::CLONE3        => sys_fork(), // simplified clone3 — just fork
         // ── AI subsystem ─────────────────────────────────────────────────
+        nr::RT_SIGRETURN  => sys_rt_sigreturn(),
         nr::AI_QUERY      => sys_ai_query(arg0, arg1),
         nr::AI_LOG        => sys_ai_log(arg0, arg1, arg2),
         _                 => {
@@ -487,30 +518,109 @@ pub unsafe extern "C" fn syscall_dispatch_extern(
     result
 }
 
-/// Deliver any pending signals whose default action is to terminate.
-/// Called from the syscall return path (before SYSRETQ) and from page faults.
-/// Signals with registered user handlers are deferred to the asm wrapper
-/// where the user RIP/RSP can be modified.
-unsafe fn deliver_pending_signals_default() {
+/// Sigframe layout on the user stack (growing down from user_rsp).
+/// Pushed by maybe_deliver_signal; popped by sys_rt_sigreturn.
+///
+/// [new_rsp + 0]:  VDSO_ADDR (restorer — handler's `ret` lands here)
+/// [new_rsp + 8]:  signum
+/// [new_rsp + 16]: saved rax (syscall return value, restored by sigreturn)
+/// [new_rsp + 24]: saved user RIP
+/// [new_rsp + 32]: saved user RFLAGS
+/// [new_rsp + 40]: original user RSP (before sigframe push)
+///
+/// Total: 48 bytes.  new_rsp is chosen so (new_rsp % 16) == 8 for SysV alignment.
+const SIGFRAME_SLOTS: usize = 6;
+
+/// Called from _syscall_entry (naked asm) just before SYSRETQ.
+/// Receives the user context that was current at syscall time.
+/// If a user-space signal handler is pending, pushes a sigframe, sets the
+/// percpu override fields, and returns the signum (> 0).
+/// For default-action signals, terminates the process and never returns.
+/// Returns 0 if no signal pending.
+#[no_mangle]
+pub unsafe extern "C" fn maybe_deliver_signal(
+    user_rip:    u64,
+    user_rflags: u64,
+    user_rsp:    u64,
+    saved_rax:   u64,
+) -> u64 {
     let pid = crate::scheduler::current_pid();
-    while let Some((signum, handler)) = crate::scheduler::take_pending_signal(pid) {
-        if handler == 0 {
-            // Default action: most signals terminate the process.
-            let exit_code = match signum {
-                9        => { crate::klog!(INFO, "SIGKILL pid={}", pid); 128 + 9 }
-                15       => { crate::klog!(INFO, "SIGTERM pid={}", pid); 128 + 15 }
-                11       => { crate::klog!(WARN, "SIGSEGV pid={}", pid); 139 }
-                8        => { crate::klog!(WARN, "SIGFPE  pid={}", pid); 136 }
-                6        => { crate::klog!(WARN, "SIGABRT pid={}", pid); 134 }
-                _        => continue, // ignore other default-action signals for now
-            };
-            crate::scheduler::exit_current_direct(pid, exit_code);
-            // exit_current_direct never returns.
-        }
-        // handler != 0: user-space handler; delivery requires user stack
-        // modification. For now, silently consume (handler delivery is TODO).
-        crate::klog!(DEBUG, "signal {} pid={} handler={:#x} (delivery pending)", signum, pid, handler);
+    let (signum, handler) = match crate::scheduler::take_pending_signal(pid) {
+        Some(s) => s,
+        None    => return 0,
+    };
+
+    if handler == 0 {
+        let exit_code = match signum {
+            9  => { crate::klog!(INFO, "SIGKILL pid={}", pid); 128 + 9 }
+            15 => { crate::klog!(INFO, "SIGTERM pid={}", pid); 128 + 15 }
+            11 => { crate::klog!(WARN, "SIGSEGV pid={}", pid); 139 }
+            8  => { crate::klog!(WARN, "SIGFPE  pid={}", pid);  136 }
+            6  => { crate::klog!(WARN, "SIGABRT pid={}", pid);  134 }
+            _  => return 0, // SIGCHLD, SIGURG etc. — silently drop
+        };
+        crate::scheduler::exit_current_direct(pid, exit_code);
     }
+
+    // Build the sigframe on the user stack.
+    // Align new_rsp so that (new_rsp % 16) == 8 (SysV: RSP before `push` of return addr).
+    let frame_bytes = (SIGFRAME_SLOTS * 8) as u64;
+    let new_rsp = ((user_rsp - frame_bytes) & !15u64) | 8u64;
+
+    let f = new_rsp as *mut u64;
+    f.add(0).write(crate::memory::VDSO_ADDR); // restorer (ret target)
+    f.add(1).write(signum as u64);             // signum
+    f.add(2).write(saved_rax);                 // saved rax
+    f.add(3).write(user_rip);                  // saved user RIP
+    f.add(4).write(user_rflags);               // saved user RFLAGS
+    f.add(5).write(user_rsp);                  // original user RSP
+
+    // Set percpu override fields — picked up by _syscall_entry asm.
+    let cpu = hal::arch_x86_64::gs_cpu_data();
+    (*cpu).signal_new_rip    = handler;
+    (*cpu).signal_new_rsp    = new_rsp;
+    (*cpu).signal_new_rflags = 0x0202; // IF=1 for handler entry
+    (*cpu).signal_signum     = signum as u64;
+
+    crate::klog!(DEBUG, "signal {}: pid={} handler={:#x} sigframe={:#x}",
+        signum, pid, handler, new_rsp);
+
+    signum as u64
+}
+
+/// sys_rt_sigreturn — restores process state after a signal handler returns.
+/// The handler's `ret` jumped to the vDSO trampoline, which issued this syscall.
+/// At entry: user_rsp (from gs:24) = original new_rsp + 8 (ret consumed the restorer).
+unsafe fn sys_rt_sigreturn() -> i64 {
+    let cpu = hal::arch_x86_64::gs_cpu_data();
+    // Recover sigframe base: user_rsp at syscall entry = new_rsp + 8.
+    let user_rsp_now = (*cpu).user_rsp;
+    let frame_base   = user_rsp_now - 8; // new_rsp (where frame starts)
+    let f = frame_base as *const u64;
+
+    // [+0] restorer (already consumed), [+1] signum, [+2] saved_rax,
+    // [+3] saved_rip, [+4] saved_rflags, [+5] saved_user_rsp
+    let saved_rax    = f.add(2).read();
+    let saved_rip    = f.add(3).read();
+    let saved_rflags = f.add(4).read();
+    let saved_rsp    = f.add(5).read();
+
+    // Restore the interrupted context via the same percpu override mechanism.
+    (*cpu).signal_new_rip    = saved_rip;
+    (*cpu).signal_new_rsp    = saved_rsp;
+    (*cpu).signal_new_rflags = saved_rflags;
+
+    crate::klog!(DEBUG, "sigreturn: rip={:#x} rsp={:#x}", saved_rip, saved_rsp);
+
+    // Return the saved rax so the interrupted syscall's return value is preserved.
+    saved_rax as i64
+}
+
+/// Handle default-action signals at syscall return (called from deliver_pending_signals_default).
+/// Now a thin wrapper — real delivery happens in maybe_deliver_signal.
+unsafe fn deliver_pending_signals_default() {
+    // maybe_deliver_signal now handles both default and user-handler delivery.
+    // This path is a no-op; signals are delivered by the _syscall_entry asm hook.
 }
 
 // ── Syscall implementations ───────────────────────────────────────────────────

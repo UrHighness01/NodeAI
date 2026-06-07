@@ -94,19 +94,35 @@ pub const MSR_PLATFORM_INFO:u32 = 0x0000_00CE;
 // ── Per-CPU data (GS-based) ───────────────────────────────────────────────────
 
 /// Per-CPU data structure stored at the GS base.
+///
+/// Field offsets are used directly in assembly — DO NOT reorder without
+/// updating _syscall_entry and any other asm that references gs:N.
+///
+/// gs:0   self_ptr       u64
+/// gs:8   cpu_id/pad     u32+u32
+/// gs:16  kernel_rsp     u64
+/// gs:24  user_rsp       u64
+/// gs:32  ticks_per_ms   u32+pad
+/// gs:40  signal_new_rip    u64  (0 = no pending override)
+/// gs:48  signal_new_rsp    u64
+/// gs:56  signal_new_rflags u64
+/// gs:64  signal_signum     u64  (signum → handler's rdi)
 #[repr(C)]
 pub struct PercpuData {
-    /// Self-pointer (offset 0 — used for GS-relative self reference).
     pub self_ptr:  u64,
-    /// Current CPU ID (APIC ID).
     pub cpu_id:    u32,
     pub _pad:      u32,
-    /// Kernel stack pointer for this CPU (used on syscall entry).
     pub kernel_rsp: u64,
-    /// Current task's user RSP (saved on syscall entry).
     pub user_rsp:   u64,
-    /// LAPIC ticks-per-ms (used by scheduler).
     pub ticks_per_ms: u32,
+    pub _pad2:     u32,
+    /// Set by maybe_deliver_signal / sys_rt_sigreturn to override the RIP
+    /// returned to user space by SYSRETQ.  0 means no override.
+    pub signal_new_rip:    u64,
+    pub signal_new_rsp:    u64,
+    pub signal_new_rflags: u64,
+    /// Signum passed to the handler in RDI (only meaningful when signal_new_rip != 0).
+    pub signal_signum:     u64,
 }
 
 /// Set the GS base to point at a per-CPU data structure.

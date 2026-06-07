@@ -84,8 +84,13 @@ pub fn translate(virt: VirtAddr) -> Option<PhysAddr> {
     }
 }
 
+/// Fixed virtual address of the per-process vDSO page.
+/// Contains the sigreturn trampoline: `mov eax, 15; syscall` (sys_rt_sigreturn = 15).
+pub const VDSO_ADDR: u64 = 0x0000_7FFF_FFE0_0000;
+
 /// Allocate a new L4 page table for a user process, pre-populated with the
 /// kernel-half entries (L4 indices 256–511) copied from the current CR3.
+/// Also maps the vDSO page at VDSO_ADDR with the sigreturn trampoline.
 /// Returns the physical address of the new L4 (use as CR3 value).
 ///
 /// User-space entries (L4 indices 0–255) start empty; the process builds them
@@ -113,6 +118,39 @@ pub fn alloc_user_cr3() -> Option<u64> {
         for i in 256..512usize {
             *dst.add(i) = *src.add(i);
         }
+    }
+
+    // Map the vDSO page: `mov eax, 15 (0x0F); syscall` = B8 0F 00 00 00 0F 05
+    // This is the sigreturn trampoline — signal handlers `ret` here.
+    let vdso_phys = super::pmm::alloc_frame()?;
+    let vdso_virt = phys_off + vdso_phys;
+    unsafe {
+        core::ptr::write_bytes(vdso_virt as *mut u8, 0, 4096);
+        let t = vdso_virt as *mut u8;
+        t.write(0xB8);               // mov eax, imm32
+        t.add(1).write(15);          //   15 (sys_rt_sigreturn)
+        t.add(2).write(0); t.add(3).write(0); t.add(4).write(0);
+        t.add(5).write(0x0F);        // syscall
+        t.add(6).write(0x05);
+    }
+
+    // Temporarily switch to the new CR3 to map the vDSO into the new address space.
+    let old_cr3_save: u64;
+    unsafe {
+        core::arch::asm!("mov {}, cr3", out(reg) old_cr3_save, options(nomem, nostack));
+        core::arch::asm!("mov cr3, {}", in(reg) new_l4_phys, options(nomem, nostack));
+    }
+    let _ = map_page(
+        x86_64::structures::paging::Page::containing_address(
+            x86_64::VirtAddr::new(VDSO_ADDR)),
+        x86_64::structures::paging::PhysFrame::containing_address(
+            x86_64::PhysAddr::new(vdso_phys)),
+        x86_64::structures::paging::PageTableFlags::PRESENT
+            | x86_64::structures::paging::PageTableFlags::USER_ACCESSIBLE,
+        // Note: NOT WRITABLE, NOT NO_EXECUTE → executable read-only user page
+    );
+    unsafe {
+        core::arch::asm!("mov cr3, {}", in(reg) old_cr3_save, options(nomem, nostack));
     }
 
     Some(new_l4_phys)
