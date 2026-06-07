@@ -276,6 +276,14 @@ pub fn get_parent_pid(pid: Pid) -> Pid {
     TASKS.lock().get(&pid).map(|t| t.parent_pid).unwrap_or(0)
 }
 
+/// Apply an AI-suggested priority adjustment to a task (clamped to ±20).
+pub fn adjust_priority(pid: Pid, delta: i8) {
+    let mut tasks = TASKS.lock();
+    if let Some(t) = tasks.get_mut(&pid) {
+        t.priority = (t.priority + delta as i32).clamp(-20, 20);
+    }
+}
+
 /// Force-kill a task (mark zombie with given code).
 pub fn kill_task(pid: Pid, code: i32) {
     let mut tasks = TASKS.lock();

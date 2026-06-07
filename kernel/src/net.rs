@@ -1589,7 +1589,7 @@ pub mod tcp {
 
 /// HTTP server state.
 static HTTP_RUNNING: AtomicBool = AtomicBool::new(false);
-static HTTP_PORT: Mutex<u16> = Mutex::new(8080);
+static HTTP_PORT: Mutex<u16> = Mutex::new(8081); // kernel diagnostic httpd; 8080 reserved for userspace
 static HTTP_ROOT: Mutex<String> = Mutex::new(String::new());
 
 /// Start the built-in HTTP server on given port, serving files under `root_dir`.

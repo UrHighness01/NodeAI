@@ -4136,7 +4136,7 @@ fn cmd_service(args: &str) {
         "start" => {
             match svc {
                 "sshd" => { crate::net::ssh_server_start(22); println!("sshd: started on port 22"); }
-                "httpd" => { crate::net::http_server_start(8080, "/var/www"); println!("httpd: started on port 8080"); }
+                "httpd" => { crate::net::http_server_start(8081, "/var/www"); println!("httpd: started on port 8081"); }
                 _ => { println!("Starting {}...", svc); println!("{}: started", svc); }
             }
         }
@@ -4150,7 +4150,7 @@ fn cmd_service(args: &str) {
         "restart" => {
             match svc {
                 "sshd" => { crate::net::ssh_server_stop(); crate::net::ssh_server_start(22); println!("sshd: restarted"); }
-                "httpd" => { crate::net::http_server_stop(); crate::net::http_server_start(8080, "/var/www"); println!("httpd: restarted"); }
+                "httpd" => { crate::net::http_server_stop(); crate::net::http_server_start(8081, "/var/www"); println!("httpd: restarted"); }
                 _ => { println!("Restarting {}...", svc); println!("{}: restarted", svc); }
             }
         }
@@ -4184,7 +4184,7 @@ fn cmd_httpd(args: &str) {
     }
     match parts[0] {
         "start" => {
-            let port: u16 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(8080);
+            let port: u16 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(8081);
             let root = parts.get(2).copied().unwrap_or("/var/www");
             crate::net::http_server_start(port, root);
             println!("httpd: listening on port {}, serving {}", port, root);

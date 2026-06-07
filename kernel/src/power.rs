@@ -236,3 +236,9 @@ pub fn set_cpu_governor(level: u8) {
     // Hint via ACPI _PPC or MSR IA32_PERF_CTL; stub for now.
     crate::klog!(DEBUG, "power: cpu_governor={}", level);
 }
+
+/// Apply an AI-requested P-state change.
+pub fn apply_pstate(pstate: u8, park_mask: u64) {
+    // TODO: write to IA32_PERF_CTL MSR per-CPU when SMP is active.
+    crate::klog!(DEBUG, "power: AI pstate={} park_mask={:#x}", pstate, park_mask);
+}
