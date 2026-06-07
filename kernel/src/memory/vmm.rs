@@ -180,87 +180,67 @@ pub unsafe fn map_user_range_in_cr3(
 
 /// Copy all user-space mappings (L4 indices 0–255) from `src_cr3` into `dst_cr3`.
 ///
-/// For every present leaf PTE in the source address space this function:
-///   1. Allocates a new physical frame in the destination.
-///   2. Copies the page content.
-///   3. Maps the new frame at the same virtual address with the same flags.
-///
-/// The destination's kernel half (L4 indices 256–511) is left untouched —
-/// it was already filled in by `alloc_user_cr3`.
+/// Walks the source page table hierarchy through the PHYS_OFFSET window and
+/// writes PTEs directly into the destination tables — no CR3 switching, no
+/// TLB flushes, no `map_user_range` calls. Intermediate destination tables
+/// (L3/L2/L1) are allocated on demand.
 ///
 /// Returns `Ok(pages_copied)` or `Err` if out of memory mid-copy.
 pub unsafe fn copy_user_address_space(src_cr3: u64, dst_cr3: u64) -> Result<usize, &'static str> {
+    const PTE_PRESENT:   u64 = 1;
+    const PTE_HUGE:      u64 = 1 << 7;
+    const PTE_ADDR_MASK: u64 = 0x000F_FFFF_FFFF_F000;
+
     let phys_off = PHYS_OFFSET;
     let mut pages_copied: usize = 0;
 
-    // Walk source L4, user half only (indices 0–255).
     let src_l4 = (phys_off + src_cr3) as *const u64;
+    let dst_l4 = (phys_off + dst_cr3) as *mut u64;
+
     for l4i in 0..256usize {
         let l4e = *src_l4.add(l4i);
-        if l4e & 1 == 0 { continue; } // not present
+        if l4e & PTE_PRESENT == 0 { continue; }
 
-        let l3_phys = l4e & 0x000F_FFFF_FFFF_F000;
-        let l3 = (phys_off + l3_phys) as *const u64;
+        // Ensure destination L3 table exists.
+        let dst_l3_phys = ensure_table(dst_l4.add(l4i), l4e, phys_off)?;
+        let src_l3 = (phys_off + (l4e & PTE_ADDR_MASK)) as *const u64;
+        let dst_l3 = (phys_off + dst_l3_phys) as *mut u64;
 
         for l3i in 0..512usize {
-            let l3e = *l3.add(l3i);
-            if l3e & 1 == 0 { continue; }
-            if l3e & (1 << 7) != 0 { continue; } // 1 GiB huge page — skip for now
+            let l3e = *src_l3.add(l3i);
+            if l3e & PTE_PRESENT == 0 { continue; }
+            if l3e & PTE_HUGE   != 0  { continue; } // 1 GiB pages — skip
 
-            let l2_phys = l3e & 0x000F_FFFF_FFFF_F000;
-            let l2 = (phys_off + l2_phys) as *const u64;
+            let dst_l2_phys = ensure_table(dst_l3.add(l3i), l3e, phys_off)?;
+            let src_l2 = (phys_off + (l3e & PTE_ADDR_MASK)) as *const u64;
+            let dst_l2 = (phys_off + dst_l2_phys) as *mut u64;
 
             for l2i in 0..512usize {
-                let l2e = *l2.add(l2i);
-                if l2e & 1 == 0 { continue; }
-                if l2e & (1 << 7) != 0 { continue; } // 2 MiB huge page — skip for now
+                let l2e = *src_l2.add(l2i);
+                if l2e & PTE_PRESENT == 0 { continue; }
+                if l2e & PTE_HUGE   != 0  { continue; } // 2 MiB pages — skip
 
-                let l1_phys = l2e & 0x000F_FFFF_FFFF_F000;
-                let l1 = (phys_off + l1_phys) as *const u64;
+                let dst_l1_phys = ensure_table(dst_l2.add(l2i), l2e, phys_off)?;
+                let src_l1 = (phys_off + (l2e & PTE_ADDR_MASK)) as *const u64;
+                let dst_l1 = (phys_off + dst_l1_phys) as *mut u64;
 
                 for l1i in 0..512usize {
-                    let l1e = *l1.add(l1i);
-                    if l1e & 1 == 0 { continue; }
+                    let l1e = *src_l1.add(l1i);
+                    if l1e & PTE_PRESENT == 0 { continue; }
 
-                    // Reconstruct the virtual address this PTE maps.
-                    let virt: u64 = ((l4i as u64) << 39)
-                        | ((l3i as u64) << 30)
-                        | ((l2i as u64) << 21)
-                        | ((l1i as u64) << 12);
-
-                    // Allocate a fresh frame for the child.
-                    let new_phys = super::pmm::alloc_frame()
+                    // Allocate and copy the data frame.
+                    let src_phys = l1e & PTE_ADDR_MASK;
+                    let dst_phys = super::pmm::alloc_frame()
                         .ok_or("copy_user_address_space: OOM")?;
 
-                    // Copy page content from source frame.
-                    let src_frame_phys = l1e & 0x000F_FFFF_FFFF_F000;
-                    let src_virt = phys_off + src_frame_phys;
-                    let dst_virt = phys_off + new_phys;
                     core::ptr::copy_nonoverlapping(
-                        src_virt as *const u8,
-                        dst_virt as *mut u8,
+                        (phys_off + src_phys) as *const u8,
+                        (phys_off + dst_phys) as *mut u8,
                         4096,
                     );
 
-                    // Map the new frame at the same virtual address in dst_cr3.
-                    // Temporarily switch to dst_cr3 so map_page operates on it.
-                    let old_cr3: u64;
-                    core::arch::asm!("mov {}, cr3", out(reg) old_cr3, options(nomem, nostack));
-                    core::arch::asm!("mov cr3, {}", in(reg) dst_cr3, options(nomem, nostack));
-
-                    use x86_64::{VirtAddr, PhysAddr};
-                    use x86_64::structures::paging::{Page, PhysFrame, Size4KiB, PageTableFlags};
-                    let flags = PageTableFlags::from_bits_truncate(l1e) &
-                        (PageTableFlags::PRESENT
-                        | PageTableFlags::WRITABLE
-                        | PageTableFlags::USER_ACCESSIBLE
-                        | PageTableFlags::NO_EXECUTE);
-                    let page: Page<Size4KiB> = Page::containing_address(VirtAddr::new(virt));
-                    let frame: PhysFrame<Size4KiB> = PhysFrame::containing_address(PhysAddr::new(new_phys));
-                    let _ = map_page(page, frame, flags);
-
-                    core::arch::asm!("mov cr3, {}", in(reg) old_cr3, options(nomem, nostack));
-
+                    // Write the leaf PTE with the new physical address, same flags.
+                    *dst_l1.add(l1i) = dst_phys | (l1e & !PTE_ADDR_MASK);
                     pages_copied += 1;
                 }
             }
@@ -268,6 +248,28 @@ pub unsafe fn copy_user_address_space(src_cr3: u64, dst_cr3: u64) -> Result<usiz
     }
 
     Ok(pages_copied)
+}
+
+/// If `dst_pte` has a present child table, return its physical address.
+/// Otherwise allocate a new zeroed table frame, write its address into `dst_pte`
+/// (copying the non-address flags from `src_entry`), and return the new frame.
+unsafe fn ensure_table(
+    dst_pte:    *mut u64,
+    src_entry:  u64,
+    phys_off:   u64,
+) -> Result<u64, &'static str> {
+    const PTE_PRESENT:   u64 = 1;
+    const PTE_ADDR_MASK: u64 = 0x000F_FFFF_FFFF_F000;
+    const PTE_FLAGS_MASK: u64 = !PTE_ADDR_MASK;
+
+    let existing = *dst_pte;
+    if existing & PTE_PRESENT != 0 {
+        return Ok(existing & PTE_ADDR_MASK);
+    }
+    let new_phys = super::pmm::alloc_frame().ok_or("ensure_table: OOM")?;
+    core::ptr::write_bytes((phys_off + new_phys) as *mut u8, 0, 4096);
+    *dst_pte = new_phys | (src_entry & PTE_FLAGS_MASK);
+    Ok(new_phys)
 }
 
 /// Map an MMIO physical region as write-through, no-cache, writable.

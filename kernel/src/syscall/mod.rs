@@ -565,7 +565,9 @@ pub unsafe extern "C" fn maybe_deliver_signal(
     // Build the sigframe on the user stack.
     // Align new_rsp so that (new_rsp % 16) == 8 (SysV: RSP before `push` of return addr).
     let frame_bytes = (SIGFRAME_SLOTS * 8) as u64;
-    let new_rsp = ((user_rsp - frame_bytes) & !15u64) | 8u64;
+    // Round down to 16-byte boundary, then subtract 8 so RSP%16 == 8 at handler entry
+    // (SysV ABI: RSP is 16n-8 at a call site, because `call` pushes 8 bytes).
+    let new_rsp = ((user_rsp - frame_bytes) & !15u64).wrapping_sub(8);
 
     let f = new_rsp as *mut u64;
     f.add(0).write(crate::memory::VDSO_ADDR); // restorer (ret target)
