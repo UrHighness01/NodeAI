@@ -17,15 +17,27 @@ use super::{lookup, VfsNode};
 /// Must be called after `vfs::init()` and `ai_engine::init()`.
 pub fn init() {
     // /proc
-    write_file("/proc", "version",  proc_version());
-    write_file("/proc", "cpuinfo",  proc_cpuinfo());
-    write_file("/proc", "meminfo",  proc_meminfo());
+    write_file("/proc", "version",       proc_version());
+    write_file("/proc", "cpuinfo",       proc_cpuinfo());
+    write_file("/proc", "meminfo",       proc_meminfo());
+    write_file("/proc", "syscall_stats", crate::syscall_stats::format_summary());
 
     // /ai
     write_file("/ai", "status",      ai_status());
     write_file("/ai", "suggestions", ai_suggestions());
+    write_file("/ai", "anomalies",   crate::anomaly::format_report());
+    write_file("/ai", "tunables",    crate::tunables::format_table());
 
     crate::klog!(INFO, "procfs: /proc and /ai populated");
+}
+
+/// Refresh dynamic /proc files — called from telemetry::tick every ~1 s.
+pub fn refresh() {
+    write_file("/proc", "meminfo",       proc_meminfo());
+    write_file("/proc", "syscall_stats", crate::syscall_stats::format_summary());
+    write_file("/ai",   "anomalies",     crate::anomaly::format_report());
+    write_file("/ai",   "tunables",      crate::tunables::format_table());
+    write_file("/ai",   "status",        ai_status());
 }
 
 // ── Content generators ────────────────────────────────────────────────────────

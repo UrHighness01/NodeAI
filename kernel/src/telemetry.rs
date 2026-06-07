@@ -212,5 +212,6 @@ pub fn tick(uptime_ms: u64) {
     // Refresh telemetry VFS file once per second
     if uptime_ms % 1000 < 10 {
         refresh_vfs();
+        crate::vfs::procfs::refresh(); // meminfo, syscall_stats, ai/status
     }
 }

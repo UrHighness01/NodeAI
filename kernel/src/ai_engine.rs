@@ -60,8 +60,10 @@ pub fn process_tick(uptime_ms: u64) {
 fn apply_decision(decision: AiDecision) {
     match decision {
         AiDecision::SchedulerAdjust { pid, nice_delta, predicted_burst_us } => {
-            // Validate through safety layer then apply.
-            let delta = ai_subsystem::safety::check_scheduler_nice(0, nice_delta);
+            // Validate through safety layer, then clamp to live tunable cap.
+            let raw   = ai_subsystem::safety::check_scheduler_nice(0, nice_delta);
+            let cap   = crate::tunables::AI_NICE_CAP.load(core::sync::atomic::Ordering::Relaxed);
+            let delta = raw.clamp(-cap, cap);
             if delta != 0 {
                 crate::scheduler::adjust_priority(pid, delta);
             }

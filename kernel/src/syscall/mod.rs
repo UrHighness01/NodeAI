@@ -169,6 +169,7 @@ pub mod nr {
     pub const FSTATFS:         u64 = 138;
     pub const AI_QUERY:        u64 = 200;
     pub const AI_LOG:          u64 = 201;
+    pub const SYS_INTENT:      u64 = 202; // NodeAI-specific: declare scheduling intent
     pub const TKILL:           u64 = 200;   // re-use slot — routed same as AI_QUERY when called correctly
     pub const TGKILL:          u64 = 234;
     // Phase 24 additions (new constants not already defined above)
@@ -366,6 +367,16 @@ pub unsafe extern "C" fn syscall_dispatch_extern(
     arg5: u64,
 ) -> i64 {
     SYSCALL_COUNT.fetch_add(1, Ordering::Relaxed);
+    let pid = crate::scheduler::current_pid();
+    // Per-task histogram and anomaly detection (both non-blocking).
+    crate::syscall_stats::record(pid, nr);
+    let (alert, score) = crate::anomaly::observe(pid, nr);
+    if alert {
+        crate::klog!(WARN, "ANOMALY: pid={} score={:.3} nr={}", pid, score, nr);
+        // Feed into AI security pipeline.
+        ai_subsystem::event_bus::publish(
+            ai_subsystem::event_bus::KernelEvent::SyscallIssued { pid, syscall_nr: nr as u32 });
+    }
     let result = match nr {
         // ── Phase 11 core ──────────────────────────────────────────────────
         nr::READ          => sys_read(arg0, arg1, arg2),
@@ -502,6 +513,7 @@ pub unsafe extern "C" fn syscall_dispatch_extern(
         nr::RT_SIGRETURN  => sys_rt_sigreturn(),
         nr::AI_QUERY      => sys_ai_query(arg0, arg1),
         nr::AI_LOG        => sys_ai_log(arg0, arg1, arg2),
+        nr::SYS_INTENT    => sys_intent(arg0, arg1),
         _                 => {
             crate::klog!(WARN, "SYSCALL: unimplemented nr={}", nr);
             ENOSYS
@@ -747,10 +759,62 @@ unsafe fn sys_exit(code: i32) -> i64 {
 
 // ── sys_ai_query ─────────────────────────────────────────────────────────────
 
-unsafe fn sys_ai_query(query_type: u64, _arg: u64) -> i64 {
-    // Route to AI subsystem: for now return a placeholder decision.
-    crate::klog!(DEBUG, "sys_ai_query(type={})", query_type);
-    0   // reserved for future AI hint return
+// sys_ai_query query types:
+//   0 = QUERY_STATUS:      returns AI subsystem health (audit count)
+//   1 = QUERY_ANOMALY:     returns current pid's anomaly score × 1000 (i32 fixed-point)
+//   2 = QUERY_SET_TUNABLE: arg = ptr to null-terminated "name=value" string; applies live tunable
+unsafe fn sys_ai_query(query_type: u64, arg: u64) -> i64 {
+    match query_type {
+        0 => ai_subsystem::audit::entry_count() as i64,
+        1 => {
+            let score = crate::anomaly::score(crate::scheduler::current_pid());
+            (score * 1000.0) as i64
+        }
+        2 => {
+            // Parse "name=value" from user pointer.
+            let s = match read_user_cstr(arg, 256) {
+                Some(s) => s,
+                None    => return EFAULT,
+            };
+            if let Some(eq) = s.find('=') {
+                let name  = &s[..eq];
+                let value = s[eq+1..].parse::<i64>().unwrap_or(0);
+                match crate::tunables::apply(name, value) {
+                    Ok(v)  => { crate::klog!(INFO, "tunable {} = {}", name, v); v }
+                    Err(e) => { crate::klog!(WARN, "tunable error: {}", e); EINVAL }
+                }
+            } else {
+                EINVAL
+            }
+        }
+        _ => {
+            crate::klog!(DEBUG, "sys_ai_query(type={}) unknown", query_type);
+            0
+        }
+    }
+}
+
+// ── sys_intent ───────────────────────────────────────────────────────────────
+//
+// sys_intent(intent_type, hint_value) — NodeAI-specific.
+// Userspace declares its scheduling/I-O intent so the kernel can route resources
+// optimally without guessing from syscall patterns alone.
+//
+// Intent types:
+//   0 = INTENT_DEFAULT        (remove any previously set intent)
+//   1 = INTENT_LATENCY        (latency-sensitive server: max priority, min quantum)
+//   2 = INTENT_BATCH          (batch job: lower priority, larger quantum, greedy I/O)
+//   3 = INTENT_INTERACTIVE    (interactive UI: boost after I/O wait)
+//   4 = INTENT_IO_SEQUENTIAL  (hint: prefetch next pages; hint_value = stride bytes)
+//   5 = INTENT_IO_RANDOM      (random I/O: don't prefetch)
+//   6 = INTENT_MEMORY_LARGE   (will allocate large working set; hint_value = est. bytes)
+//   7 = INTENT_CPU_BOUND      (no I/O wait expected; full quantum)
+
+unsafe fn sys_intent(intent_type: u64, hint_value: u64) -> i64 {
+    let pid = crate::scheduler::current_pid();
+    crate::scheduler::set_intent(pid, intent_type as u8, hint_value);
+    crate::klog!(DEBUG, "sys_intent: pid={} type={} hint={}", pid, intent_type, hint_value);
+    0
 }
 
 // ── sys_ai_log ───────────────────────────────────────────────────────────────

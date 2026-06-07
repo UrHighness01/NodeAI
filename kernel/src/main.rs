@@ -62,6 +62,9 @@ mod intel_storage;
 mod intent_config;
 mod llm;
 mod predictive_hibernate;
+pub mod syscall_stats;  // per-task syscall histograms
+pub mod anomaly;        // causal anomaly detector
+pub mod tunables;       // live AI-adjustable kernel parameters
 
 /// Bootloader configuration — tells the bootloader to map all physical memory
 /// at a dynamic virtual offset so we can access physical frames by VA.

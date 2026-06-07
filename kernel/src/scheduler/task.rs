@@ -135,6 +135,10 @@ pub struct Task {
     pub parent_pid: Pid,
     /// Exit code set by sys_exit; None while alive.
     pub exit_code: Option<i32>,
+    /// Declared scheduling intent via sys_intent (0 = default/unset).
+    pub intent: u8,
+    /// Hint value accompanying the intent (e.g. I/O stride, memory estimate).
+    pub intent_hint: u64,
     /// Pending signal bitmap (bit N = signal N is pending delivery).
     pub pending_signals: u64,
     /// Per-task FPU/SSE state — saved/restored by the timer handler via fxsave64/fxrstor64.
@@ -204,6 +208,8 @@ impl Task {
             egid: 0,
             parent_pid:      0,
             exit_code:       None,
+            intent:          0,
+            intent_hint:     0,
             pending_signals: 0,
             fpu_state:       FpuState::default_state(),
             user_brk:        0,
@@ -255,6 +261,8 @@ impl Task {
             egid:             self.egid,
             parent_pid:       self.pid,
             exit_code:        None,
+            intent:           self.intent,
+            intent_hint:      self.intent_hint,
             pending_signals:  0,
             fpu_state:        self.fpu_state, // copy parent's FPU state to child
             user_brk:         self.user_brk,

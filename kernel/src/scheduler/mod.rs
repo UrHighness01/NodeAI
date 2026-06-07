@@ -229,6 +229,10 @@ pub fn exit_current(code: i32) -> ! {
         0
     };
 
+    // Clean up per-task data.
+    crate::syscall_stats::remove(pid);
+    crate::anomaly::remove(pid);
+
     // Wake the parent and send SIGCHLD.
     if parent_pid != 0 {
         wake_pid(parent_pid);
@@ -332,6 +336,38 @@ pub fn get_parent_pid(pid: Pid) -> Pid {
 pub fn set_task_cr3(pid: Pid, cr3: u64) {
     let mut tasks = TASKS.lock();
     if let Some(t) = tasks.get_mut(&pid) { t.cr3 = cr3; }
+}
+
+// ── Intent-based scheduling ────────────────────────────────────────────────────
+//
+// Intent constants (must match sys_intent documentation in syscall/mod.rs).
+pub const INTENT_DEFAULT:      u8 = 0;
+pub const INTENT_LATENCY:      u8 = 1;
+pub const INTENT_BATCH:        u8 = 2;
+pub const INTENT_INTERACTIVE:  u8 = 3;
+pub const INTENT_IO_SEQUENTIAL:u8 = 4;
+pub const INTENT_IO_RANDOM:    u8 = 5;
+pub const INTENT_MEMORY_LARGE: u8 = 6;
+pub const INTENT_CPU_BOUND:    u8 = 7;
+
+/// Apply a declared intent to a task's scheduling parameters immediately.
+/// The AI engine may refine these further on the next tick.
+pub fn set_intent(pid: Pid, intent: u8, hint: u64) {
+    let mut tasks = TASKS.lock();
+    if let Some(t) = tasks.get_mut(&pid) {
+        t.intent      = intent;
+        t.intent_hint = hint;
+        // Apply immediate priority bias based on intent.
+        t.priority = match intent {
+            INTENT_LATENCY     => -15, // near-realtime
+            INTENT_INTERACTIVE => -10, // boosted
+            INTENT_DEFAULT     =>   0,
+            INTENT_BATCH       =>  10, // deprioritised
+            INTENT_CPU_BOUND   =>   5, // slightly lower (yield to latency tasks)
+            _                  => t.priority, // I/O hints: no priority change
+        };
+        crate::klog!(INFO, "Intent: pid={} type={} priority={}", pid, intent, t.priority);
+    }
 }
 
 /// Apply an AI-suggested priority adjustment to a task (clamped to ±20).
