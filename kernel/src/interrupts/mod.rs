@@ -108,9 +108,9 @@ extern "x86-interrupt" fn page_fault_handler(
                 }
             }
         }
-        // Address is out of valid range — kill the process.
+        // Address is out of valid range — send SIGSEGV; task will die at next syscall return.
         crate::klog!(ERROR, "#PF SIGSEGV pid={} addr={:#x} ip={:#x}", pid, cr2, ip);
-        crate::scheduler::kill_task(pid, -11); // SIGSEGV = 11
+        crate::scheduler::send_signal(pid, 11); // SIGSEGV
         crate::scheduler::yield_cpu();
         return;
     }

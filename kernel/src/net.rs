@@ -1515,6 +1515,12 @@ pub mod tcp {
         Some(key)
     }
 
+    /// Return the number of bytes waiting in the socket's receive buffer (non-consuming).
+    pub fn rx_buf_len(local_port: u16, remote_ip: [u8; 4], remote_port: u16) -> usize {
+        let key = TcpSocketKey { local_port, remote_ip, remote_port };
+        SOCKETS.lock().get(&key).map(|s| s.rcv_buf.len()).unwrap_or(0)
+    }
+
     /// Drain up to `buf.len()` bytes from the socket's receive buffer.
     pub fn recv(local_port: u16, remote_ip: [u8; 4], remote_port: u16, buf: &mut [u8]) -> usize {
         let key = TcpSocketKey { local_port, remote_ip, remote_port };

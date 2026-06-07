@@ -49,6 +49,9 @@ pub struct Stat {
 
 /// An open file or directory, obtained via `VfsNode::open`.
 pub trait FileHandle: Send + Sync {
+    /// Return how many bytes can be read without blocking.
+    /// Default: 0 (unknown / treat as not-ready). Implementors should override.
+    fn bytes_available(&self) -> usize { 0 }
     fn read(&mut self, buf: &mut [u8])  -> VfsResult<usize>;
     fn write(&mut self, buf: &[u8])     -> VfsResult<usize>;
     fn seek(&mut self, pos: u64)        -> VfsResult<u64>;

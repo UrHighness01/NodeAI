@@ -109,6 +109,10 @@ unsafe impl Send for RamFileHandle {}
 unsafe impl Sync for RamFileHandle {}
 
 impl FileHandle for RamFileHandle {
+    fn bytes_available(&self) -> usize {
+        self.data.len().saturating_sub(self.pos)
+    }
+
     fn read(&mut self, buf: &mut [u8]) -> VfsResult<usize> {
         let avail = self.data.len().saturating_sub(self.pos);
         let n = buf.len().min(avail);

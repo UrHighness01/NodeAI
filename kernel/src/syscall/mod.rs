@@ -335,7 +335,7 @@ pub unsafe extern "C" fn syscall_dispatch_extern(
     arg5: u64,
 ) -> i64 {
     SYSCALL_COUNT.fetch_add(1, Ordering::Relaxed);
-    match nr {
+    let result = match nr {
         // ── Phase 11 core ──────────────────────────────────────────────────
         nr::READ          => sys_read(arg0, arg1, arg2),
         nr::WRITE         => sys_write(arg0, arg1, arg2),
@@ -474,6 +474,42 @@ pub unsafe extern "C" fn syscall_dispatch_extern(
             crate::klog!(WARN, "SYSCALL: unimplemented nr={}", nr);
             ENOSYS
         },
+    };
+
+    // ── Signal delivery on syscall return ────────────────────────────────────
+    // Check for pending unmasked signals before returning to user space.
+    // Signals with user-space handlers require user-stack modification
+    // (sigframe push) and are handled here for default-action signals only.
+    // Handler-based delivery (push sigframe, redirect RIP) is wired
+    // below via the asm wrapper once user RIP/RSP are accessible.
+    deliver_pending_signals_default();
+
+    result
+}
+
+/// Deliver any pending signals whose default action is to terminate.
+/// Called from the syscall return path (before SYSRETQ) and from page faults.
+/// Signals with registered user handlers are deferred to the asm wrapper
+/// where the user RIP/RSP can be modified.
+unsafe fn deliver_pending_signals_default() {
+    let pid = crate::scheduler::current_pid();
+    while let Some((signum, handler)) = crate::scheduler::take_pending_signal(pid) {
+        if handler == 0 {
+            // Default action: most signals terminate the process.
+            let exit_code = match signum {
+                9        => { crate::klog!(INFO, "SIGKILL pid={}", pid); 128 + 9 }
+                15       => { crate::klog!(INFO, "SIGTERM pid={}", pid); 128 + 15 }
+                11       => { crate::klog!(WARN, "SIGSEGV pid={}", pid); 139 }
+                8        => { crate::klog!(WARN, "SIGFPE  pid={}", pid); 136 }
+                6        => { crate::klog!(WARN, "SIGABRT pid={}", pid); 134 }
+                _        => continue, // ignore other default-action signals for now
+            };
+            crate::scheduler::exit_current_direct(pid, exit_code);
+            // exit_current_direct never returns.
+        }
+        // handler != 0: user-space handler; delivery requires user stack
+        // modification. For now, silently consume (handler delivery is TODO).
+        crate::klog!(DEBUG, "signal {} pid={} handler={:#x} (delivery pending)", signum, pid, handler);
     }
 }
 
@@ -1073,10 +1109,16 @@ unsafe fn sys_clone(flags: u64, stack_ptr: u64, _ptid: u64, tls: u64, _ctid: u64
 
 // ── sys_kill ─────────────────────────────────────────────────────────────────
 unsafe fn sys_kill(pid: i32, sig: i32) -> i64 {
-    crate::klog!(INFO, "sys_kill(pid={}, sig={})", pid, sig);
-    if (sig == 9 || sig == 15) && pid > 0 {
-        crate::scheduler::kill_task(pid as u64, 128 + sig as i32);
-    }
+    crate::klog!(DEBUG, "sys_kill(pid={}, sig={})", pid, sig);
+    if sig <= 0 || sig > 64 { return EINVAL; }
+    let target = if pid > 0 {
+        pid as u64
+    } else if pid == 0 {
+        crate::scheduler::current_pid() // send to self's process group (simplified: self)
+    } else {
+        return EINVAL; // broadcast/negative pid groups not implemented
+    };
+    crate::scheduler::send_signal(target, sig as u8);
     0
 }
 
@@ -1845,23 +1887,17 @@ unsafe fn sys_poll(fds_ptr: u64, nfds: u64, timeout_ms: i32) -> i64 {
             if fd as i32 < 0 { continue; }
 
             let mut revents: u16 = 0;
-            // fd=1/2: always writable
             if fd == 1 || fd == 2 {
+                // stdout/stderr: always writable.
                 if events & POLLOUT != 0 { revents |= POLLOUT; }
             } else {
-                // Check if handle has data (for sockets: peek rx_buf len)
-                let has_data = {
+                // Use bytes_available() — non-destructive, no data consumed.
+                let available = {
                     let mut table = FD_TABLE.lock();
-                    if let Some(h) = table.get_mut(&(pid, fd)) {
-                        let mut tmp = [0u8; 1];
-                        match h.read(&mut tmp) {
-                            Ok(n) if n > 0 => true,
-                            _ => false,
-                        }
-                    } else { false }
+                    table.get_mut(&(pid, fd)).map(|h| h.bytes_available()).unwrap_or(0)
                 };
-                if events & POLLIN  != 0 && has_data { revents |= POLLIN;  }
-                if events & POLLOUT != 0              { revents |= POLLOUT; }
+                if events & POLLIN  != 0 && available > 0 { revents |= POLLIN;  }
+                if events & POLLOUT != 0                   { revents |= POLLOUT; }
             }
             if revents != 0 {
                 core::ptr::write_unaligned(entry.add(6) as *mut u16, revents);
@@ -1904,6 +1940,9 @@ struct ConnectedSocketHandle {
     remote_port: u16,
 }
 impl crate::vfs::FileHandle for ConnectedSocketHandle {
+    fn bytes_available(&self) -> usize {
+        crate::net::tcp::rx_buf_len(self.local_port, self.remote_ip, self.remote_port)
+    }
     fn read(&mut self, buf: &mut [u8]) -> crate::vfs::VfsResult<usize> {
         Ok(crate::net::tcp::recv(self.local_port, self.remote_ip, self.remote_port, buf))
     }

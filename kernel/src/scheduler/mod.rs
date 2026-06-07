@@ -97,25 +97,30 @@ pub unsafe extern "C" fn schedule_from_interrupt(old_rsp: u64) -> u64 {
     };
 
     // Step 4: set up the incoming task and return its kernel RSP.
+    crate::klog!(TRACE, "Scheduler: {:?} → {}", old_pid, next_pid);
+
+    // Log BEFORE loading new CR3 — after the load, old stack may be unmapped
+    // (matters once per-process page tables are active).
     let next_rsp = {
         let mut tasks = TASKS.lock();
         match tasks.get_mut(&next_pid) {
             Some(t) => {
                 t.state = task::TaskState::Running;
                 crate::gdt::update_rsp0(t.kernel_stack_top);
-                let cr3 = t.cr3;
+                let cr3    = t.cr3;
+                let fs     = t.fs_base;
+                let rsp    = t.saved_kernel_rsp;
+                // Load new page table last — after all stack accesses.
                 core::arch::asm!("mov cr3, {}", in(reg) cr3, options(nostack, nomem));
-                if t.fs_base != 0 {
+                if fs != 0 {
                     x86_64::registers::model_specific::FsBase::write(
-                        x86_64::VirtAddr::new(t.fs_base));
+                        x86_64::VirtAddr::new(fs));
                 }
-                t.saved_kernel_rsp
+                rsp
             }
             None => old_rsp,
         }
     };
-
-    crate::klog!(TRACE, "Scheduler: {:?} → {}", old_pid, next_pid);
     next_rsp
 }
 
@@ -182,6 +187,28 @@ pub fn task_count() -> usize {
     TASKS.lock().len()
 }
 
+/// Terminate task `pid` with `code` — marks zombie, wakes parent, removes from queue.
+/// If `pid` is the current task, halts; otherwise returns normally.
+pub fn exit_current_direct(pid: Pid, code: i32) -> ! {
+    crate::klog!(INFO, "Scheduler: exit pid={} code={}", pid, code);
+    let parent_pid = {
+        let mut tasks = TASKS.lock();
+        let ppid = tasks.get(&pid).map(|t| t.parent_pid).unwrap_or(0);
+        if let Some(task) = tasks.get_mut(&pid) {
+            task.state     = task::TaskState::Zombie;
+            task.exit_code = Some(code);
+        }
+        drop(tasks);
+        runqueue::remove(pid);
+        ppid
+    };
+    if parent_pid != 0 {
+        wake_pid(parent_pid);
+        send_signal(parent_pid, 17); // SIGCHLD
+    }
+    loop { x86_64::instructions::hlt(); }
+}
+
 /// Mark the current task as a zombie, wake a waiting parent, and halt.
 /// Called from `sys_exit`; never returns.
 pub fn exit_current(code: i32) -> ! {
@@ -200,9 +227,10 @@ pub fn exit_current(code: i32) -> ! {
         0
     };
 
-    // Wake the parent if it is sleeping in wait4.
+    // Wake the parent and send SIGCHLD.
     if parent_pid != 0 {
         wake_pid(parent_pid);
+        send_signal(parent_pid, 17); // SIGCHLD
     }
 
     loop { x86_64::instructions::hlt(); }
@@ -284,13 +312,9 @@ pub fn adjust_priority(pid: Pid, delta: i8) {
     }
 }
 
-/// Force-kill a task (mark zombie with given code).
-pub fn kill_task(pid: Pid, code: i32) {
-    let mut tasks = TASKS.lock();
-    if let Some(t) = tasks.get_mut(&pid) {
-        t.state     = crate::scheduler::task::TaskState::Zombie;
-        t.exit_code = Some(code);
-    }
+/// Force-kill a task by sending SIGKILL (default action = terminate).
+pub fn kill_task(pid: Pid, _code: i32) {
+    send_signal(pid, 9); // SIGKILL
 }
 
 /// Spawn a user-space thread (POSIX thread / CLONE_THREAD).
@@ -313,6 +337,34 @@ pub fn spawn_user_thread(parent_pid: Pid, new_stack: u64, tls: u64, settls: bool
     runqueue::enqueue(child_pid);
     crate::klog!(INFO, "Scheduler: thread spawn parent={} → tid={}", parent_pid, child_pid);
     Some(child_pid)
+}
+
+/// Send a signal to a task: set the pending bit, wake if sleeping.
+pub fn send_signal(pid: Pid, signum: u8) {
+    if signum as usize >= 64 { return; }
+    let should_wake = {
+        let mut tasks = TASKS.lock();
+        if let Some(t) = tasks.get_mut(&pid) {
+            t.pending_signals |= 1u64 << signum;
+            t.state == task::TaskState::Sleeping
+        } else {
+            false
+        }
+    };
+    if should_wake { wake_pid(pid); }
+}
+
+/// Take the highest-priority pending unmasked signal for `pid`.
+/// Returns (signum, handler_va) where handler_va=0 means default action.
+pub fn take_pending_signal(pid: Pid) -> Option<(u8, u64)> {
+    let mut tasks = TASKS.lock();
+    let t = tasks.get_mut(&pid)?;
+    let deliverable = t.pending_signals & !t.signal_mask;
+    if deliverable == 0 { return None; }
+    let signum = deliverable.trailing_zeros() as u8;
+    t.pending_signals &= !(1u64 << signum);
+    let handler = t.signal_handlers[signum as usize];
+    Some((signum, handler))
 }
 
 /// Set a signal handler for the given signal number.

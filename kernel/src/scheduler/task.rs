@@ -114,6 +114,8 @@ pub struct Task {
     pub parent_pid: Pid,
     /// Exit code set by sys_exit; None while alive.
     pub exit_code: Option<i32>,
+    /// Pending signal bitmap (bit N = signal N is pending delivery).
+    pub pending_signals: u64,
     /// User-space program break (top of heap) for sys_brk.
     pub user_brk: u64,
     /// Thread-local storage FS base (ARCH_SET_FS).
@@ -177,10 +179,11 @@ impl Task {
             euid: 0,
             gid:  0,
             egid: 0,
-            parent_pid:  0,
-            exit_code:   None,
-            user_brk:    0,
-            fs_base:     0,
+            parent_pid:      0,
+            exit_code:       None,
+            pending_signals: 0,
+            user_brk:        0,
+            fs_base:         0,
         }
     }
 
@@ -228,6 +231,7 @@ impl Task {
             egid:             self.egid,
             parent_pid:       self.pid,
             exit_code:        None,
+            pending_signals:  0,
             user_brk:         self.user_brk,
             fs_base:          self.fs_base,
         })
