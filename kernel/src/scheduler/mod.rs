@@ -251,16 +251,26 @@ pub fn reap_zombie_child(parent_pid: Pid) -> Option<(Pid, i32)> {
     entry
 }
 
-/// Fork: create a shallow clone of `parent_pid` and return the new child PID.
-/// Full CoW page-table cloning is deferred to Phase 21; for now both tasks
-/// share the kernel CR3 (sufficient for in-kernel fork/exec patterns).
+/// Fork: create a clone of `parent_pid` with its own page table (kernel half shared,
+/// user half has a fresh L4 — full CoW copy deferred to Phase 21).
 pub fn fork_task(parent_pid: Pid) -> Option<Pid> {
     let child_pid = alloc_pid();
+
+    // Allocate a new L4 for the child (kernel half copied from parent).
+    let child_cr3 = crate::memory::alloc_user_cr3().unwrap_or_else(|| {
+        // Fall back to sharing kernel CR3 if OOM (safer than crash).
+        let v: u64;
+        unsafe { core::arch::asm!("mov {}, cr3", out(reg) v, options(nomem, nostack)); }
+        v & !0xFFF
+    });
+
     let mut tasks = TASKS.lock();
-    let parent = tasks.get(&parent_pid)?.clone_shallow(child_pid)?;
-    tasks.insert(child_pid, parent);
+    let mut child = tasks.get(&parent_pid)?.clone_shallow(child_pid)?;
+    child.cr3 = child_cr3;
+    tasks.insert(child_pid, child);
     runqueue::enqueue(child_pid);
-    crate::klog!(INFO, "Scheduler: fork parent={} → child={}", parent_pid, child_pid);
+    crate::klog!(INFO, "Scheduler: fork parent={} → child={} cr3={:#x}",
+        parent_pid, child_pid, child_cr3);
     Some(child_pid)
 }
 
@@ -302,6 +312,12 @@ pub fn get_fs_base(pid: Pid) -> u64 {
 /// Get the parent PID of a task (0 = no parent).
 pub fn get_parent_pid(pid: Pid) -> Pid {
     TASKS.lock().get(&pid).map(|t| t.parent_pid).unwrap_or(0)
+}
+
+/// Update the CR3 (page table) for a task — called by execve when it creates a new address space.
+pub fn set_task_cr3(pid: Pid, cr3: u64) {
+    let mut tasks = TASKS.lock();
+    if let Some(t) = tasks.get_mut(&pid) { t.cr3 = cr3; }
 }
 
 /// Apply an AI-suggested priority adjustment to a task (clamped to ±20).

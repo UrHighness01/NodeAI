@@ -912,7 +912,19 @@ unsafe fn sys_execve(path_ptr: u64, argv_ptr: u64, envp_ptr: u64) -> i64 {
         }
     }
 
-    // 3. Parse + load ELF
+    // 3a. Allocate a fresh address space for this process.
+    let new_cr3 = match crate::memory::alloc_user_cr3() {
+        Some(cr3) => cr3,
+        None      => return EINVAL,
+    };
+    // Switch to the new CR3 so ELF segment mappings land in this process's space.
+    core::arch::asm!("mov cr3, {}", in(reg) new_cr3, options(nomem, nostack));
+    // Update task's CR3 field.
+    let pid = crate::scheduler::current_pid();
+    crate::scheduler::set_task_cr3(pid, new_cr3);
+    crate::klog!(INFO, "execve: new address space cr3={:#x}", new_cr3);
+
+    // 3b. Parse + load ELF into the new address space.
     let image = match crate::elf::parse(&elf_data) {
         Ok(img) => img,
         Err(e)  => { crate::klog!(WARN, "execve: ELF parse error {:?}", e); return EINVAL; }
@@ -923,7 +935,7 @@ unsafe fn sys_execve(path_ptr: u64, argv_ptr: u64, envp_ptr: u64) -> i64 {
     }
     let entry = image.entry;
 
-    // 4. Map user stack
+    // 4. Map user stack in the new address space.
     let stack_base = USER_STACK_TOP - USER_STACK_SIZE;
     if let Err(_) = crate::memory::map_user_range(stack_base, USER_STACK_SIZE, true, false) {
         return EINVAL;
