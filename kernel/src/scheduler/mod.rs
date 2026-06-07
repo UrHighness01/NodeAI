@@ -52,29 +52,76 @@ pub fn spawn_kernel_thread(name: &str, entry: fn() -> !) {
     runqueue::enqueue(pid);
 }
 
-/// Called from the APIC timer interrupt handler every ~10 ms (100 Hz).
-/// Increments uptime by 10 so `uptime_ms()` always returns true milliseconds.
-pub fn tick() {
+/// Called from the naked APIC timer handler with interrupts disabled.
+///
+/// 1. Saves `old_rsp` (bottom of the saved interrupt frame on the current task's
+///    kernel stack) into the current task.
+/// 2. Runs per-tick subsystem work.
+/// 3. Advances the run queue.
+/// 4. If a switch is needed: loads new task's CR3, updates TSS.RSP0, returns
+///    new task's `saved_kernel_rsp` so the naked handler can switch stacks.
+///    If no switch: returns `old_rsp` unchanged.
+///
+/// # Safety
+/// Must be called with interrupts disabled and `old_rsp` pointing at a valid
+/// 160-byte saved interrupt frame on the current task's kernel stack.
+#[no_mangle]
+pub unsafe extern "C" fn schedule_from_interrupt(old_rsp: u64) -> u64 {
+    // EOI first — acknowledges the timer before we do any work.
+    crate::interrupts::apic::eoi();
+
     let uptime_ms = UPTIME_MS.fetch_add(10, core::sync::atomic::Ordering::Relaxed);
 
-    // Drive the AI inference pipeline on every tick
+    // Step 1: save old_rsp into the CURRENT (outgoing) task.
+    let old_pid = runqueue::current_pid();
+    if let Some(pid) = old_pid {
+        let mut tasks = TASKS.lock();
+        if let Some(task) = tasks.get_mut(&pid) {
+            task.saved_kernel_rsp = old_rsp;
+            if task.state == task::TaskState::Running {
+                task.state = task::TaskState::Runnable;
+            }
+        }
+    }
+
+    // Step 2: per-tick subsystem work.
     crate::ai_engine::process_tick(uptime_ms);
-
-    // Refresh the graphical desktop if the framebuffer is active
     crate::desktop::tick(uptime_ms);
-
-    // Update telemetry ring and (periodically) flush to VFS
     crate::telemetry::tick(uptime_ms);
-
-    // Pump the audio DMA ring so ongoing PCM playback stays filled
     crate::audio::tick();
 
-    let quantum = QUANTUM_MS.load(core::sync::atomic::Ordering::Relaxed);
-    let _ = quantum; // used by runqueue when it is extended
-    if let Some(_next_pid) = runqueue::tick() {
-        crate::klog!(TRACE, "Scheduler: preemption tick → pid={}", _next_pid);
-    }
+    // Step 3: advance the run queue.
+    let next_pid = match runqueue::tick() {
+        Some(pid) => pid,
+        None      => return old_rsp, // same task, no switch
+    };
+
+    // Step 4: set up the incoming task and return its kernel RSP.
+    let next_rsp = {
+        let mut tasks = TASKS.lock();
+        match tasks.get_mut(&next_pid) {
+            Some(t) => {
+                t.state = task::TaskState::Running;
+                crate::gdt::update_rsp0(t.kernel_stack_top);
+                let cr3 = t.cr3;
+                core::arch::asm!("mov cr3, {}", in(reg) cr3, options(nostack, nomem));
+                if t.fs_base != 0 {
+                    x86_64::registers::model_specific::FsBase::write(
+                        x86_64::VirtAddr::new(t.fs_base));
+                }
+                t.saved_kernel_rsp
+            }
+            None => old_rsp,
+        }
+    };
+
+    crate::klog!(TRACE, "Scheduler: {:?} → {}", old_pid, next_pid);
+    next_rsp
 }
+
+/// Legacy tick() — kept for call sites not yet migrated.
+/// Real work is in schedule_from_interrupt (called by naked timer handler).
+pub fn tick() {}
 
 /// Return the current kernel uptime in milliseconds.
 pub fn uptime_ms() -> u64 {

@@ -39,7 +39,7 @@ fn build_idt() -> InterruptDescriptorTable {
             .set_stack_index(crate::gdt::DOUBLE_FAULT_IST_INDEX);
 
         idt[apic::TIMER_VECTOR]
-            .set_handler_fn(timer_handler);
+            .set_handler_addr(x86_64::VirtAddr::new(timer_handler as u64));
         idt[apic::KEYBOARD_VECTOR]
             .set_handler_fn(keyboard_handler);
         idt[apic::MOUSE_VECTOR]
@@ -113,9 +113,64 @@ extern "x86-interrupt" fn segment_not_present_handler(frame: InterruptStackFrame
 
 // ── Hardware IRQ Handlers ──────────────────────────────────────────────────────
 
-extern "x86-interrupt" fn timer_handler(_frame: InterruptStackFrame) {
-    crate::scheduler::tick();
-    unsafe { apic::eoi(); }
+/// Naked APIC timer handler — performs a full preemptive context switch.
+///
+/// On entry the CPU has already pushed the 5-word IRET frame:
+///   [rsp+0]=RIP [rsp+8]=CS [rsp+16]=RFLAGS [rsp+24]=RSP [rsp+32]=SS
+///
+/// We push all 15 GPRs, call `schedule_from_interrupt(rsp)` which saves the
+/// current task, picks the next, and returns the next task's kernel RSP.
+/// We then point RSP at the new stack and pop registers before IRETQ.
+///
+/// Push order (first push = highest addr, last push = lowest addr):
+///   rax, rcx, rdx, rsi, rdi, r8, r9, r10, r11, rbx, rbp, r12, r13, r14, r15
+/// So after all pushes: rsp → r15 slot (offset 0), rax slot is at offset +112.
+#[naked]
+unsafe extern "C" fn timer_handler() {
+    core::arch::asm!(
+        // Save all GPRs (in order matching FRAME_* offsets in task.rs).
+        "push rax",
+        "push rcx",
+        "push rdx",
+        "push rsi",
+        "push rdi",
+        "push r8",
+        "push r9",
+        "push r10",
+        "push r11",
+        "push rbx",
+        "push rbp",
+        "push r12",
+        "push r13",
+        "push r14",
+        "push r15",
+        // Call schedule_from_interrupt(old_rsp=rsp).
+        // System V: first arg in rdi, return in rax.
+        "mov rdi, rsp",
+        "call {schedule}",
+        // rax = new_rsp (may equal old rsp if no switch).
+        "mov rsp, rax",
+        // Restore all GPRs from new stack.
+        "pop r15",
+        "pop r14",
+        "pop r13",
+        "pop r12",
+        "pop rbp",
+        "pop rbx",
+        "pop r11",
+        "pop r10",
+        "pop r9",
+        "pop r8",
+        "pop rdi",
+        "pop rsi",
+        "pop rdx",
+        "pop rcx",
+        "pop rax",
+        // Return to the task (new or same) via IRETQ.
+        "iretq",
+        schedule = sym crate::scheduler::schedule_from_interrupt,
+        options(noreturn),
+    );
 }
 
 extern "x86-interrupt" fn keyboard_handler(_frame: InterruptStackFrame) {

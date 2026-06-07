@@ -3,6 +3,28 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
+// ── Synthetic interrupt-frame layout constants ────────────────────────────────
+//
+// The naked timer handler pushes GPRs in this order (first push is highest addr):
+//   push rax, rcx, rdx, rsi, rdi, r8, r9, r10, r11, rbx, rbp, r12, r13, r14, r15
+// then the CPU has already pushed the IRET frame (RIP, CS, RFLAGS, RSP, SS).
+//
+// After all pushes, RSP points to r15 (lowest addr = bottom of save area).
+// Layout relative to saved_kernel_rsp (which = address of r15 slot):
+//   +0:   r15   +8:  r14   +16: r13  +24: r12  +32: rbp  +40: rbx
+//   +48:  r11   +56: r10   +64: r9   +72: r8   +80: rdi  +88: rsi
+//   +96:  rdx  +104: rcx  +112: rax
+//   +120: RIP  +128: CS   +136: RFLAGS  +144: RSP  +152: SS
+//
+// Total frame size = 15 GPRs × 8 + 5 IRET words × 8 = 160 bytes.
+
+/// Byte offset of the RAX slot within a saved interrupt frame (from frame base = r15 slot).
+pub const FRAME_RAX_OFFSET: usize = 112;
+/// Total size of one saved interrupt frame in bytes.
+pub const FRAME_SIZE: usize = 160;
+/// Offset of the RIP slot (IRET[0]) within a saved interrupt frame.
+pub const FRAME_RIP_OFFSET: usize = 120;
+
 /// Unique process/thread identifier.
 pub type Pid = u64;
 
@@ -67,8 +89,12 @@ pub struct Task {
     pub name:     String,
     pub state:    TaskState,
     pub priority: i32,
-    /// Top of the kernel stack for this task (used during context switch).
+    /// Top of the kernel stack for this task.
     pub kernel_stack_top: u64,
+    /// Saved kernel RSP — points at the bottom of the saved interrupt frame on
+    /// this task's kernel stack.  Set by the timer handler on preemption and
+    /// restored by `schedule_from_interrupt`.
+    pub saved_kernel_rsp: u64,
     /// CR3 value (page table physical address) for this task.
     pub cr3: u64,
     pub context: CpuContext,
@@ -95,20 +121,44 @@ pub struct Task {
 }
 
 impl Task {
-    /// Create a kernel thread with its own stack (stack_top is stack end).
+    /// Create a kernel thread with its own stack (stack_top is the high end).
+    ///
+    /// Lays a synthetic interrupt frame at the top of the stack so that
+    /// `schedule_from_interrupt` can restore this task exactly like any other
+    /// preempted task — no special "first-run" path needed.
     pub fn new_kernel_thread(pid: Pid, name: &str, entry: u64, stack_top: u64) -> Self {
-        let mut ctx = CpuContext::default();
-        ctx.rip    = entry;
-        ctx.rsp    = stack_top;
-        ctx.cs     = 0x08;      // kernel code segment
-        ctx.ss     = 0x10;      // kernel data segment
-        ctx.rflags = 0x202;     // IF=1 (interrupts enabled)
-
-        // Read current CR3 — kernel threads share the kernel page table.
         let cr3: u64;
         unsafe {
             core::arch::asm!("mov {}, cr3", out(reg) cr3, options(nomem, nostack));
         }
+
+        // Build the synthetic frame in memory (stack grows down):
+        //   [stack_top - 8]  : SS
+        //   [stack_top - 16] : RSP (thread's initial stack pointer = stack_top)
+        //   [stack_top - 24] : RFLAGS
+        //   [stack_top - 32] : CS
+        //   [stack_top - 40] : RIP (entry point)
+        //   [stack_top - 160]: 15 × u64 GPR save area, all zero
+        // saved_kernel_rsp = stack_top - FRAME_SIZE (= stack_top - 160)
+        let frame_base = stack_top - FRAME_SIZE as u64;
+        unsafe {
+            let p = frame_base as *mut u64;
+            // Zero the entire frame (GPRs and IRET slots).
+            core::ptr::write_bytes(p as *mut u8, 0, FRAME_SIZE);
+            // Write IRET frame at offsets 120..160
+            p.add(FRAME_RIP_OFFSET / 8).write(entry);          // RIP
+            p.add(FRAME_RIP_OFFSET / 8 + 1).write(0x08);       // CS  = kernel code
+            p.add(FRAME_RIP_OFFSET / 8 + 2).write(0x202);      // RFLAGS = IF
+            p.add(FRAME_RIP_OFFSET / 8 + 3).write(stack_top);  // RSP (thread uses full stack)
+            p.add(FRAME_RIP_OFFSET / 8 + 4).write(0x10);       // SS  = kernel data
+        }
+
+        let mut ctx = CpuContext::default();
+        ctx.rip    = entry;
+        ctx.rsp    = stack_top;
+        ctx.cs     = 0x08;
+        ctx.ss     = 0x10;
+        ctx.rflags = 0x202;
 
         Task {
             pid,
@@ -116,6 +166,7 @@ impl Task {
             state:            TaskState::Runnable,
             priority:         0,
             kernel_stack_top: stack_top,
+            saved_kernel_rsp: frame_base,
             cr3,
             context:          ctx,
             ai_profile:       AiProfile::default(),
@@ -134,19 +185,38 @@ impl Task {
     }
 
     /// Shallow clone for fork(): copy everything except give the child a new PID
-    /// and mark parent_pid.  Both share the same CR3 (Phase 21 adds CoW).
+    /// and mark parent_pid.  Both share the same CR3 (CoW deferred).
+    ///
+    /// The child's saved interrupt frame is a copy of the parent's, with one
+    /// change: RAX = 0 so the child sees 0 as its return value from fork().
     pub fn clone_shallow(&self, child_pid: Pid) -> Option<Task> {
-        // Allocate a new kernel stack for the child.
         const STACK_PAGES: usize = 4;
         let stack_phys = crate::memory::alloc_frames(2)?;
-        let stack_top  = stack_phys + (STACK_PAGES as u64 * crate::memory::PAGE_SIZE);
+        // Map the physical frame via the PHYS_OFFSET window (same as map_user_range).
+        let stack_top = crate::memory::phys_offset() + stack_phys
+            + (STACK_PAGES as u64 * crate::memory::PAGE_SIZE);
+
+        // Copy parent's saved interrupt frame onto the child's new kernel stack.
+        let child_frame_base = stack_top - FRAME_SIZE as u64;
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                self.saved_kernel_rsp as *const u8,
+                child_frame_base as *mut u8,
+                FRAME_SIZE,
+            );
+            // Child must return 0 from fork() — zero the RAX slot.
+            let rax_ptr = (child_frame_base + FRAME_RAX_OFFSET as u64) as *mut u64;
+            rax_ptr.write(0);
+        }
+
         Some(Task {
             pid:              child_pid,
             name:             self.name.clone(),
             state:            TaskState::Runnable,
             priority:         self.priority,
             kernel_stack_top: stack_top,
-            cr3:              self.cr3,          // shared for now
+            saved_kernel_rsp: child_frame_base,
+            cr3:              self.cr3,
             context:          self.context,
             ai_profile:       AiProfile::default(),
             fds:              self.fds.clone(),

@@ -28,6 +28,12 @@ pub const NMI_IST_INDEX: u16 = 1;
 /// to fit in the low physical region before paging is fully set up).
 const IST_STACK_SIZE: usize = 8 * 1024;
 
+/// Kernel interrupt stack used as the initial TSS RSP0.
+/// This handles ring-3 → ring-0 transitions before the first context switch
+/// establishes a per-task RSP0.
+const KERNEL_INT_STACK_SIZE: usize = 16 * 1024;
+static mut KERNEL_INT_STACK: [u8; KERNEL_INT_STACK_SIZE] = [0u8; KERNEL_INT_STACK_SIZE];
+
 /// IST stacks as static byte arrays (placed in BSS → zero-initialized).
 static mut DOUBLE_FAULT_STACK: [u8; IST_STACK_SIZE] = [0u8; IST_STACK_SIZE];
 static mut NMI_STACK: [u8; IST_STACK_SIZE] = [0u8; IST_STACK_SIZE];
@@ -51,6 +57,13 @@ pub struct Selectors {
 pub fn init() {
     let tss = TSS.call_once(|| {
         let mut tss = TaskStateSegment::new();
+
+        // RSP0: kernel stack used when a ring-3 interrupt arrives.
+        // Updated per context switch via update_rsp0().
+        tss.privilege_stack_table[0] = {
+            let stack_end = unsafe { KERNEL_INT_STACK.as_ptr().add(KERNEL_INT_STACK_SIZE) };
+            VirtAddr::from_ptr(stack_end)
+        };
 
         // Set up IST stacks (stacks grow downward → use the high end of the array).
         tss.interrupt_stack_table[DOUBLE_FAULT_IST_INDEX as usize] = {
@@ -123,4 +136,18 @@ pub fn user_cs() -> SegmentSelector {
 /// Returns the user data segment selector (ring 3).
 pub fn user_ds() -> SegmentSelector {
     GDT.get().expect("GDT not initialised").1.user_data_segment
+}
+
+/// Update TSS.RSP0 — called on every context switch so ring-3 interrupts land
+/// on the incoming task's kernel stack, not a stale one.
+pub fn update_rsp0(kernel_stack_top: u64) {
+    if let Some(tss) = TSS.get() {
+        // Safety: TSS lives in static memory; the CPU reads RSP0 only on ring
+        // transitions, which can't race here since interrupts are disabled during
+        // the context switch that calls this.
+        let tss_mut = tss as *const TaskStateSegment as *mut TaskStateSegment;
+        unsafe {
+            (*tss_mut).privilege_stack_table[0] = VirtAddr::new(kernel_stack_top);
+        }
+    }
 }
