@@ -326,10 +326,23 @@ impl TransformerSchedModel {
         }
 
         // ── Projection weight gradients + d_tokens ───────────────────────────
-        // dWq[i,j] -= lr * sum_t(dQ[t,i] * tokens[t,j])
-        // d_tokens[t,j] += Wq^T[j,i] * dQ[t,i] + Wk^T[j,i] * dK[t,i] + Wv^T[j,i] * dV[t,i]
+        // d_tokens uses PRE-update weights (mathematically correct).
+        // We compute d_tokens first, then update Wq/Wk/Wv separately.
         let mut d_tokens = alloc::vec![0.0f32; t * d];
-
+        for tok in 0..t {
+            for i in 0..a {
+                let gq = dq[tok * a + i];
+                let gk = dk[tok * a + i];
+                let gv = dv[tok * a + i];
+                for j in 0..d {
+                    d_tokens[tok * d + j] +=
+                        self.wq[i * d + j] * gq
+                        + self.wk[i * d + j] * gk
+                        + self.wv[i * d + j] * gv;
+                }
+            }
+        }
+        // Now update Wq/Wk/Wv (after d_tokens is fully computed).
         for tok in 0..t {
             let x = &tokens[tok * d..(tok + 1) * d];
             for i in 0..a {
@@ -340,10 +353,6 @@ impl TransformerSchedModel {
                     self.wq[i * d + j] -= lr * gq * x[j];
                     self.wk[i * d + j] -= lr * gk * x[j];
                     self.wv[i * d + j] -= lr * gv * x[j];
-                    d_tokens[tok * d + j] +=
-                        self.wq[i * d + j] * gq
-                        + self.wk[i * d + j] * gk
-                        + self.wv[i * d + j] * gv;
                 }
             }
         }
@@ -545,6 +554,20 @@ pub fn on_deschedule(pid: u64, actual_nice: i8, actual_burst_ticks: u32, actual_
         ];
         if let Some(model) = MODEL.lock().as_mut() {
             model.sgd_step(&fb.ctx, target);
+        }
+    }
+}
+
+/// Return the last `n` syscall numbers for `pid` in chronological order.
+/// Used by the cross-process anomaly detector to inspect a waker's recent activity.
+pub fn last_n_syscalls(pid: u64, n: usize) -> alloc::vec::Vec<u16> {
+    let ctxs = CONTEXTS.lock();
+    match ctxs.get(&pid) {
+        None => alloc::vec::Vec::new(),
+        Some(ctx) => {
+            let snap = ctx.snapshot();
+            let take = n.min(CONTEXT_LEN);
+            snap[CONTEXT_LEN - take..].to_vec()
         }
     }
 }
