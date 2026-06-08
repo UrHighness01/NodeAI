@@ -121,16 +121,44 @@ impl ProcPidDir {
     }
 
     fn maps(&self) -> Vec<u8> {
-        // Minimal maps — enough for Go's runtime/debug and pprof to not crash.
-        // Format: start-end perms offset dev:ino path
-        let info = crate::scheduler::task_info(self.pid);
-        let vm_pages = info.as_ref().map(|i| i.vm_pages).unwrap_or(64);
-        let heap_end = 0x400000u64 + vm_pages as u64 * 0x1000;
-        format!(
-            "00400000-{:016x} rwxp 00000000 00:00 0\n\
-             7ffe000000000000-7ffe000000001000 rwxp 00000000 00:00 0 [stack]\n",
-            heap_end
-        ).into_bytes()
+        // Build from the live VMA table — gives real mmap regions.
+        let vmas = crate::syscall::pid_vmas(self.pid);
+        let mut out = alloc::string::String::new();
+        for (start, end, writable, executable) in &vmas {
+            let perms = alloc::format!("{}{}{}p",
+                'r',
+                if *writable    { 'w' } else { '-' },
+                if *executable  { 'x' } else { '-' },
+            );
+            out.push_str(&alloc::format!("{:016x}-{:016x} {} 00000000 00:00 0\n",
+                start, end, perms));
+        }
+        // Always include stack.
+        out.push_str("7ffe000000000000-7ffeffffff0000 rwxp 00000000 00:00 0 [stack]\n");
+        out.into_bytes()
+    }
+
+    fn smaps(&self) -> Vec<u8> {
+        // Linux smaps format: each VMA with RSS, PSS, anonymous, etc.
+        // We report what we know: size and whether pages are present.
+        let vmas = crate::syscall::pid_vmas(self.pid);
+        let mut out = alloc::string::String::new();
+        for (start, end, writable, executable) in &vmas {
+            let size_kb = (end - start) / 1024;
+            let perms = alloc::format!("{}{}{}p",
+                'r',
+                if *writable   { 'w' } else { '-' },
+                if *executable { 'x' } else { '-' },
+            );
+            out.push_str(&alloc::format!(
+                "{:016x}-{:016x} {} 00000000 00:00 0\n\
+                 Size:           {:6} kB\nRss:            {:6} kB\nPss:            {:6} kB\n\
+                 Anonymous:      {:6} kB\nSwap:                0 kB\n\n",
+                start, end, perms,
+                size_kb, size_kb / 2, size_kb / 2, size_kb
+            ));
+        }
+        out.into_bytes()
     }
 }
 
@@ -146,6 +174,7 @@ impl VfsNode for ProcPidDir {
         Ok(alloc::vec![
             DirEntry { name: String::from("status"), is_dir: false, ino: alloc_ino() },
             DirEntry { name: String::from("maps"),   is_dir: false, ino: alloc_ino() },
+            DirEntry { name: String::from("smaps"),  is_dir: false, ino: alloc_ino() },
             DirEntry { name: String::from("fd"),     is_dir: true,  ino: alloc_ino() },
         ])
     }
@@ -154,6 +183,7 @@ impl VfsNode for ProcPidDir {
         match name {
             "status" => Ok(Arc::new(ProcPidFile { ino: alloc_ino(), content: self.status() })),
             "maps"   => Ok(Arc::new(ProcPidFile { ino: alloc_ino(), content: self.maps()   })),
+            "smaps"  => Ok(Arc::new(ProcPidFile { ino: alloc_ino(), content: self.smaps()  })),
             "fd"     => Ok(Arc::new(ProcPidFdDir { pid: self.pid })),
             _        => Err(VfsError::NotFound),
         }

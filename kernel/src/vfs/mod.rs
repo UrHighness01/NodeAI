@@ -250,6 +250,29 @@ pub fn checked_unlink(parent: &dyn VfsNode, name: &str) -> VfsResult<()> {
 /// Read the entire contents of a file given its absolute path.
 pub fn read_file(path: &str) -> VfsResult<Vec<u8>> {
     let node = lookup(path)?;
+    let stat = node.stat()?;
+    let size = stat.size as usize;
+    let ino  = stat.ino;
+
+    // Use the unified page cache for non-trivial files so repeated reads
+    // (e.g. file-backed mmap + explicit read) hit the same physical frames.
+    if size > 0 && size <= 64 * 1024 * 1024 {
+        // Capture the node in a closure for the cache loader.
+        let node_clone = node.clone();
+        let mut buf = alloc::vec![0u8; size];
+        let loaded = crate::page_cache::read_bytes(ino, 0, &mut buf, |page_off, frame| {
+            // Open a fresh handle and seek to page_off to load this page.
+            let n_ref: &dyn VfsNode = node_clone.as_ref();
+            if let Ok(mut fh) = checked_open(n_ref, false) {
+                let _ = fh.seek(page_off);
+                fh.read(frame).unwrap_or(0)
+            } else { 0 }
+        });
+        buf.truncate(loaded);
+        return Ok(buf);
+    }
+
+    // Fallback for very large files or zero-size: bypass cache.
     let mut fh = checked_open(node.as_ref(), false)?;
     let mut buf = Vec::new();
     let mut tmp = [0u8; 4096];
@@ -283,6 +306,8 @@ pub fn write_file(path: &str, data: &[u8]) -> VfsResult<()> {
         if n == 0 { return Err(VfsError::Io); }
         off += n;
     }
+    // Notify inotify watchers of the modification.
+    crate::syscall::notify_watchers(path, 0x0002 /* IN_MODIFY */);
     Ok(())
 }
 
@@ -294,7 +319,11 @@ pub fn unlink(path: &str) -> VfsResult<()> {
         ("/", path)
     };
     let parent = lookup(parent_path)?;
-    checked_unlink(parent.as_ref(), name)
+    let result = checked_unlink(parent.as_ref(), name);
+    if result.is_ok() {
+        crate::syscall::notify_watchers(path, 0x0200 /* IN_DELETE */);
+    }
+    result
 }
 
 // ── VFS AI extensions (intent-providing file stats, prefetch hints) ───────────

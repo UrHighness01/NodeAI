@@ -596,11 +596,9 @@ pub unsafe extern "C" fn syscall_dispatch_extern(
         nr::TIMERFD_CREATE  => sys_timerfd_create(arg0, arg1),
         nr::TIMERFD_SETTIME => sys_timerfd_settime(arg0, arg1, arg2, arg3),
         nr::TIMERFD_GETTIME => sys_timerfd_gettime(arg0, arg1),
-        // ── inotify / signalfd (stubs — allocate fd, no event delivery) ──
-        nr::INOTIFY_INIT1 | nr::INOTIFY_ADD_WATCH | nr::INOTIFY_RM_WATCH => {
-            let pid = crate::scheduler::current_pid();
-            alloc_fd(pid) as i64
-        }
+        nr::INOTIFY_INIT1     => sys_inotify_init1(arg0 as i32),
+        nr::INOTIFY_ADD_WATCH => sys_inotify_add_watch(arg0, arg1, arg2 as u32),
+        nr::INOTIFY_RM_WATCH  => sys_inotify_rm_watch(arg0, arg1 as i32),
         nr::SIGNALFD4     => { let pid=crate::scheduler::current_pid(); alloc_fd(pid) as i64 }
         nr::CLONE3        => sys_fork(), // simplified clone3 — just fork
         // ── AI subsystem ─────────────────────────────────────────────────
@@ -1101,26 +1099,50 @@ unsafe fn sys_mmap(addr: u64, len: u64, prot: u64, flags: u64, fd: i64, offset: 
     let pid = crate::scheduler::current_pid();
 
     // File-backed mmap: fd != -1 means the caller wants to map a file.
-    // Eagerly allocate pages and populate them from the VFS node.
+    // Read from the unified page cache so repeated mmap() of the same file
+    // shares physical frames and avoids extra copies.
     if fd >= 0 {
         let path = FD_PATH_TABLE.lock().get(&(pid, fd as u64)).cloned();
-        if let Some(p) = path {
-            // Read file data, then map pages and copy bytes in.
-            let file_data = crate::vfs::read_file(&p).unwrap_or_default();
-            let src_start = offset as usize;
-            let src_end   = (offset as usize + len_aligned as usize).min(file_data.len());
+        if let Some(ref p) = path {
+            // Get inode for the cache key.
+            let ino = crate::vfs::lookup(p)
+                .and_then(|n| n.stat())
+                .map(|s| s.ino)
+                .unwrap_or(0);
 
             match crate::memory::map_user_range(vaddr, len_aligned, writable, executable) {
                 Ok(()) => {
-                    // Copy file content into the mapped pages via phys-offset window.
-                    if src_start < src_end {
-                        let copy_len = (src_end - src_start).min(len_aligned as usize);
-                        let dst = vaddr as *mut u8;
-                        core::ptr::copy_nonoverlapping(
-                            file_data[src_start..].as_ptr(), dst, copy_len);
+                    // Copy file bytes from page cache into mapped pages.
+                    // The page cache loader reads from VFS on first miss.
+                    if ino != 0 {
+                        let dst_slice = unsafe {
+                            core::slice::from_raw_parts_mut(vaddr as *mut u8, len_aligned as usize)
+                        };
+                        let path_clone = p.clone();
+                        crate::page_cache::read_bytes(ino, offset, dst_slice, |page_off, frame| {
+                            if let Ok(node) = crate::vfs::lookup(&path_clone) {
+                                if let Ok(mut fh) = node.open() {
+                                    let _ = fh.seek(page_off);
+                                    fh.read(frame).unwrap_or(0)
+                                } else { 0 }
+                            } else { 0 }
+                        });
+                    } else {
+                        // fallback: read entire file and copy
+                        let data = crate::vfs::read_file(p).unwrap_or_default();
+                        let src  = offset as usize;
+                        let end  = (src + len_aligned as usize).min(data.len());
+                        if src < end {
+                            unsafe {
+                                core::ptr::copy_nonoverlapping(
+                                    data[src..].as_ptr(),
+                                    vaddr as *mut u8,
+                                    end - src);
+                            }
+                        }
                     }
-                    crate::klog!(DEBUG, "mmap file: pid={} va={:#x} len={} off={} path={}",
-                        pid, vaddr, len_aligned, offset, p);
+                    crate::klog!(DEBUG, "mmap file: pid={} va={:#x} len={} off={} ino={}",
+                        pid, vaddr, len_aligned, offset, ino);
                 }
                 Err(_) => return EINVAL,
             }
@@ -1171,6 +1193,16 @@ pub fn demand_page_vma(pid: u64, vaddr: u64) -> bool {
     } else {
         false
     }
+}
+
+/// Return all VMAs for `pid` as (start, end, writable, executable) tuples.
+/// Used by /proc/<pid>/maps and /proc/<pid>/smaps.
+pub fn pid_vmas(pid: u64) -> alloc::vec::Vec<(u64, u64, bool, bool)> {
+    VMA_TABLE.lock()
+        .range((pid, 0)..)
+        .take_while(|(&(p, _), _)| p == pid)
+        .map(|(&(_, start), v)| (start, v.end, v.writable, v.executable))
+        .collect()
 }
 
 /// Remove all VMAs for `pid` (called on process exit).
@@ -3210,6 +3242,147 @@ unsafe fn sys_link(oldpath_ptr: u64, newpath_ptr: u64, _unused: u64) -> i64 {
         }
         Err(_) => ENOENT,
     }
+}
+
+// ── inotify ──────────────────────────────────────────────────────────────────
+//
+// Real inotify: an fd that delivers filesystem change events.
+// inotify_add_watch registers a path + event mask; when vfs::write_file or
+// vfs::unlink is called for a watched path, notify_watchers() enqueues an event.
+//
+// Event format (inotify_event): wd(i32) + mask(u32) + cookie(u32) + len(u32) + name.
+const IN_MODIFY:  u32 = 0x0002;
+const IN_DELETE:  u32 = 0x0200;
+const IN_CREATE:  u32 = 0x0100;
+const IN_MOVED_FROM: u32 = 0x0040;
+const IN_MOVED_TO:   u32 = 0x0080;
+
+struct InotifyHandle {
+    events:  alloc::sync::Arc<spin::Mutex<alloc::vec::Vec<u8>>>,
+    watches: alloc::sync::Arc<spin::Mutex<alloc::collections::BTreeMap<i32, (alloc::string::String, u32)>>>,
+    next_wd: i32,
+}
+
+impl crate::vfs::FileHandle for InotifyHandle {
+    fn bytes_available(&self) -> usize { self.events.lock().len() }
+    fn read(&mut self, buf: &mut [u8]) -> crate::vfs::VfsResult<usize> {
+        let mut ev = self.events.lock();
+        if ev.is_empty() { return Err(crate::vfs::VfsError::WouldBlock); }
+        let n = buf.len().min(ev.len());
+        buf[..n].copy_from_slice(&ev[..n]);
+        ev.drain(..n);
+        Ok(n)
+    }
+    fn write(&mut self, _: &[u8]) -> crate::vfs::VfsResult<usize> { Ok(0) }
+    fn seek(&mut self, _: u64) -> crate::vfs::VfsResult<u64> { Ok(0) }
+    fn stat(&self) -> crate::vfs::VfsResult<crate::vfs::Stat> {
+        Ok(crate::vfs::Stat { ino:0, size:0, is_dir:false, nlink:1, uid:0, gid:0, mode:0o600 })
+    }
+    fn clone_box(&self) -> Option<alloc::boxed::Box<dyn crate::vfs::FileHandle>> {
+        Some(alloc::boxed::Box::new(InotifyHandle {
+            events:  self.events.clone(),
+            watches: self.watches.clone(),
+            next_wd: self.next_wd,
+        }))
+    }
+}
+
+/// Global inotify watch registry: (pid, fd, wd) → (path, mask).
+/// Queried by notify_watchers() when VFS mutations occur.
+static INOTIFY_REGISTRY: spin::Mutex<alloc::collections::BTreeMap<
+    (u64, u64, i32), (alloc::string::String, u32)
+>> = spin::Mutex::new(alloc::collections::BTreeMap::new());
+
+/// Deliver inotify events to all watchers of `path`.  Called from VFS mutation points.
+pub fn notify_watchers(path: &str, mask: u32) {
+    let registry = INOTIFY_REGISTRY.lock();
+    // Collect entries that match the path or its parent directory.
+    let matches: alloc::vec::Vec<(u64, u64, i32)> = registry.iter()
+        .filter(|(_, (p, m))| {
+            (*m & mask != 0) && (p.as_str() == path || path.starts_with(p.as_str()))
+        })
+        .map(|(&k, _)| k)
+        .collect();
+    drop(registry);
+
+    if matches.is_empty() { return; }
+
+    let fname = match path.rfind('/') {
+        Some(i) => &path[i+1..],
+        None    => path,
+    };
+    let fname_bytes = fname.as_bytes();
+    let fname_len   = (fname_bytes.len() + 1 + 3) & !3; // round up to 4-byte boundary
+
+    for (pid, fd, wd) in matches {
+        let mut event = alloc::vec![0u8; 16 + fname_len];
+        // wd (i32 LE)
+        event[0..4].copy_from_slice(&wd.to_le_bytes());
+        // mask (u32 LE)
+        event[4..8].copy_from_slice(&mask.to_le_bytes());
+        // cookie = 0
+        // len (u32 LE)
+        event[12..16].copy_from_slice(&(fname_len as u32).to_le_bytes());
+        // name
+        let copy = fname_bytes.len().min(fname_len);
+        event[16..16+copy].copy_from_slice(&fname_bytes[..copy]);
+
+        // Append to the inotify handle's event buffer.
+        let mut tbl = FD_TABLE.lock();
+        if let Some(h) = tbl.get_mut(&(pid, fd)) {
+            let h_ptr = h as *mut alloc::boxed::Box<dyn crate::vfs::FileHandle> as *mut u8;
+            // Downcast via unsafe transmute to InotifyHandle
+            let ih = unsafe {
+                &mut *(h_ptr as *mut alloc::boxed::Box<InotifyHandle>)
+            };
+            ih.events.lock().extend_from_slice(&event);
+        }
+    }
+}
+
+unsafe fn sys_inotify_init1(_flags: i32) -> i64 {
+    let pid = crate::scheduler::current_pid();
+    let fd  = alloc_fd(pid);
+    let handle = InotifyHandle {
+        events:  alloc::sync::Arc::new(spin::Mutex::new(alloc::vec::Vec::new())),
+        watches: alloc::sync::Arc::new(spin::Mutex::new(alloc::collections::BTreeMap::new())),
+        next_wd: 1,
+    };
+    FD_TABLE.lock().insert((pid, fd), alloc::boxed::Box::new(handle));
+    fd as i64
+}
+
+unsafe fn sys_inotify_add_watch(ifd: u64, path_ptr: u64, mask: u32) -> i64 {
+    let path = match read_user_cstr(path_ptr, 4096) { Some(p) => p, None => return EFAULT };
+    let pid  = crate::scheduler::current_pid();
+    // Verify path exists.
+    if crate::vfs::lookup(&path).is_err() { return ENOENT; }
+
+    let mut tbl = FD_TABLE.lock();
+    let h_ptr = match tbl.get_mut(&(pid, ifd)) {
+        Some(h) => h as *mut alloc::boxed::Box<dyn crate::vfs::FileHandle> as *mut u8,
+        None    => return EBADF,
+    };
+    let ih = &mut *(h_ptr as *mut alloc::boxed::Box<InotifyHandle>);
+
+    // Assign a watch descriptor.
+    let wd = ih.next_wd;
+    ih.next_wd += 1;
+    ih.watches.lock().insert(wd, (path.clone(), mask));
+    INOTIFY_REGISTRY.lock().insert((pid, ifd, wd), (path, mask));
+    wd as i64
+}
+
+unsafe fn sys_inotify_rm_watch(ifd: u64, wd: i32) -> i64 {
+    let pid = crate::scheduler::current_pid();
+    INOTIFY_REGISTRY.lock().remove(&(pid, ifd, wd));
+    let mut tbl = FD_TABLE.lock();
+    if let Some(h) = tbl.get_mut(&(pid, ifd)) {
+        let h_ptr = h as *mut alloc::boxed::Box<dyn crate::vfs::FileHandle> as *mut u8;
+        let ih = &mut *(h_ptr as *mut alloc::boxed::Box<InotifyHandle>);
+        ih.watches.lock().remove(&wd);
+    }
+    0
 }
 
 /// Split a path into (parent_dir, filename).  E.g. "/a/b/c" → ("/a/b", "c").

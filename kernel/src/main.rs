@@ -71,6 +71,7 @@ pub mod fingerprint;    // behavioral cluster classifier
 pub mod causal;         // live causal process wakeup DAG
 pub mod transformer_sched; // transformer-based scheduling policy
 pub mod mem_pressure;      // memory pressure monitor + AI-aware reclaim
+pub mod page_cache;        // unified page cache — file data keyed by (inode, page_off)
 
 /// Bootloader configuration — tells the bootloader to map all physical memory
 /// at a dynamic virtual offset so we can access physical frames by VA.
