@@ -61,9 +61,8 @@ impl CausalGraph {
         use alloc::string::String;
         let len = self.count.min(N_EDGES);
         let mut out = String::from(
-            "WAKER   WAKEE   AGE_MS   (most recent 32 edges)\n\
+            "WAKER   WAKEE   AGE_MS\n\
              ------  ------  -------\n");
-        // Show the 32 most recent.
         let show = len.min(32);
         for i in 0..show {
             let idx = (self.head + N_EDGES - show + i) % N_EDGES;
@@ -97,6 +96,26 @@ pub fn last_waker(pid: u64) -> Option<u64> {
     GRAPH.lock().last_waker(pid)
 }
 
+/// Predict the most likely next wakee for `pid` and the probability (frequency ratio).
+/// Looks at the last 10 edges where `pid` is the waker; returns the mode wakee
+/// and how often it appeared. Used for predictive producer-priority boosting.
+pub fn predict_next_wake(pid: u64) -> Option<(u64, f32)> {
+    use alloc::collections::BTreeMap;
+    let graph = GRAPH.lock();
+    let len = graph.count.min(N_EDGES).min(10);
+    let mut freq: BTreeMap<u64, u32> = BTreeMap::new();
+    for i in 0..len {
+        let idx = (graph.head + N_EDGES - 1 - i) % N_EDGES;
+        let e = &graph.edges[idx];
+        if e.waker == pid && e.wakee != 0 {
+            *freq.entry(e.wakee).or_insert(0) += 1;
+        }
+    }
+    freq.into_iter()
+        .max_by_key(|(_, c)| *c)
+        .map(|(wakee, count)| (wakee, count as f32 / 10.0))
+}
+
 /// Predict which PIDs are likely to need the CPU soon because `waker_pid` is
 /// about to run. Looks backwards through the edge buffer for any PID that
 /// `waker_pid` has woken ≥2 times in the last 64 edges — those are its
@@ -125,6 +144,38 @@ pub fn predict_successors(waker_pid: u64) -> alloc::vec::Vec<u64> {
 
 /// Format for /ai/causal_graph.
 pub fn format_report() -> alloc::vec::Vec<u8> {
+    use alloc::string::String;
     let now = crate::scheduler::uptime_ms();
-    GRAPH.lock().format_report(now)
+
+    // Edge history (releases lock before predict_next_wake calls).
+    let mut out = {
+        let bytes = GRAPH.lock().format_report(now);
+        String::from_utf8(bytes).unwrap_or_default()
+    };
+
+    // Predictive producer table — computed outside the graph lock.
+    out.push_str("\nPRODUCER  LIKELY_WAKEE  PROB  BOOST\n");
+    out.push_str("--------  ------------  ----  -----\n");
+    // Collect unique waker PIDs from recent edges.
+    let wakers: alloc::vec::Vec<u64> = {
+        let graph = GRAPH.lock();
+        let len = graph.count.min(N_EDGES).min(32);
+        let mut seen = alloc::collections::BTreeSet::new();
+        for i in 0..len {
+            let idx = (graph.head + N_EDGES - 1 - i) % N_EDGES;
+            let w = graph.edges[idx].waker;
+            if w != 0 { seen.insert(w); }
+        }
+        seen.into_iter().collect()
+    };
+    for waker in wakers {
+        if let Some((wakee, prob)) = predict_next_wake(waker) {
+            if prob >= 0.3 {
+                let boost = if prob >= 0.5 { "yes(-5)" } else { "no" };
+                out.push_str(&alloc::format!(
+                    "{:<9} {:<13} {:.2}  {}\n", waker, wakee, prob, boost));
+            }
+        }
+    }
+    out.into_bytes()
 }

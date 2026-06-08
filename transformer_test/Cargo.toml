@@ -1,0 +1,8 @@
+[package]
+name = "transformer_test"
+version = "0.1.0"
+edition = "2021"
+
+[[test]]
+name = "transformer_math"
+path = "tests/transformer_math.rs"

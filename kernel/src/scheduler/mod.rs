@@ -85,7 +85,7 @@ pub unsafe extern "C" fn schedule_from_interrupt(old_rsp: u64) -> u64 {
         }
     }
 
-    // Step 2a: fingerprint + transformer update for the outgoing task.
+    // Step 2a: fingerprint + transformer update + causal producer boost.
     if let Some(pid) = old_pid {
         // Fingerprint cluster update.
         if let Some((_, fp_profile)) = crate::fingerprint::classify_task(pid) {
@@ -93,6 +93,22 @@ pub unsafe extern "C" fn schedule_from_interrupt(old_rsp: u64) -> u64 {
             if let Some(task) = tasks.get_mut(&pid) {
                 if task.intent == 0 {
                     task.ai_nice_adjust = fp_profile.nice_adjust;
+                }
+            }
+        }
+
+        // Predictive causal reprioritization: if this task is a habitual producer
+        // (wakes some other task with probability ≥ 0.5), temporarily boost its
+        // nice by -5 so it finishes its data production before the consumer runs.
+        // This cuts pipeline stall latency: the consumer wakes to data already ready.
+        if let Some((_next_wakee, prob)) = crate::causal::predict_next_wake(pid) {
+            if prob >= 0.5 {
+                let mut tasks = TASKS.lock();
+                if let Some(task) = tasks.get_mut(&pid) {
+                    task.ai_nice_adjust = task.ai_nice_adjust.saturating_sub(5);
+                    crate::klog!(TRACE,
+                        "CausalBoost: pid={} producer prob={:.2} nice→{}",
+                        pid, prob, task.ai_nice_adjust);
                 }
             }
         }
