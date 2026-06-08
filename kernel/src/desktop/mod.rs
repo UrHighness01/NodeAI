@@ -1162,10 +1162,21 @@ unsafe fn scroll_terminal() {
     TERM_ROW = rows;
     TERM_COL = 0;
 
-    // Repaint every visible terminal line
-    fb::with(|_f| {
+    // Repaint all terminal lines in ONE fb::with — redraw_terminal_line also calls
+    // fb::with internally, so we must NOT nest it inside another fb::with.
+    let cols = term_cols();
+    let w    = fb::width();
+    fb::with(|f| {
         for r in 0..TERM_ROWS_MAX {
-            redraw_terminal_line(r);
+            let y = TERM_Y + 4 + r * FONT_H;
+            f.fill_rect(0, y, w, FONT_H, TERM_BG_C.0, TERM_BG_C.1, TERM_BG_C.2);
+            let mut x = 4usize;
+            for col in 0..cols.min(TERM_COLS_MAX) {
+                let ch = TERM_BUF[r][col];
+                if ch == 0 { break; }
+                let fg = color_from_idx(TERM_COLOR[r][col]);
+                x = f.draw_char(x, y, ch, fg, TERM_BG_C);
+            }
         }
     });
 }
