@@ -430,7 +430,7 @@ pub unsafe extern "C" fn syscall_dispatch_extern(
         crate::klog!(WARN, "ANOMALY: pid={} score={:.3} nr={}", pid, score, nr);
         // Feed into AI security pipeline.
         ai_subsystem::event_bus::publish(
-            ai_subsystem::event_bus::KernelEvent::SyscallIssued { pid, syscall_nr: nr as u32 });
+            ai_subsystem::event_bus::KernelEvent::SyscallIssued { pid, syscall_nr: nr });
     }
     let result = match nr {
         // ── Phase 11 core ──────────────────────────────────────────────────
@@ -951,7 +951,7 @@ unsafe fn sys_open(path_ptr: u64, path_len: u64, _flags: u64) -> i64 {
         DIR_NODES.lock().insert((pid, fd), node);
     }
     FD_TABLE.lock().insert((pid, fd), handle);
-    FD_PATH_TABLE.lock().insert((pid, fd), path_str.to_owned());
+    FD_PATH_TABLE.lock().insert((pid, fd), alloc::string::String::from(path_str));
     fd as i64
 }
 
@@ -1092,9 +1092,9 @@ unsafe fn sys_munmap(addr: u64, len: u64) -> i64 {
     for i in 0..pages {
         let virt = addr_aligned + i * page_sz;
         let page: Page<Size4KiB> = Page::containing_address(VirtAddr::new(virt));
-        if let Ok(frame) = crate::memory::vmm::unmap_page(page) {
+        if let Ok(frame) = crate::memory::unmap_page(page) {
             // Free the backing physical frame.
-            unsafe { crate::memory::pmm::free_frame(frame.start_address().as_u64()); }
+            unsafe { crate::memory::free_frame(frame.start_address().as_u64()); }
         }
         // If unmap_page fails the page was never mapped — not an error (POSIX says so).
     }
@@ -1837,7 +1837,7 @@ impl crate::vfs::FileHandle for PipeHandle {
         if !self.is_write { return Err(crate::vfs::VfsError::PermissionDenied); }
         let state_arc = match PIPE_TABLE.lock().get(&self.pipe_id).cloned() {
             Some(a) => a,
-            None    => return Err(crate::vfs::VfsError::IoError),
+            None    => return Err(crate::vfs::VfsError::Io),
         };
         state_arc.lock().buf.extend_from_slice(buf);
         Ok(buf.len())
@@ -2391,7 +2391,7 @@ unsafe fn sys_poll(fds_ptr: u64, nfds: u64, timeout_ms: i32) -> i64 {
             let events= core::ptr::read_unaligned(entry.add(4) as *const u16);
             // Clear revents
             core::ptr::write_unaligned(entry.add(6) as *mut u16, 0);
-            if fd as i32 < 0 { continue; }
+            if (fd as i32) < 0 { continue; }
 
             let mut revents: u16 = 0;
             if fd == 1 || fd == 2 {

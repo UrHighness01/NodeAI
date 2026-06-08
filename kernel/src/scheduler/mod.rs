@@ -92,7 +92,7 @@ pub unsafe extern "C" fn schedule_from_interrupt(old_rsp: u64) -> u64 {
             let mut tasks = TASKS.lock();
             if let Some(task) = tasks.get_mut(&pid) {
                 if task.intent == 0 {
-                    task.ai_nice_adjust = fp_profile.nice_adjust;
+                    task.ai_profile.ai_nice_adjust = fp_profile.nice_adjust;
                 }
             }
         }
@@ -101,7 +101,7 @@ pub unsafe extern "C" fn schedule_from_interrupt(old_rsp: u64) -> u64 {
         let (actual_nice, actual_burst, actual_pf) = {
             let tasks = TASKS.lock();
             if let Some(task) = tasks.get(&pid) {
-                (task.ai_nice_adjust, task.ai_profile.ticks_run as u32, 0u8)
+                (task.ai_profile.ai_nice_adjust, task.ai_profile.ticks_run as u32, 0u8)
             } else {
                 (0i8, 1u32, 0u8)
             }
@@ -209,7 +209,7 @@ pub unsafe extern "C" fn schedule_from_interrupt(old_rsp: u64) -> u64 {
 
                 // Apply confidence-weighted blend of all three AI signals.
                 if t.intent == 0 {
-                    t.ai_nice_adjust = blended_nice.clamp(-20.0, 20.0) as i8;
+                    t.ai_profile.ai_nice_adjust = blended_nice.clamp(-20.0, 20.0) as i8;
                 }
                 // Use transformer's burst_ticks if it has a confident prediction.
                 if let Some(td) = transformer_decision {
@@ -367,6 +367,13 @@ pub fn list_pids() -> alloc::vec::Vec<Pid> {
 /// Return true if `pid` is a live task.
 pub fn pid_exists(pid: Pid) -> bool {
     TASKS.lock().contains_key(&pid)
+}
+
+/// Stamp the `woke_by` field on a task — called by causal::record_wakeup.
+pub fn set_woke_by(wakee_pid: Pid, waker_pid: Pid) {
+    if let Some(task) = TASKS.lock().get_mut(&wakee_pid) {
+        task.woke_by = Some(waker_pid);
+    }
 }
 
 /// Terminate task `pid` with `code` — marks zombie, wakes parent, removes from queue.

@@ -85,10 +85,7 @@ pub fn record_wakeup(waker_pid: u64, wakee_pid: u64) {
     let uptime_ms = crate::scheduler::uptime_ms();
     GRAPH.lock().record(waker_pid, wakee_pid, uptime_ms);
     // Also stamp the wakee's Task so the anomaly detector can read it.
-    let mut tasks = crate::scheduler::TASKS.lock();
-    if let Some(task) = tasks.get_mut(&wakee_pid) {
-        task.woke_by = Some(waker_pid);
-    }
+    crate::scheduler::set_woke_by(wakee_pid, waker_pid);
 }
 
 /// Look up who most recently woke a given PID (for anomaly enrichment).

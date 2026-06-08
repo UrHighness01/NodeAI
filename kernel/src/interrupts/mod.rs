@@ -169,9 +169,9 @@ extern "x86-interrupt" fn segment_not_present_handler(frame: InterruptStackFrame
 /// gs:56=signal_new_rflags, gs:64=signal_signum, gs:72=fpu_ptr.
 const GS_FPU_PTR: usize = 72;
 
-#[naked]
+#[unsafe(naked)]
 unsafe extern "C" fn timer_handler() {
-    core::arch::asm!(
+    core::arch::naked_asm!(
         // ── Save GPRs ─────────────────────────────────────────────────────
         "push rax",
         "push rcx",
@@ -229,7 +229,6 @@ unsafe extern "C" fn timer_handler() {
 
         schedule = sym crate::scheduler::schedule_from_interrupt,
         fpu_off  = const GS_FPU_PTR,
-        options(noreturn),
     );
 }
 

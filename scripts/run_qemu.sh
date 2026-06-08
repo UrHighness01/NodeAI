@@ -74,9 +74,10 @@ fi
 echo "  Kernel: $KERNEL_ELF ($(du -sh "$KERNEL_ELF" | cut -f1))"
 
 # ── 2. Build the image-builder host tool ─────────────────────────────────────
+# Must pass --target explicitly: .cargo/config.toml defaults to x86_64-unknown-none
 echo "==> Building image-builder..."
-cargo build --package image-builder
-IMAGE_BUILDER="$ROOT/target/debug/image-builder"
+cargo build --package image-builder --target x86_64-unknown-linux-gnu
+IMAGE_BUILDER="$ROOT/target/x86_64-unknown-linux-gnu/debug/image-builder"
 
 # ── 3. Create bootable disk images ────────────────────────────────────────────
 echo "==> Creating disk images..."

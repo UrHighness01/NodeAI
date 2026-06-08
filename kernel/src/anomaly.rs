@@ -134,8 +134,8 @@ fn check_cross_process(victim_pid: u64, victim_score: f32) {
         victim_pid, waker_pid, rare_count, combined_score);
 
     // Publish to the AI security pipeline — demotes waker priority if score > 0.7.
-    ai_subsystem::event_bus::publish(
-        ai_subsystem::event_bus::KernelEvent::SecurityAlert {
+    ai_subsystem::event_bus::post_decision(
+        ai_subsystem::event_bus::AiDecision::SecurityAlert {
             pid: waker_pid,
             anomaly_score: combined_score,
         });

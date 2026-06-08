@@ -65,12 +65,12 @@ impl FileHandle for AhciHandle {
                 *off += n as u64;
                 Ok(n)
             }
-            None => Err(VfsError::IoError),
+            None => Err(VfsError::Io),
         }
     }
     fn write(&mut self, buf: &[u8]) -> VfsResult<usize> {
         let mut off = self.offset.lock();
-        if *off >= self.size { return Err(VfsError::IoError); }
+        if *off >= self.size { return Err(VfsError::Io); }
         let lba     = *off / SECTOR_SIZE;
         let aligned = (buf.len() + SECTOR_SIZE as usize - 1) & !(SECTOR_SIZE as usize - 1);
         let mut sector_buf = alloc::vec![0u8; aligned];
@@ -80,7 +80,7 @@ impl FileHandle for AhciHandle {
             *off += buf.len() as u64;
             Ok(buf.len())
         } else {
-            Err(VfsError::IoError)
+            Err(VfsError::Io)
         }
     }
     fn seek(&mut self, pos: u64) -> VfsResult<u64> {
@@ -147,7 +147,7 @@ impl FileHandle for NvmeHandle {
                 *off += n as u64;
                 Ok(n)
             }
-            None => Err(VfsError::IoError),
+            None => Err(VfsError::Io),
         }
     }
     fn write(&mut self, buf: &[u8]) -> VfsResult<usize> {
@@ -161,7 +161,7 @@ impl FileHandle for NvmeHandle {
             *off += buf.len() as u64;
             Ok(buf.len())
         } else {
-            Err(VfsError::IoError)
+            Err(VfsError::Io)
         }
     }
     fn seek(&mut self, pos: u64) -> VfsResult<u64> {

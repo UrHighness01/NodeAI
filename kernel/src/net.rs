@@ -1402,7 +1402,11 @@ pub mod tcp {
                     crate::klog!(INFO, "TCP: connection ESTABLISHED port {}↔{}",
                         tcph.dst_port, tcph.src_port);
                     // Push this connection onto the accept backlog for the listening port.
-                    let conn_key = key.clone();
+                    let conn_key = TcpSocketKey {
+                        local_port: tcph.dst_port,
+                        remote_ip:  *remote_ip,
+                        remote_port: tcph.src_port,
+                    };
                     let port = tcph.dst_port;
                     if let Some(backlog) = LISTENERS.lock().get_mut(&port) {
                         backlog.push_back(conn_key);
@@ -1573,8 +1577,8 @@ pub mod tcp {
         }
     }
 
-    /// Drain received data from a socket's buffer.
-    pub fn recv(local_port: u16, remote_ip: [u8; 4], remote_port: u16) -> Vec<u8> {
+    /// Drain all received data from a socket's buffer into a Vec.
+    pub fn recv_vec(local_port: u16, remote_ip: [u8; 4], remote_port: u16) -> Vec<u8> {
         let key = TcpSocketKey { local_port, remote_ip, remote_port };
         let mut sockets = SOCKETS.lock();
         if let Some(sock) = sockets.get_mut(&key) {
@@ -1635,7 +1639,7 @@ pub fn http_server_poll() {
     let port = *HTTP_PORT.lock();
     let keys = tcp::established_for(port);
     for key in keys {
-        let data = tcp::recv(key.local_port, key.remote_ip, key.remote_port);
+        let data = tcp::recv_vec(key.local_port, key.remote_ip, key.remote_port);
         if data.is_empty() { continue; }
         // Try to parse an HTTP request
         let req = core::str::from_utf8(&data).unwrap_or("");
@@ -1729,7 +1733,7 @@ pub fn ssh_server_poll() {
     let port = *SSH_PORT.lock();
     let keys = tcp::established_for(port);
     for key in keys {
-        let data = tcp::recv(key.local_port, key.remote_ip, key.remote_port);
+        let data = tcp::recv_vec(key.local_port, key.remote_ip, key.remote_port);
         if data.is_empty() { continue; }
         // Send SSH identification string on new connections
         let banner = "SSH-2.0-NodeAI_1.0 PROTOCOL_NOT_IMPLEMENTED\r\n\

@@ -63,7 +63,7 @@ fn apply_decision(decision: AiDecision) {
             // Validate through safety layer, then clamp to live tunable cap.
             let raw   = ai_subsystem::safety::check_scheduler_nice(0, nice_delta);
             let cap   = crate::tunables::AI_NICE_CAP.load(core::sync::atomic::Ordering::Relaxed);
-            let delta = raw.clamp(-cap, cap);
+            let delta = (raw as i32).clamp(-cap, cap) as i8;
             if delta != 0 {
                 crate::scheduler::adjust_priority(pid, delta);
             }

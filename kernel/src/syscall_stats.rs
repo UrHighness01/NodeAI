@@ -56,6 +56,12 @@ pub fn all_pids() -> alloc::vec::Vec<u64> {
     STATS.lock().keys().copied().collect()
 }
 
+/// Clone the raw histogram for `pid` into a Vec. Returns None if PID not tracked.
+pub fn get_histogram(pid: u64) -> Option<alloc::vec::Vec<u32>> {
+    let map = STATS.lock();
+    map.get(&pid).map(|h| h.iter().copied().collect())
+}
+
 /// Number of tracked PIDs (used by transformer for co-occurrence warm-start check).
 pub fn pid_count() -> usize {
     STATS.lock().len()

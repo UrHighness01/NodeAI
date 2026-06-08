@@ -109,7 +109,7 @@ impl FingerprintModel {
             *c = *c * (1.0 - lr) + h * lr;
         }
         // Re-normalize centroid to unit vector.
-        let mag: f32 = centroid.iter().map(|v| v * v).sum::<f32>().sqrt();
+        let mag: f32 = libm::sqrtf(centroid.iter().map(|v| v * v).sum::<f32>());
         if mag > 1e-6 { for v in centroid.iter_mut() { *v /= mag; } }
     }
 
@@ -148,10 +148,7 @@ pub fn init() {
 /// Classify a task and return its cluster ID, scheduling profile, and cosine confidence.
 /// Called by the scheduler on descheduling to get the AI-suggested priority.
 pub fn classify_task(pid: u64) -> Option<(usize, ClusterProfile, f32)> {
-    let hist_raw = {
-        let map = crate::syscall_stats::STATS.lock();
-        map.get(&pid)?.iter().copied().collect::<Vec<u32>>()
-    };
+    let hist_raw = crate::syscall_stats::get_histogram(pid)?;
     if hist_raw.len() < 8 { return None; }
     let norm = FingerprintModel::normalize(&hist_raw);
     let mut guard = MODEL.lock();
@@ -163,12 +160,9 @@ pub fn classify_task(pid: u64) -> Option<(usize, ClusterProfile, f32)> {
 
 /// Called when a process declares intent — pins its cluster's label.
 pub fn label_from_intent(pid: u64, intent: u8) {
-    let hist_raw = {
-        let map = crate::syscall_stats::STATS.lock();
-        match map.get(&pid) {
-            Some(h) => h.iter().copied().collect::<Vec<u32>>(),
-            None    => return,
-        }
+    let hist_raw = match crate::syscall_stats::get_histogram(pid) {
+        Some(h) => h,
+        None    => return,
     };
     let norm = FingerprintModel::normalize(&hist_raw);
     let mut guard = MODEL.lock();

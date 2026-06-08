@@ -69,8 +69,8 @@ fn init_weight(row: usize, col: usize, fan_in: usize, seed: u64) -> f32 {
         .wrapping_add(col as u64 * 2246822519)
         .wrapping_mul(6364136223846793005)
         .wrapping_add(1442695040888963407);
-    let scale = (2.0 / fan_in as f32).sqrt();
-    let frac = ((h >> 11) as f32) / (f32::powi(2.0, 53));
+    let scale = libm::sqrtf(2.0 / fan_in as f32);
+    let frac = ((h >> 11) as f32) / libm::powf(2.0, 53.0);
     (frac * 2.0 - 1.0) * scale
 }
 
@@ -128,7 +128,7 @@ impl TransformerSchedModel {
         let t = CONTEXT_LEN;
         let d = EMBED_DIM;
         let a = ATTN_DIM;
-        let scale = 1.0 / (a as f32).sqrt();
+        let scale = 1.0 / libm::sqrtf(a as f32);
 
         let mut q = alloc::vec![0.0f32; t * a];
         let mut k = alloc::vec![0.0f32; t * a];
@@ -191,11 +191,11 @@ impl TransformerSchedModel {
         // Attention entropy of the LAST query row (most recent token's attention
         // distribution). Low entropy = peaked = confident. High = uniform = uncertain.
         // Normalized to [0,1] by dividing by log(CONTEXT_LEN).
-        let log_t = (CONTEXT_LEN as f32).ln();
+        let log_t = libm::logf(CONTEXT_LEN as f32);
         let last_row = &attn_weights[(CONTEXT_LEN - 1) * CONTEXT_LEN..];
         let entropy_raw: f32 = last_row.iter()
             .filter(|&&p| p > 1e-9)
-            .map(|&p| -p * p.ln())
+            .map(|&p| -p * libm::logf(p))
             .sum();
         let attention_entropy = (entropy_raw / log_t).clamp(0.0, 1.0);
 
@@ -323,7 +323,7 @@ impl TransformerSchedModel {
 
         // Softmax Jacobian: d_scores[i,j] = aw[i,j] * (d_aw[i,j] - sum_k(aw[i,k]*d_aw[i,k]))
         let mut d_scores = alloc::vec![0.0f32; t * t];
-        let scale = 1.0 / (a as f32).sqrt();
+        let scale = 1.0 / libm::sqrtf(a as f32);
         for i in 0..t {
             let mut dot = 0.0f32;
             for k in 0..t { dot += attn_weights[i * t + k] * d_attn_weights[i * t + k]; }
@@ -420,7 +420,7 @@ impl TransformerSchedModel {
         // Xavier init (preserve some random diversity to avoid degenerate collapse).
         for i in 0..VOCAB_SIZE {
             let row = &mut cooc[i * EMBED_DIM..(i + 1) * EMBED_DIM];
-            let mag: f32 = row.iter().map(|v| v * v).sum::<f32>().sqrt();
+            let mag: f32 = libm::sqrtf(row.iter().map(|v| v * v).sum::<f32>());
             if mag > 1e-6 {
                 for (j, v) in row.iter_mut().enumerate() {
                     *v = (*v / mag) * 0.5 + self.embed[i * EMBED_DIM + j] * 0.5;

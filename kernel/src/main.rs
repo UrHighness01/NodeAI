@@ -9,6 +9,7 @@
 #![feature(alloc_error_handler)]
 
 extern crate alloc;
+extern crate libm;
 
 use bootloader_api::{entry_point, BootInfo, BootloaderConfig};
 use bootloader_api::config::Mapping;
