@@ -87,7 +87,6 @@ pub unsafe extern "C" fn schedule_from_interrupt(old_rsp: u64) -> u64 {
         // fb::with() which takes the framebuffer spin-lock. If the idle loop
         // holds that lock when the timer fires (e.g. inside browser_fetch_tick),
         // re-acquiring it from interrupt context deadlocks the CPU forever.
-        crate::ai_engine::process_tick(uptime_ms);
         crate::audio::tick();
         return old_rsp;
     }

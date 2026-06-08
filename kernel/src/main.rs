@@ -29,6 +29,7 @@ mod net;
 mod scheduler;
 mod security;
 mod shell;
+pub mod debug_counter;
 pub mod syscall;
 mod telemetry;
 pub mod users;
@@ -288,6 +289,8 @@ fn idle_loop() -> ! {
     let mut last_heartbeat: u64 = 0;
     let mut last_desktop_tick: u64 = 0;
     loop {
+        // Process hardware input events outside of IRQ context
+        crate::desktop::process_input_events();
         net::poll();
         net::http_server_poll();
         net::ssh_server_poll();
@@ -295,9 +298,10 @@ fn idle_loop() -> ! {
 
         let now = crate::scheduler::uptime_ms();
 
-        // Desktop + telemetry tick.
+        // Desktop + telemetry tick every 100ms.
         if now.saturating_sub(last_desktop_tick) >= 100 {
             last_desktop_tick = now;
+            crate::ai_engine::process_tick(now);
             crate::desktop::tick(now);
             crate::telemetry::tick(now);
         }

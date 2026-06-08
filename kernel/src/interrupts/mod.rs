@@ -235,69 +235,6 @@ unsafe extern "C" fn timer_handler() {
 extern "x86-interrupt" fn keyboard_handler(_frame: InterruptStackFrame) {
     // Read scancode + decode into event queue.
     drivers::input::keyboard_irq_handler();
-    // Route keypresses to the launcher (when open) or to the shell.
-    while let Some(ev) = drivers::input::poll_event() {
-        if ev.pressed {
-            if crate::desktop::launcher_is_open() {
-                // Inside launcher: ESC closes, BS edits search, Enter launches, printable = search
-                match ev.scancode {
-                    0x01 => crate::desktop::launcher_key(0x1B), // ESC
-                    0x0E => crate::desktop::launcher_key(0x08), // Backspace
-                    0x1C => crate::desktop::launcher_key(b'\n'), // Enter
-                    _ => {
-                        if let Some(ch) = ev.ascii {
-                            let b = ch as u8;
-                            if b >= 0x20 && b < 0x7F {
-                                crate::desktop::launcher_key(b);
-                            }
-                        }
-                    }
-                }
-            } else if crate::desktop::app_is_open() {
-                // GUI app window: route to app key handlers
-                if let Some(special) = ev.special {
-                    crate::desktop::app_special_key(special);
-                } else {
-                    match ev.scancode {
-                        0x01 => crate::desktop::app_char_key(0x1B), // ESC
-                        0x0E => crate::desktop::app_char_key(0x08), // Backspace
-                        0x1C => crate::desktop::app_char_key(b'\n'), // Enter
-                        _ => {
-                            if let Some(ch) = ev.ascii {
-                                let b = ch as u8;
-                                if b >= 0x20 && b < 0x7F {
-                                    crate::desktop::app_char_key(b);
-                                }
-                            }
-                        }
-                    }
-                }
-            } else {
-                // Normal shell routing
-                if let Some(special) = ev.special {
-                    crate::shell::on_special_key(special);
-                } else {
-                    match ev.scancode {
-                        // Backspace (scancode 0x0E) → send BS to shell
-                        0x0E => crate::shell::on_char(0x08),
-                        // Enter (scancode 0x1C) → send newline to shell
-                        0x1C => crate::shell::on_char(b'\n'),
-                        // Tab (scancode 0x0F) → send tab to shell
-                        0x0F => crate::shell::on_char(b'\t'),
-                        // All other printable keys via ascii lookup
-                        _ => {
-                            if let Some(ch) = ev.ascii {
-                                let b = ch as u8;
-                                if b >= 0x20 && b < 0x7F {
-                                    crate::shell::on_char(b);
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
     unsafe { apic::eoi(); }
 }
 
@@ -307,9 +244,6 @@ extern "x86-interrupt" fn spurious_handler(_frame: InterruptStackFrame) {
 
 extern "x86-interrupt" fn mouse_handler(_frame: InterruptStackFrame) {
     drivers::input::mouse_irq_handler();
-    while let Some(ev) = drivers::input::poll_mouse_event() {
-        crate::desktop::mouse_event(ev.dx, ev.dy, ev.left, ev.right);
-    }
     unsafe { apic::eoi(); }
 }
 

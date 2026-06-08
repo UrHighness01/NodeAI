@@ -24,6 +24,7 @@ MEMORY=512
 DEBUG=0
 RELEASE=0
 UEFI=0
+GUI=0
 
 # ── Parse args ────────────────────────────────────────────────────────────────
 while [[ $# -gt 0 ]]; do
@@ -31,6 +32,7 @@ while [[ $# -gt 0 ]]; do
         --debug)   DEBUG=1 ;;
         --release) RELEASE=1 ;;
         --uefi)    UEFI=1 ;;
+        --gui)     GUI=1 ;;
         --memory)  MEMORY="$2"; shift ;;
         --memory=*)MEMORY="${1#*=}" ;;
         -h|--help)
@@ -98,8 +100,11 @@ QEMU_ARGS=(
     -serial stdio
     -no-reboot
     -no-shutdown
-    -display none          # headless — all output via serial/stdio
 )
+
+if [[ $GUI -eq 0 ]]; then
+    QEMU_ARGS+=(-display none -monitor unix:qemu-monitor.sock,server,nowait) # headless — all output via serial/stdio
+fi
 
 # KVM acceleration if available (10-50x faster)
 if [[ -w /dev/kvm ]]; then

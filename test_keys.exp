@@ -1,0 +1,8 @@
+#!/usr/bin/expect -f
+set timeout 10
+spawn ./scripts/run_qemu.sh --debug
+# wait for boot
+expect "NodeAI boot complete."
+# send a key
+send "ls\r"
+expect "test"

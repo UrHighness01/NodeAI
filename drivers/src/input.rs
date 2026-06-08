@@ -75,6 +75,10 @@ static mut MOUSE_IDX: usize   = 0;
 
 /// Initialise the PS/2 controller, keyboard, and mouse.
 pub fn init() {
+    // Pre-allocate queues so interrupt handlers never trigger the allocator (which deadlocks if HEAP.lock is held).
+    KEY_QUEUE.lock().reserve_exact(KEY_QUEUE_CAP);
+    MOUSE_QUEUE.lock().reserve_exact(MOUSE_QUEUE_CAP);
+
     unsafe {
         // Flush output buffer
         while Port::<u8>::new(STATUS_PORT).read() & STATUS_OUTPUT_FULL != 0 {
@@ -156,92 +160,114 @@ unsafe fn wait_input() {
 
 /// Read a scancode from the PS/2 data port (polling — keyboard only).
 /// Returns `Some(scancode)` if keyboard data is ready (bit 5 must be 0 — not aux).
-pub fn read_scancode() -> Option<u8> {
-    let status: u8 = unsafe { Port::<u8>::new(STATUS_PORT).read() };
-    // bit0 = output full, bit5 = aux source.  Only return if it's keyboard data.
-    if status & STATUS_OUTPUT_FULL != 0 && status & STATUS_AUX == 0 {
-        let sc = unsafe { Port::<u8>::new(DATA_PORT).read() };
-        Some(sc)
-    } else {
-        None
+/// Process a single byte of mouse data.
+unsafe fn process_mouse_byte(byte: u8) {
+    // Byte 0 sync guard: bit 3 must always be set in a valid first byte.
+    if MOUSE_IDX == 0 && byte & 0x08 == 0 { return; }
+
+    MOUSE_BUF[MOUSE_IDX] = byte;
+    MOUSE_IDX += 1;
+    if MOUSE_IDX == 3 {
+        MOUSE_IDX = 0;
+        let b0 = MOUSE_BUF[0];
+        let b1 = MOUSE_BUF[1];
+        let b2 = MOUSE_BUF[2];
+        // Discard packet if overflow bits are set
+        if b0 & 0xC0 != 0 { return; }
+        // 9-bit signed X: sign bit = bit4 of b0
+        let dx = (b1 as i16) + if b0 & 0x10 != 0 { -256i16 } else { 0 };
+        // 9-bit signed Y: sign bit = bit5 of b0; negate (PS/2 Y positive = up)
+        let dy_ps2 = (b2 as i16) + if b0 & 0x20 != 0 { -256i16 } else { 0 };
+        let dy = -dy_ps2;
+        let ev = MouseEvent {
+            dx,
+            dy,
+            left:  b0 & 0x01 != 0,
+            right: b0 & 0x02 != 0,
+        };
+        let mut q = MOUSE_QUEUE.lock();
+        if q.len() < MOUSE_QUEUE_CAP {
+            q.push_back(ev);
+        }
     }
 }
 
-/// IRQ12 handler — called from IDT when PS/2 mouse interrupt fires.
-/// Accumulates 3-byte PS/2 mouse packets and enqueues MouseEvents.
-pub fn mouse_irq_handler() {
-    // Always read the byte to clear the controller's output buffer.
+/// Read a scancode from the PS/2 data port (polling — keyboard only).
+pub fn read_scancode() -> Option<u8> {
     let status: u8 = unsafe { Port::<u8>::new(STATUS_PORT).read() };
-    if status & STATUS_OUTPUT_FULL == 0 { return; }
-    let byte = unsafe { Port::<u8>::new(DATA_PORT).read() };
-    if status & STATUS_AUX == 0 { return; } // was keyboard data, not ours
-
-    unsafe {
-        // Byte 0 sync guard: bit 3 must always be set in a valid first byte.
-        if MOUSE_IDX == 0 && byte & 0x08 == 0 { return; }
-
-        MOUSE_BUF[MOUSE_IDX] = byte;
-        MOUSE_IDX += 1;
-        if MOUSE_IDX == 3 {
-            MOUSE_IDX = 0;
-            let b0 = MOUSE_BUF[0];
-            let b1 = MOUSE_BUF[1];
-            let b2 = MOUSE_BUF[2];
-            // Discard packet if overflow bits are set
-            if b0 & 0xC0 != 0 { return; }
-            // 9-bit signed X: sign bit = bit4 of b0
-            let dx = (b1 as i16) + if b0 & 0x10 != 0 { -256i16 } else { 0 };
-            // 9-bit signed Y: sign bit = bit5 of b0; negate (PS/2 Y positive = up)
-            let dy_ps2 = (b2 as i16) + if b0 & 0x20 != 0 { -256i16 } else { 0 };
-            let dy = -dy_ps2;
-            let ev = MouseEvent {
-                dx,
-                dy,
-                left:  b0 & 0x01 != 0,
-                right: b0 & 0x02 != 0,
-            };
-            let mut q = MOUSE_QUEUE.lock();
-            if q.len() < MOUSE_QUEUE_CAP {
-                q.push_back(ev);
-            }
+    if status & STATUS_OUTPUT_FULL != 0 {
+        let sc = unsafe { Port::<u8>::new(DATA_PORT).read() };
+        if status & STATUS_AUX == 0 {
+            return Some(sc);
         }
     }
+    None
 }
 
 /// Pop the oldest mouse event from the queue.
 pub fn poll_mouse_event() -> Option<MouseEvent> {
-    MOUSE_QUEUE.lock().pop_front()
+    x86_64::instructions::interrupts::without_interrupts(|| {
+        MOUSE_QUEUE.lock().pop_front()
+    })
+}
+
+/// IRQ12 handler — called from IDT when PS/2 mouse interrupt fires.
+pub fn mouse_irq_handler() {
+    let status: u8 = unsafe { Port::<u8>::new(STATUS_PORT).read() };
+    if status & STATUS_OUTPUT_FULL == 0 { return; }
+    let byte = unsafe { Port::<u8>::new(DATA_PORT).read() };
+    
+    if status & STATUS_AUX != 0 {
+        unsafe { process_mouse_byte(byte); }
+    } else {
+        // Was keyboard data! Route it to keyboard handler.
+        process_keyboard_byte(byte);
+    }
 }
 
 /// IRQ1 handler — called from IDT when keyboard interrupt fires.
 pub fn keyboard_irq_handler() {
-    if let Some(sc) = read_scancode() {
-        // Handle 0xE0 prefix (extended scancodes)
-        if sc == 0xE0 {
-            *EXTENDED.lock() = true;
-            return;
-        }
-        let is_ext = {
-            let mut ext = EXTENDED.lock();
-            let was = *ext;
-            *ext = false;
-            was
-        };
-        let event = if is_ext {
-            decode_extended(sc)
-        } else {
-            decode_scancode_set1(sc)
-        };
-        let mut q = KEY_QUEUE.lock();
-        if q.len() < KEY_QUEUE_CAP {
-            q.push_back(event);
-        }
+    let status: u8 = unsafe { Port::<u8>::new(STATUS_PORT).read() };
+    if status & STATUS_OUTPUT_FULL == 0 { return; }
+    let byte = unsafe { Port::<u8>::new(DATA_PORT).read() };
+    
+    if status & STATUS_AUX != 0 {
+        // Was mouse data! Route it to mouse handler.
+        unsafe { process_mouse_byte(byte); }
+    } else {
+        process_keyboard_byte(byte);
+    }
+}
+
+/// Process a single byte of keyboard data.
+fn process_keyboard_byte(sc: u8) {
+    // Handle 0xE0 prefix (extended scancodes)
+    if sc == 0xE0 {
+        *EXTENDED.lock() = true;
+        return;
+    }
+    let is_ext = {
+        let mut ext = EXTENDED.lock();
+        let was = *ext;
+        *ext = false;
+        was
+    };
+    let event = if is_ext {
+        decode_extended(sc)
+    } else {
+        decode_scancode_set1(sc)
+    };
+    let mut q = KEY_QUEUE.lock();
+    if q.len() < KEY_QUEUE_CAP {
+        q.push_back(event);
     }
 }
 
 /// Pop the oldest keyboard event from the queue.
 pub fn poll_event() -> Option<KeyEvent> {
-    KEY_QUEUE.lock().pop_front()
+    x86_64::instructions::interrupts::without_interrupts(|| {
+        KEY_QUEUE.lock().pop_front()
+    })
 }
 
 // ── Scancode Set 1 decoder ────────────────────────────────────────────────────

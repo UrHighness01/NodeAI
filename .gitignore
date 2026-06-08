@@ -6,6 +6,7 @@ target/
 
 # VirtualBox / QEMU runtime artifacts (not source)
 *.vdi
+*.log
 nodeai_serial*.log
 
 # Local-only documents

@@ -2035,3 +2035,72 @@ pub fn app_special_key(key: drivers::input::SpecialKey) {
         }
     }
 }
+
+/// Poll hardware input queues and route events to the desktop or shell.
+/// Called safely from the main idle loop (out of interrupt context).
+pub fn process_input_events() {
+    // Process Mouse
+    while let Some(ev) = drivers::input::poll_mouse_event() {
+        mouse_event(ev.dx, ev.dy, ev.left, ev.right);
+    }
+
+    // Process Keyboard
+    while let Some(ev) = drivers::input::poll_event() {
+        if ev.pressed {
+            if launcher_is_open() {
+                // Inside launcher
+                match ev.scancode {
+                    0x01 => launcher_key(0x1B), // ESC
+                    0x0E => launcher_key(0x08), // Backspace
+                    0x1C => launcher_key(b'\n'), // Enter
+                    _ => {
+                        if let Some(ch) = ev.ascii {
+                            let b = ch as u8;
+                            if b >= 0x20 && b < 0x7F {
+                                launcher_key(b);
+                            }
+                        }
+                    }
+                }
+            } else if app_is_open() {
+                // GUI app window: route to app key handlers
+                if let Some(special) = ev.special {
+                    app_special_key(special);
+                } else {
+                    match ev.scancode {
+                        0x01 => app_char_key(0x1B), // ESC
+                        0x0E => app_char_key(0x08), // Backspace
+                        0x1C => app_char_key(b'\n'), // Enter
+                        _ => {
+                            if let Some(ch) = ev.ascii {
+                                let b = ch as u8;
+                                if b >= 0x20 && b < 0x7F {
+                                    app_char_key(b);
+                                }
+                            }
+                        }
+                    }
+                }
+            } else {
+                // Normal shell routing
+                if let Some(special) = ev.special {
+                    crate::shell::on_special_key(special);
+                } else {
+                    match ev.scancode {
+                        0x0E => crate::shell::on_char(0x08),
+                        0x1C => crate::shell::on_char(b'\n'),
+                        0x0F => crate::shell::on_char(b'\t'),
+                        _ => {
+                            if let Some(ch) = ev.ascii {
+                                let b = ch as u8;
+                                if b >= 0x20 && b < 0x7F {
+                                    crate::shell::on_char(b);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

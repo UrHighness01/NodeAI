@@ -674,10 +674,12 @@ pub fn remove(pid: u64) {
 
 pub fn format_report() -> alloc::vec::Vec<u8> {
     use alloc::string::String;
-    let guard  = MODEL.lock();
-    let steps  = guard.as_ref().map(|m| m.steps).unwrap_or(0);
-    let ctx_n  = CONTEXTS.lock().len();
-    let warm_n = CONTEXTS.lock().values().filter(|c| c.is_warm()).count();
+    let steps  = MODEL.lock().as_ref().map(|m| m.steps).unwrap_or(0);
+    // Acquire CONTEXTS once — second .lock() on a spinlock self-deadlocks.
+    let (ctx_n, warm_n) = {
+        let ctx = CONTEXTS.lock();
+        (ctx.len(), ctx.values().filter(|c| c.is_warm()).count())
+    };
     let cooc   = COOC_INIT_DONE.load(core::sync::atomic::Ordering::Relaxed);
 
     let total_params = VOCAB_SIZE * EMBED_DIM
