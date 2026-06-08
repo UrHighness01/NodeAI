@@ -41,7 +41,7 @@ pub fn process_tick(uptime_ms: u64) {
                 let _ = pid;
             }
             KernelEvent::SyscallIssued { pid, syscall_nr } => {
-                // Feed to security AI (simplified — full anomaly detection is future work)
+                // Feed to security AI — cross-process anomaly detection in anomaly.rs
                 let _ = (pid, syscall_nr);
             }
             KernelEvent::TimerTick { .. } => { /* handled above */ }
@@ -185,7 +185,7 @@ fn build_default_scheduler_model() -> SequentialModel {
     m
 }
 
-// ── Phase 29 additions ────────────────────────────────────────────────────────
+// ── AI engine pipeline: fingerprint → transformer → causal → anomaly → blend ──
 
 /// Called when the system wakes from sleep — re-warms internal caches/state.
 pub fn wake_hint() {

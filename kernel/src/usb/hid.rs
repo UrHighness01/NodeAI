@@ -1,4 +1,4 @@
-//! USB HID class driver — Phase 27.
+//! USB HID class driver — keyboard/mouse input via USB.
 //!
 //! Implements:
 //!   - Boot-protocol keyboard (8-byte reports)

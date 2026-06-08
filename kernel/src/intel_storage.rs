@@ -1,4 +1,4 @@
-//! Intelligent Storage — Phase 29.
+//! Intelligent storage — speculative read/prefetch driven by AI scheduler hints.
 //!
 //! AI-driven storage management providing:
 //!

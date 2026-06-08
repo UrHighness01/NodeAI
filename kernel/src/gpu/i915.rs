@@ -1,4 +1,4 @@
-//! Intel i915 integrated graphics driver stub — Phase 27.
+//! Intel i915 integrated graphics driver — probe, MMIO, basic mode set. Stubbed.
 //!
 //! Implements:
 //!   - PCI discovery: vendor=0x8086, class=0x03 (display)

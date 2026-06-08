@@ -1,5 +1,4 @@
 //! USB Mass Storage Class (MSC) driver — Bulk-Only Transport (BOT) + SCSI.
-//! Phase 27.
 //!
 //! Exposes a simple block-read / block-write interface on top of USB BOT.
 //! The xHCI layer calls `process_cbw_in/process_cbw_out` with the device's

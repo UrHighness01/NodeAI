@@ -226,7 +226,7 @@ pub mod nr {
     pub const SYS_INTENT:      u64 = 202; // NodeAI-specific: declare scheduling intent
     pub const TKILL:           u64 = 200;   // re-use slot — routed same as AI_QUERY when called correctly
     pub const TGKILL:          u64 = 234;
-    // Phase 24 additions (new constants not already defined above)
+    // Later syscall constants (not in Phase 11 core set)
     pub const READLINK:        u64 = 89;
     pub const INOTIFY_INIT1:   u64 = 294;
     pub const INOTIFY_ADD_WATCH: u64 = 254;
@@ -441,7 +441,7 @@ pub unsafe extern "C" fn syscall_dispatch_extern(
             ai_subsystem::event_bus::KernelEvent::SyscallIssued { pid, syscall_nr: nr });
     }
     let result = match nr {
-        // ── Phase 11 core ──────────────────────────────────────────────────
+        // ── Core syscalls (file I/O, memory, process) ───────────────────────
         nr::READ          => sys_read(arg0, arg1, arg2),
         nr::WRITE         => sys_write(arg0, arg1, arg2),
         nr::OPEN          => sys_open(arg0, arg1, arg2),
@@ -457,16 +457,16 @@ pub unsafe extern "C" fn syscall_dispatch_extern(
         nr::GETPPID       => sys_getppid(),
         nr::EXIT | nr::EXIT_GROUP => sys_exit(arg0 as i32),
         nr::GETDENTS64    => sys_getdents64(arg0, arg1, arg2),
-        // ── Phase 18 process management ───────────────────────────────────
+        // ── Process management ────────────────────────────────────────────
         nr::EXECVE        => sys_execve(arg0, arg1, arg2),
         nr::FORK          => sys_fork(),
         nr::WAIT4         => sys_wait4(arg0 as i32, arg1, arg2),
         nr::CLONE         => sys_clone(arg0, arg1, arg2, arg3, arg4),
         nr::KILL          => sys_kill(arg0 as i32, arg1 as i32),
         nr::TGKILL        => sys_kill(arg1 as i32, arg2 as i32), // same routing
-        // ── Phase 18 memory ───────────────────────────────────────────────
+        // ── Memory ────────────────────────────────────────────────────────
         nr::BRK           => sys_brk(arg0),
-        // ── Phase 18 I/O ──────────────────────────────────────────────────
+        // ── I/O (readv/writev, dup, pipe, ioctl) ───────────────────────────
         nr::READV         => sys_readv(arg0, arg1, arg2),
         nr::WRITEV        => sys_writev(arg0, arg1, arg2),
         nr::PREAD64       => sys_pread64(arg0, arg1, arg2, arg3),
@@ -478,12 +478,12 @@ pub unsafe extern "C" fn syscall_dispatch_extern(
         nr::DUP3          => sys_dup2(arg0, arg1), // flags ignored
         nr::PIPE          => sys_pipe2(arg0, 0),
         nr::PIPE2         => sys_pipe2(arg0, arg1),
-        // ── Phase 18 signals ──────────────────────────────────────────────
+        // ── Signals (rt_sigaction, rt_sigprocmask, sigaltstack) ────────────
         nr::RT_SIGACTION  => sys_rt_sigaction(arg0, arg1, arg2),
         nr::RT_SIGPROCMASK=> sys_rt_sigprocmask(arg0, arg1, arg2),
         nr::SIGALTSTACK   => sys_sigaltstack(arg0, arg1),
         // RT_SIGRETURN is dispatched later in the match (full implementation)
-        // ── Phase 18 credentials ─────────────────────────────────────────
+        // ── Credentials (uid/gid, session, umask) ─────────────────────────
         nr::GETUID | nr::GETEUID => sys_getuid(),
         nr::GETGID | nr::GETEGID => sys_getgid(),
         nr::SETUID        => 0,  // always root for now
@@ -492,11 +492,11 @@ pub unsafe extern "C" fn syscall_dispatch_extern(
         nr::SETSID        => sys_getpid(),
         nr::GETPGID       => sys_getpid(),
         nr::UMASK         => 0o022,
-        // ── Phase 18/19 time ─────────────────────────────────────────────
+        // ── Time (nanosleep, clock_gettime, gettimeofday) ─────────────────
         nr::NANOSLEEP     => sys_nanosleep(arg0, arg1),
         nr::CLOCK_GETTIME => sys_clock_gettime(arg0, arg1),
         nr::GETTIMEOFDAY  => sys_gettimeofday(arg0, arg1),
-        // ── Phase 18/19 misc ─────────────────────────────────────────────
+        // ── Misc (uname, prctl, getrandom, sysinfo, getrlimit) ────────────
         nr::UNAME         => sys_uname(arg0),
         nr::PRCTL         => sys_prctl(arg0, arg1, arg2),
         nr::ARCH_PRCTL    => sys_arch_prctl(arg0, arg1),
@@ -508,18 +508,18 @@ pub unsafe extern "C" fn syscall_dispatch_extern(
         nr::SETRLIMIT     => 0,
         nr::MADVISE | nr::MINCORE | nr::MSYNC | nr::MLOCK | nr::MUNLOCK => 0, // safe no-ops
         nr::STATFS | nr::FSTATFS => sys_statfs(arg0, arg1),
-        // ── Phase 19 futex / threading ───────────────────────────────────
+        // ── Futex / threading ────────────────────────────────────────────
         nr::FUTEX         => sys_futex(arg0, arg1 as i32, arg2 as u32, arg3),
         nr::SET_ROBUST_LIST => sys_set_robust_list(arg0, arg1 as usize),
         nr::GET_ROBUST_LIST => 0, // not needed for musl hello world
-        // ── Phase 19 epoll / event I/O ───────────────────────────────────
+        // ── Epoll / event I/O ────────────────────────────────────────────
         nr::EPOLL_CREATE1 => sys_epoll_create1(arg0),
         nr::EPOLL_CTL     => sys_epoll_ctl(arg0, arg1 as i32, arg2 as i32, arg3),
         nr::EPOLL_WAIT    => sys_epoll_wait(arg0, arg1, arg2 as i32, arg3 as i32),
         nr::EVENTFD2      => sys_eventfd2(arg0, arg1 as i32),
         nr::POLL          => sys_poll(arg0, arg1, arg2 as i32),
         nr::SELECT        => sys_select(arg0 as i32, arg1, arg2, arg3, arg4),
-        // ── Phase 19 socket ──────────────────────────────────────────────
+        // ── Socket / networking ──────────────────────────────────────────
         nr::SOCKET        => sys_socket(arg0, arg1, arg2),
         nr::CONNECT       => sys_connect(arg0, arg1, arg2),
         nr::ACCEPT | nr::ACCEPT4 => sys_accept(arg0, arg1, arg2),
@@ -563,11 +563,11 @@ pub unsafe extern "C" fn syscall_dispatch_extern(
         nr::ALARM         => 0,
         nr::PAUSE         => { crate::scheduler::yield_cpu(); -4 } // EINTR
         nr::GETGROUPS | nr::SETGROUPS => 0,
-        // ── Phase 24 timerfd ─────────────────────────────────────────────
+        // ── Timerfd ──────────────────────────────────────────────────────
         nr::TIMERFD_CREATE  => sys_timerfd_create(arg0, arg1),
         nr::TIMERFD_SETTIME => sys_timerfd_settime(arg0, arg1, arg2, arg3),
         nr::TIMERFD_GETTIME => sys_timerfd_gettime(arg0, arg1),
-        // ── Phase 24 inotify / signalfd (stubs) ──────────────────────────
+        // ── inotify / signalfd (stubs — allocate fd, no event delivery) ──
         nr::INOTIFY_INIT1 | nr::INOTIFY_ADD_WATCH | nr::INOTIFY_RM_WATCH => {
             let pid = crate::scheduler::current_pid();
             alloc_fd(pid) as i64
@@ -1175,7 +1175,7 @@ unsafe fn sys_getdents64(fd: u64, buf_ptr: u64, buf_len: u64) -> i64 {
 const ENOTDIR: i64 = -20;
 
 // ─────────────────────────────────────────────────────────────────────────────
-//  Phase 18 — Ring-3 Process Launch
+//  Ring-3 Process Launch (execve/fork/clone/wait4/kill)
 // ─────────────────────────────────────────────────────────────────────────────
 
 // ── Helper: read null-terminated string from user space ──────────────────────
@@ -2583,7 +2583,7 @@ unsafe fn sys_getsockopt(_s: u64, level: u64, optname: u64, val_ptr: u64, len_pt
     0
 }
 
-// ── Phase 24: timerfd ────────────────────────────────────────────────────────
+// ── timerfd ──────────────────────────────────────────────────────────────────
 
 /// Per-timer state stored in the global timer table.
 struct TimerHandle {
@@ -2672,7 +2672,7 @@ unsafe fn sys_timerfd_gettime(fd: u64, curr_value_ptr: u64) -> i64 {
     0
 }
 
-// ── Phase 24: readlink / access / ftruncate ──────────────────────────────────
+// ── readlink / access / ftruncate ────────────────────────────────────────────
 
 unsafe fn sys_readlink(path_ptr: u64, buf_ptr: u64, buf_len: u64) -> i64 {
     // Most symlinks in our kernel are proc/self pseudo-links

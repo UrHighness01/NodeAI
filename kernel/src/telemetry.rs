@@ -1,4 +1,4 @@
-//! Phase 13 — Self-instrumentation telemetry
+//! Self-instrumentation telemetry — uptime, counter visibility, health endpoints.
 //!
 //! The kernel records events into a fixed-size ring buffer and periodically
 //! exports a JSON-like snapshot to `/ai/telemetry` in the VFS.  The AI engine

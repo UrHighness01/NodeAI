@@ -1,4 +1,4 @@
-//! Sampling profiler — Phase 28.
+//! Sampling profiler — timer-based call stack sampling, /proc/profile output.
 //!
 //! Uses the LAPIC NMI timer to periodically sample the instruction pointer (RIP)
 //! and build a flat call-site profile of where the kernel spends its time.

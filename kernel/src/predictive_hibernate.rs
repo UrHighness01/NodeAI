@@ -1,4 +1,4 @@
-//! Predictive Hibernation — Phase 29.
+//! Predictive Hibernation — AI-driven suspend/resume based on usage patterns.
 //!
 //! Tracks user activity patterns and predicts future idle windows so the
 //! kernel can:

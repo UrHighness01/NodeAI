@@ -741,7 +741,7 @@ pub fn launcher_key(b: u8) {
 /// Initialise and paint the full desktop.  Must be called after `framebuffer::init()`.
 pub fn init() {
     if !fb::is_available() { return; }
-    // Initialise the multi-window compositor (Phase 22)
+    // Initialise the multi-window compositor
     wm_init();
     unsafe {
         CURSOR_X = fb::width() / 2;

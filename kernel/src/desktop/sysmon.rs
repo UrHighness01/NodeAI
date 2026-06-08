@@ -39,12 +39,12 @@ impl SysMon {
         self.last_uptime = uptime;
 
         // Estimate CPU: use scheduler tick parity as crude approximation
-        // (real perf counters in Phase 27; for now just use free memory ratio)
+        // (real perf counters / PMC not yet implemented; approximate from memory)
         let free_mb = crate::scheduler::free_mb();
         let total_mb = 256u64; // rough assumption
         let used_mb = total_mb.saturating_sub(free_mb);
         let mem_pct = ((used_mb * 100) / total_mb.max(1)) as u8;
-        // CPU: simulate based on uptime oscillation (placeholder until PMC in Phase 27)
+        // CPU: simulate based on uptime oscillation (placeholder until PMC)
         let cpu_pct = ((uptime / 100) % 80 + 5) as u8;
         let ai_pct  = 30u8; // AI engine always running at ~30% share
 

@@ -1,4 +1,4 @@
-//! Kernel-Assisted Debugger (KADB) — Phase 28.
+//! Kernel-Assisted Debugger (KADB) — breakpoints, watchpoints, single-step, backtrace.
 //!
 //! Provides:
 //!   - Hardware breakpoints via x86 debug registers DR0–DR3 / DR7

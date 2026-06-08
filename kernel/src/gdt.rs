@@ -4,7 +4,7 @@
 //! The TSS provides the Interrupt Stack Table (IST) entries so that critical
 //! exceptions (double-fault, NMI) can switch to a known-good stack.
 //!
-//! Phase 1 of the NodeAI kernel roadmap.
+//! GDT, TSS, and segment register setup for 64-bit kernel + userspace.
 
 use x86_64::{
     structures::{
@@ -104,7 +104,9 @@ pub fn init() {
         use x86_64::instructions::tables::load_tss;
 
         CS::set_reg(selectors.kernel_code_segment);
-        // In 64-bit mode, DS/ES/FS/GS are not used for code but need valid descriptors.
+        // In 64-bit mode, DS/ES need valid descriptors even though segmentation is flat.
+        // FS is used for userspace TLS (set via FsBase::write on context switch).
+        // GS is used for per-CPU kernel data (gs:[fpu_ptr] etc. in timer handler).
         DS::set_reg(selectors.kernel_data_segment);
         ES::set_reg(selectors.kernel_data_segment);
 

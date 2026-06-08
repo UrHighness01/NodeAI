@@ -4,9 +4,9 @@
 //! printable key.  Characters are buffered in a static array; on newline
 //! the line is parsed and dispatched.
 //!
-//! Phase 14: user/group commands, sudo, custom Kali-style prompt.
-//! Phase 15: environment variables, cd, pwd, history, line editing, pipes.
-//! Phase 16: coreutils — touch, mkdir, rm, mv, cp, etc.
+//! Shell: user/group commands, sudo, custom Kali-style prompt.
+//! Environment variables, cd, pwd, history, line editing, pipes.
+//! Coreutils — touch, mkdir, rm, mv, cp, etc.
 
 use spin::Mutex;
 use alloc::{string::{String, ToString}, vec::Vec, format, collections::BTreeMap};
@@ -1502,7 +1502,7 @@ fn dispatch_single(line: &str) {
         "sysctl"   => cmd_sysctl(args),
         "file"     => cmd_file(args),
 
-        // ── User/auth (Phase 14) ──
+        // ── User/auth commands ──
         "whoami"   => cmd_whoami(),
         "id"       => cmd_id(args),
         "su"       => cmd_su(args),
@@ -1517,7 +1517,7 @@ fn dispatch_single(line: &str) {
         "logout"   => cmd_logout(),
         "audit"    => cmd_audit(),
 
-        // ── Networking (Phase 17) ──
+        // ── Networking commands ──
         "ifconfig"   => cmd_ifconfig(args),
         "ping"       => cmd_ping(args),
         "arp"        => cmd_arp(args),
@@ -1530,7 +1530,7 @@ fn dispatch_single(line: &str) {
         "curl"       => cmd_curl(args),
         "nc"         => cmd_nc(args),
 
-        // ── Process/Job control (Phase 16) ──
+        // ── Process/Job control ──
         "htop"     => cmd_htop(),
         "nice"     => cmd_nice(args),
         "renice"   => cmd_renice(args),
@@ -1539,7 +1539,7 @@ fn dispatch_single(line: &str) {
         "jobs"     => cmd_jobs(),
         "nohup"    => cmd_nohup(args),
 
-        // ── Disk & modules (Phase 16) ──
+        // ── Disk & modules ──
         "fdisk"    => cmd_fdisk(args),
         "mkfs"     => cmd_mkfs(args),
         "sync"     => cmd_sync(),
@@ -1547,7 +1547,7 @@ fn dispatch_single(line: &str) {
         "insmod"   => cmd_modprobe(args),
         "service"  => cmd_service(args),
 
-        // ── Network services (Phase 17) ──
+        // ── Network services ──
         "dhclient" => cmd_dhclient(),
         "httpd"    => cmd_httpd(args),
         "sshd"     => cmd_sshd(args),

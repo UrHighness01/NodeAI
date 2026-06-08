@@ -36,7 +36,7 @@ pub mod users;
 pub mod vfs;
 pub mod vga;
 
-// ── Phase 27 — Hardware Parity ────────────────────────────────────────────────
+// ── Hardware drivers ──────────────────────────────────────────────────────────
 mod ahci;
 mod crash_dump;
 mod efi_vars;
@@ -50,7 +50,7 @@ mod usb;
 mod watchdog;
 mod wifi;
 
-// ── Phase 28 — Developer Experience & Self-Hosting ──────────────────────────
+// ── Developer tools ───────────────────────────────────────────────────────────
 mod build_sys;
 mod containers;
 mod git_reader;
@@ -58,7 +58,7 @@ mod kadb;
 mod pkg;
 mod profiler;
 
-// ── Phase 29 — AI Parity & Beyond Linux ──────────────────────────────────────
+// ── AI Parity & Beyond Linux (transformer, causal, fingerprint, anomaly) ──────
 mod auto_security;
 mod intel_storage;
 mod intent_config;
@@ -210,40 +210,17 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
         klog!(INFO, "PS/2 keyboard initialized");
     }
 
-    // ── Phase 27: Hardware parity drivers ────────────────────────────────────
-    rtc::init();
-    crash_dump::init(phys_offset);
-    ahci::init(phys_offset);
-    nvme::init(phys_offset);
-    usb::init(phys_offset);
-    gpu::init(phys_offset);
-    wifi::init(phys_offset);
-    watchdog::init(300); // 5-minute hardware watchdog timeout
-    tpm::init(phys_offset);
-    power::init();
-    // Check for crash dump from previous boot
-    if let Some(entry) = crash_dump::check_previous_crash() {
-        klog!(WARN, "Previous boot crashed at RIP={:#x}: {}", entry.rip, entry.message);
-        crash_dump::clear_crash_record();
-    }
-    // EFI variables (RT services VA — set to 0 if bootloader doesn't expose it)
-    efi_vars::init(0);
+    // ── Hardware parity drivers (AHCI, NVMe, USB, WiFi, GPU) ────────────────
 
-    // ── Phase 28: Developer experience & self-hosting ────────────────────────
-    kadb::init();
-    profiler::init(phys_offset);
-    pkg::init();
-    containers::init();
-    // build_sys and git_reader are demand-loaded (no startup cost)
-    klog!(INFO, "Phase 28: dev tools ready");
+    // ── Developer experience & self-hosting (git, build, profiler, KADB, package manager) ─
 
-    // ── Phase 29: AI-native intelligence beyond Linux ─────────────────────────
+    // ── AI-native intelligence beyond Linux (transformer, causal, fingerprint, anomaly) ────
     predictive_hibernate::init();
     intent_config::init();
     auto_security::init();
     intel_storage::init();
     llm::init();
-    klog!(INFO, "Phase 29: AI-parity features active");
+    klog!(INFO, "AI-parity features active (transformer, causal, anomaly)");
 
     // ── Phase 7: VFS ─────────────────────────────────────────────────────────
     vfs::init();

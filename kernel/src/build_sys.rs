@@ -1,4 +1,4 @@
-//! Build system framework — Phase 28.
+//! Build system framework — Makefile-free dependency-based build orchestration.
 //!
 //! A minimal Makefile/Ninja-compatible build system that runs inside the kernel.
 //! Provides:

@@ -1,4 +1,4 @@
-//! Package manager — Phase 28.
+//! Package manager — .pkg format, install/remove/update, dependency resolution.
 //!
 //! NodeAI native package manager (`npkg`).
 //!

@@ -1,4 +1,4 @@
-//! Container runtime — Phase 28.
+//! Container runtime — namespaces (mount, PID, net), cgroup isolation, chroot.
 //!
 //! Implements lightweight process isolation ("containers") on top of the
 //! NodeAI kernel without requiring Linux namespaces.

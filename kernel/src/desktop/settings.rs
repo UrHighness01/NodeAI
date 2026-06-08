@@ -119,7 +119,7 @@ impl Settings {
             }
             Section::Network => {
                 self.draw_label(id, cx, cy, b"Status:");
-                let msg = b"No network hardware detected (Phase 27)";
+                let msg = b"No network hardware detected (WiFi not available)";
                 for (i, &b) in msg.iter().enumerate() {
                     wm_draw_text_cell(id, cx + 80 + i as u32 * FONT_W, cy, b, LABEL_FG, BG);
                 }

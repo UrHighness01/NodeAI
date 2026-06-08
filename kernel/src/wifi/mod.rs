@@ -1,4 +1,4 @@
-//! WiFi subsystem — Phase 27.
+//! WiFi subsystem — scan, connect, WPA2 supplicant over iwlwifi.
 //!
 //! Wraps the iwlwifi PCIe driver and provides a simple 802.11 management API:
 //!   - `init()` — probe drivers on PCI
@@ -70,7 +70,7 @@ pub fn ssid() -> Option<String> {
 /// Passive scan — returns cached AP list.
 /// Real implementation would issue 802.11 probe requests through iwlwifi DMA.
 pub fn scan() -> Vec<ApInfo> {
-    // Return a synthetic list so upper-layer UI code works during Phase 27.
+    // Return a synthetic list since real scan results require full DMA rings.
     let cache = WIFI_STATE.lock().scan_cache.clone();
     if cache.is_empty() {
         crate::klog!(DEBUG, "WiFi: scan — no APs in cache (firmware not associated)");

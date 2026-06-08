@@ -1,4 +1,4 @@
-//! Minimal networking stack — Phase 9 / Phase 17.
+//! TCP/IP networking stack with userspace sockets, DHCP, and kernel HTTP server.
 //!
 //! Implements:
 //!   - Ethernet frame parsing
@@ -1024,7 +1024,7 @@ impl<'a> UdpDatagram<'a> {
 
 // ── Packet dispatch ───────────────────────────────────────────────────────────
 
-/// Our IP configuration (static for now — DHCP is a stretch goal).
+/// Our IP configuration (DHCP available via `dhclient` shell command; static fallback).
 pub static mut OUR_IP:  [u8; 4] = [10, 0, 2, 15];   // QEMU default
 pub static mut OUR_MAC: [u8; 6] = [0x52, 0x54, 0x00, 0x12, 0x34, 0x56];
 

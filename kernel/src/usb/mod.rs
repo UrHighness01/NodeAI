@@ -1,4 +1,4 @@
-//! USB xHCI host controller driver + device enumeration — Phase 27.
+//! USB xHCI host controller driver + device enumeration (stub — port detection only).
 //!
 //! Architecture:
 //!   - Scans PCI for xHCI controllers (class 0x0C / sub 0x03 / progif 0x30)
@@ -251,7 +251,7 @@ impl XhciCtrl {
 
         // For now record as an unknown device — full descriptor parsing
         // (Get Descriptor / Set Address) requires an xTRB pipeline
-        // which is out of scope for Phase 27's minimal driver.
+        // which remains a future addition (currently stub-only).
         crate::klog!(INFO, "USB: port {} connected, speed={}", port, speed);
 
         // Heuristic: If speed==1 or 2 (Low/Full), likely HID

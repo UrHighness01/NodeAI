@@ -1,4 +1,4 @@
-//! Intel iwlwifi driver stub — Phase 27.
+//! Intel iwlwifi driver — device probe, registers, PCI config. Tx/Rx stubbed.
 //!
 //! Handles the PCIe side of Intel WiFi adapters (iwlwifi family):
 //!   - PCI detection by device ID list (vendor 0x8086, class 0x02 / sub 0x80)
@@ -7,7 +7,7 @@
 //!   - Basic initialisation sequence (APMG, ICT)
 //!
 //! The 802.11 MAC layer and association state machine are in `wifi/mod.rs`.
-//! Full tx/rx DMA rings are a Phase 28+ task.
+//! Full tx/rx DMA rings are still stubbed (device enumeration only).
 
 use alloc::vec::Vec;
 use spin::Mutex;

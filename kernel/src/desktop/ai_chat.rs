@@ -128,7 +128,7 @@ impl AiChat {
             return String::from("NodeAI OS v0.26.0 — AI-native kernel, x86_64 bare metal");
         }
         if q_lower.contains("help") || q_lower.contains("what can") {
-            return String::from("I can answer: uptime, memory, version, tasks. More AI coming in Phase 29!");
+            return String::from("I can answer: uptime, memory, version, tasks, and AI scheduling metrics.");
         }
         if q_lower.contains("hello") || q_lower.contains("hi") {
             return String::from("Hello! I'm the NodeAI assistant. How can I help?");

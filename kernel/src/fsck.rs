@@ -7,7 +7,7 @@
 //!   - `check_mount(path)` — check a specific mount point subtree
 //!   - Shell output: `fsck /` prints a human-readable report
 //!
-//! For ext4/FAT32 volumes mounted via AHCI/NVMe (Phase 27 disk drivers),
+//! For ext4/FAT32 volumes mounted via AHCI/NVMe disk drivers,
 //! this module delegates to block-level consistency routines in those drivers.
 
 use alloc::{vec::Vec, string::String, format};

@@ -277,7 +277,7 @@ pub fn unlink(path: &str) -> VfsResult<()> {
     checked_unlink(parent.as_ref(), name)
 }
 
-// ── Phase 29 additions ────────────────────────────────────────────────────────
+// ── VFS AI extensions (intent-providing file stats, prefetch hints) ───────────
 
 /// Hint to the VFS layer that it should pre-populate the page cache with
 /// recently-accessed files. The real implementation would maintain a bounded

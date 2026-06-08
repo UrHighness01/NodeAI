@@ -1,4 +1,4 @@
-//! User and group management — Phase 14.
+//! User and group management — /etc/passwd, /etc/group, uid/gid tracking, su, sudo.
 //!
 //! Provides:
 //!   - User/group database (in-memory, backed by /etc/passwd, /etc/group, /etc/shadow)

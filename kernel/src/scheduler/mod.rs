@@ -675,7 +675,7 @@ pub fn total_ram_pages() -> u64 {
     crate::memory::total_ram_pages()
 }
 
-// ── Phase 29 additions ────────────────────────────────────────────────────────
+// ── AI scheduling extensions (transformer, causal, anomaly blending) ──────────
 
 /// Approximate CPU utilisation as a percentage (0-100).
 /// Calculated from the ratio of idle ticks to total ticks in the last window.

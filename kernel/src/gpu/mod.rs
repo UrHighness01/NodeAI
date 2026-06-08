@@ -1,4 +1,4 @@
-//! GPU / DRM-KMS abstraction — Phase 27.
+//! GPU / DRM-KMS abstraction — framebuffer console + GPU-accelerated composition.
 //!
 //! Probes for Intel i915 and AMD Radeon, exposes a unified API:
 //!   - `init(phys_offset)` — probe all GPU vendors

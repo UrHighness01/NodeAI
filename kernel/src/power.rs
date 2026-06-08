@@ -1,4 +1,4 @@
-//! ACPI Power Management — Phase 27.
+//! ACPI Power Management — S3 sleep/wake via power button and sysfs.
 //!
 //! Provides:
 //!   - System suspend (S3 sleep) and power-off (S5) via PM1 control registers
@@ -221,7 +221,7 @@ pub fn power_button_pressed() -> bool {
     POWER_BUTTON_PRESSED.swap(false, Ordering::Relaxed)
 }
 
-// ── Phase 29 additions ────────────────────────────────────────────────────────
+// ── AI-aware power management (idle-wake coordination) ────────────────────────
 
 /// Prepare for hibernation (S4).  Currently falls back to S3 suspend
 /// until a full hibernation image writer is implemented.

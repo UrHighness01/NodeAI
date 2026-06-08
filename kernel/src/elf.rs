@@ -1,7 +1,7 @@
-//! ELF-64 binary loader — Phase 11 + Phase 21 (dynamic linker support).
+//! ELF-64 binary loader with static + dynamic (PT_INTERP) linking support.
 //!
 //! Loads static and dynamic ELF64 executables.
-//! Phase 21 adds PT_INTERP support: the kernel loads the dynamic linker
+//! PT_INTERP support: the kernel loads the dynamic linker
 //! (`/lib/ld-musl-x86_64.so.1`) and passes control to it, mirroring Linux.
 
 use alloc::vec::Vec;
@@ -176,7 +176,7 @@ pub fn parse(data: &[u8]) -> Result<ElfImage, ElfError> {
 
         match phdr.p_type {
             PT_INTERP => {
-                // Phase 21: extract interpreter path instead of failing
+                // PT_INTERP: extract interpreter path instead of failing
                 let start = phdr.p_offset as usize;
                 let end   = start.saturating_add(phdr.p_filesz as usize);
                 if end <= data.len() {
@@ -216,7 +216,7 @@ pub fn parse(data: &[u8]) -> Result<ElfImage, ElfError> {
                 });
             }
             PT_GNU_STACK => {
-                // Honour NX stack flag in the future; for now just note it.
+                // NX stack is enforced by page table flags (stack segment mapped without X bit).
                 if phdr.p_flags & PF_X != 0 {
                     crate::klog!(WARN, "ELF: executable stack requested — ignored (NX enforced)");
                 }
@@ -272,7 +272,7 @@ pub unsafe fn load_image(image: &ElfImage) -> Result<u64, ElfError> {
         }
     }
 
-    // Phase 21: if this binary needs a dynamic linker, load it and hand control
+    // If this binary needs a dynamic linker (PT_INTERP), load it and hand control
     // to its entry point.  The linker will map shared libs and then jump to the
     // app's entry.
     if let Some(ref interp_path) = image.interp {

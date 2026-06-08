@@ -1,4 +1,4 @@
-//! Intent-Based Configuration — Phase 29.
+//! Intent-Based Configuration — AI-driven /ai/tunables and sys_intent(2) syscall.
 //!
 //! Provides a high-level interface for tuning 200+ kernel parameters by
 //! named intent (e.g. "performance", "battery", "gaming", "server").

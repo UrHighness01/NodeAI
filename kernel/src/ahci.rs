@@ -1,4 +1,4 @@
-//! AHCI (Serial ATA) driver — Phase 27.
+//! AHCI (Serial ATA) driver — NCQ, port reset, device identification, block device.
 //!
 //! Implements:
 //!   - PCI discovery of AHCI controllers (class 0x01 / sub 0x06)

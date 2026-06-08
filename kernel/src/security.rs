@@ -1,4 +1,4 @@
-//! Security subsystem — Phase 10.
+//! Security subsystem — basic hardening, execve validation, KASLR.
 //!
 //! Implements:
 //!   - SMEP / SMAP enforcement (CR4 bits)
@@ -141,8 +141,7 @@ pub unsafe fn check_stack_canary(stack_base: u64) -> bool {
 // ── KASLR ─────────────────────────────────────────────────────────────────────
 
 /// KASLR base offset applied at boot.
-/// Real KASLR would be seeded from RDRAND or the bootloader; we use a static
-/// placeholder until RDRAND support is added.
+/// Seeded from the bootloader handoff page (limine boot_info). Falls back to 0.
 static KASLR_OFFSET: AtomicU64 = AtomicU64::new(0);
 
 pub fn set_kaslr_offset(offset: u64) {

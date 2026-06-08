@@ -1,4 +1,4 @@
-//! ACPI parsing — Phase 2.
+//! ACPI parsing — RSDP, RSDT/XSDT, DSDT/SSDT, MADT, FADT tables.
 //!
 //! Parses RSDP → RSDT/XSDT → MADT, HPET, FADT tables.
 //! Provides: CPU count, IOAPIC addresses, power management registers.

@@ -1,4 +1,4 @@
-//! On-device LLM integration — Phase 29.
+//! On-device LLM integration — inference engine bridging to transformer scheduler.
 //!
 //! Routes natural-language queries to a quantised LLM running inside the
 //! kernel's AI engine.  The engine supports a subset of transformer inference

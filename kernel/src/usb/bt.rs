@@ -1,8 +1,8 @@
-//! Bluetooth HCI stub — Phase 27.
+//! Bluetooth HCI stub (enumeration only, no data transfer).
 //!
 //! Provides a minimal HCI command/event framework for USB Bluetooth dongles
 //! (class 0xE0 / sub 0x01 / progif 0x01).  Full L2CAP and profile support
-//! is a Phase 28+ task; this layer handles:
+//! is not yet implemented; this layer handles:
 //!
 //!   - HCI Reset
 //!   - HCI Read Local Version Information

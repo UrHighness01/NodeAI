@@ -1,8 +1,8 @@
-//! AMD Radeon display driver stub — Phase 27.
+//! AMD Radeon display driver — PCI probe stub. Full modeset deferred.
 //!
 //! Performs PCI detection for AMD/ATI display adapters and provides the same
 //! minimal API as i915.rs.  Full command-processor and modesetting support
-//! is deferred to Phase 28+.
+//! is deferred (needs firmware loading and display pipeline).
 
 use spin::Mutex;
 

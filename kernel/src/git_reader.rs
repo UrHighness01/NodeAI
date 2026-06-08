@@ -1,4 +1,4 @@
-//! Git object reader — Phase 28.
+//! Git object reader — loose objects, tree walk, blob read, commit log.
 //!
 //! Implements a read-only git client that operates directly on the VFS:
 //!   - Reads `.git/HEAD` → resolves current branch ref
@@ -97,7 +97,7 @@ fn obj_path(git_dir: &str, sha: &str) -> String {
 // NOTE: Loose objects are zlib-deflated.  We read the raw bytes and attempt
 // to skip the zlib header (0x78 0x9C) to get at the deflate stream, then
 // scan for the null byte separator between the object header and content.
-// Full inflate would require a no_std zlib crate; for Phase 28 we provide
+// Full inflate would require a no_std zlib crate; currently we provide
 // a scaffold that handles uncompressed test objects and flags compressed ones.
 
 fn read_loose_object(git_dir: &str, sha: &str) -> Option<GitObject> {

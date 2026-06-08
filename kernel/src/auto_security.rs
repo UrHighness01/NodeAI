@@ -1,4 +1,4 @@
-//! Autonomous Security Response — Phase 29.
+//! Autonomous Security Response — anomaly-triggered isolation, rate limiting, auto-block.
 //!
 //! The kernel AI monitors process behaviour and network traffic for
 //! anomalies that signal lateral movement, privilege escalation, or

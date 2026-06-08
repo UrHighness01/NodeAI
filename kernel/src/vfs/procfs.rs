@@ -1,4 +1,4 @@
-//! Procfs and AI-FS population — Phase 12b.
+//! /proc filesystem (per-PID entries, /proc/self, /proc/epoll) and /ai tunable files.
 //!
 //! Populates static-content files under /proc and /ai after the VFS is initialised:
 //!

@@ -1,4 +1,4 @@
-//! NVMe driver — Phase 27.
+//! NVMe driver — admin queues, I/O SQ/CQ, block device via VFS blockdev.rs.
 //!
 //! Implements:
 //!   - PCI discovery  (class 0x01, subclass 0x08, progif 0x02)

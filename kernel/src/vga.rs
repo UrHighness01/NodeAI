@@ -4,7 +4,7 @@
 //! enabling on-screen kernel output via the `klog!` macro.
 //! Memory-mapped at the standard VGA buffer address 0xB8000.
 //!
-//! Phase 1 of the NodeAI kernel roadmap.
+//! VGA text-mode console driver (physical 0xB8000, mapped via phys_offset).
 
 use core::fmt;
 use spin::Mutex;
@@ -157,8 +157,7 @@ impl fmt::Write for Writer {
 // ── Global Writer ─────────────────────────────────────────────────────────────
 
 /// VGA_BUFFER_ADDR — the physical address of the VGA text buffer.
-/// When the bootloader sets up the higher-half mapping with physical offset,
-/// this address will be remapped. For Phase 1 (identity mapped lower mem), 0xB8000 is fine.
+/// Accessible via phys_offset + 0xB8000 after memory::init sets up the higher-half mapping.
 const VGA_BUFFER_ADDR: usize = 0xB8000;
 
 pub static WRITER: Mutex<Writer> = Mutex::new(Writer {
