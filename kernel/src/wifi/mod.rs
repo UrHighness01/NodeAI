@@ -45,7 +45,8 @@ static AR9271_SLOT:  AtomicU8   = AtomicU8::new(0xFF); // 0xFF = not present
 
 // ── WiFi data plane globals ────────────────────────────────────────────────────
 use core::sync::atomic::AtomicU64;
-static WIFI_PN:      AtomicU64  = AtomicU64::new(1); // TX packet number (48-bit)
+static WIFI_PN:             AtomicU64 = AtomicU64::new(1);
+static WIFI_LAST_KEEPALIVE: AtomicU64 = AtomicU64::new(0);
 static WIFI_IP:      Mutex<[u8; 4]> = Mutex::new([0u8; 4]);
 static WIFI_BSSID:   Mutex<[u8; 6]> = Mutex::new([0u8; 6]);
 static WIFI_TK:      Mutex<[u8; 16]> = Mutex::new([0u8; 16]); // CCMP TK from PTK[32..48]
@@ -157,13 +158,29 @@ pub fn set_tk(tk: &[u8; 16], bssid: &[u8; 6], our_mac: &[u8; 6]) {
 /// Poll WiFi RX: receive encrypted frames, CCMP decrypt, inject into net stack.
 /// Also handles DHCP responses on the WiFi interface.
 /// Called from idle_loop every iteration alongside net::poll().
+/// Do NOT call while holding any net.rs lock (ARP_CACHE, DHCP_REPLY, etc.).
 pub fn poll() {
     let slot = AR9271_SLOT.load(Ordering::Relaxed);
     if slot == 0xFF || !WIFI_STATE.lock().connected { return; }
 
-    let tk   = *WIFI_TK.lock();
-    let bssid = *WIFI_BSSID.lock();
+    let tk      = *WIFI_TK.lock();
+    let bssid   = *WIFI_BSSID.lock();
     let our_mac = *WIFI_MAC.lock();
+
+    // ── Keepalive null-data frame every 30 s (prevents AP deauth) ────────────
+    let now = crate::scheduler::uptime_ms();
+    let last_ka = WIFI_LAST_KEEPALIVE.load(Ordering::Relaxed);
+    if now.saturating_sub(last_ka) >= 30_000 {
+        WIFI_LAST_KEEPALIVE.store(now, Ordering::Relaxed);
+        // 802.11 Null Data (ToDS): FC0=0x48 (Data,subtype=4), FC1=0x01 (ToDS)
+        let mut null_frame = [0u8; 24];
+        null_frame[0] = 0x48; // FC byte 0: Data frame, subtype Null (4)
+        null_frame[1] = 0x01; // FC byte 1: ToDS=1
+        null_frame[4..10].copy_from_slice(&bssid);   // Addr1 = BSSID
+        null_frame[10..16].copy_from_slice(&our_mac); // Addr2 = STA
+        null_frame[16..22].copy_from_slice(&bssid);   // Addr3 = BSSID
+        let _ = crate::usb::bulk_out(slot, 0x01, &null_frame);
+    }
 
     // Read one frame from bulk IN (non-blocking: returns 0 if no data)
     let mut buf = [0u8; 2346];
