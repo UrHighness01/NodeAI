@@ -722,44 +722,27 @@ fn paint_rect(buf: &mut [u32], w: usize, x: i32, y: i32, rw: i32, rh: i32, (r,g,
 }
 
 fn paint_text(buf: &mut [u32], w: usize, x: i32, y: i32, text: &str, fg: (u8,u8,u8), bg: (u8,u8,u8)) {
-    use crate::framebuffer as fb;
-    // Build a temporary surface via the framebuffer font renderer
-    // Since we can't call fb directly into a non-framebuffer buffer, we rasterize manually.
-    // We use the canonical 8x16 bitmap font embedded in the framebuffer module via draw_str.
-    // For painted buffers we call fb::with to render as if onscreen, but that would clobber.
-    // Instead, we embed a minimal glyph table reference here:
-    // We shell out to put_pixel approximation using ASCII art glyphs.
-    // NOTE: Full font rendering requires the kernel's bitmap font;
-    // this is stub that writes coloured boxes as placeholders.
-    let (fr, fg2, fb2) = fg;
-    let color = 0xFF_00_00_00u32 | ((fr as u32) << 16) | ((fg2 as u32) << 8) | fb2 as u32;
+    // Use the kernel's real 8×16 PC VGA bitmap font.
+    let color = 0xFF_00_00_00u32 | ((fg.0 as u32) << 16) | ((fg.1 as u32) << 8) | fg.2 as u32;
     let bg_c  = 0xFF_00_00_00u32 | ((bg.0 as u32) << 16) | ((bg.1 as u32) << 8) | bg.2 as u32;
     let h = buf.len() / w;
-    let y0 = y.max(0) as usize;
-    let y1 = ((y + FONT_H as i32) as usize).min(h);
-    if y0 >= y1 { return; }
-    for (ci, _ch) in text.char_indices() {
+    for (ci, ch) in text.char_indices() {
         let cx = x + (ci * FONT_W) as i32;
         if cx + FONT_W as i32 <= 0 { continue; }
         if cx >= w as i32 { break; }
-        let cx0 = cx.max(0) as usize;
-        let cx1 = ((cx + FONT_W as i32) as usize).min(w);
-        for py in y0..y1 {
-            for px in cx0..cx1 {
-                // Pixel-level approximation: use mid-scanline heuristic to "draw" character
-                let row = py - y0;
-                let col = px - cx0;
-                // Simple: fill top row and a vertical line to simulate letter outline
-                let pixel = if row == 0 || row == FONT_H - 1 || col == 0 {
-                    color
-                } else {
-                    bg_c
-                };
-                buf[py * w + px] = pixel;
+        let glyph = crate::framebuffer::glyph(ch as u8);
+        for row in 0..FONT_H {
+            let py = y + row as i32;
+            if py < 0 || py as usize >= h { continue; }
+            let scanline = glyph[row];
+            for col in 0..FONT_W {
+                let px = cx + col as i32;
+                if px < 0 || px as usize >= w { continue; }
+                let lit = (scanline >> (7 - col)) & 1 != 0;
+                buf[py as usize * w + px as usize] = if lit { color } else { bg_c };
             }
         }
     }
-    let _ = (bg_c, color); // to suppress unused warnings in some configs
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -845,29 +828,15 @@ impl Tab {
     }
 
     fn fetch_url(&self, url: &str) -> Vec<u8> {
-        // Use kernel networking stack for HTTP
-        // Parse URL: host + path
-        let s = if let Some(s) = url.strip_prefix("https://") { (s, true) }
-                else if let Some(s) = url.strip_prefix("http://") { (s, false) }
-                else { return Vec::from(b"<h1>Invalid URL</h1>" as &[u8]) };
-        let (hostpath, _tls) = s;
-        let (host, path) = if let Some(p) = hostpath.find('/') {
-            (&hostpath[..p], &hostpath[p..])
+        // Real HTTP fetch: DNS → ARP → TCP handshake → GET → response body.
+        let body = crate::desktop::br_fetch_raw(url);
+        if body.is_empty() {
+            alloc::format!(
+                "<html><body><h2>Failed to load</h2><p>{}</p></body></html>", url
+            ).into_bytes()
         } else {
-            (hostpath, "/")
-        };
-        // TODO: resolve DNS, connect, send, receive via kernel TCP
-        // Full HTTP/1.1 client dispatches via sys_connect + sys_send / sys_recv
-        let _ = (host, path);
-        Vec::from(format!(
-            "<html><head><title>{}</title></head><body>\
-             <h1>Intelli Browser</h1>\
-             <p>Fetching: <a href=\"{}\">{}</a></p>\
-             <p>Network fetch is wired to kernel TCP stack. \
-             Full HTTP/1.1 client dispatches via <code>sys_connect</code> + \
-             <code>sys_send</code> / <code>sys_recv</code>.</p>\
-             </body></html>", url, url, url
-        ).as_bytes()).to_vec()
+            body
+        }
     }
 
     pub fn go_back(&mut self, viewport_w: usize, viewport_h: usize) {

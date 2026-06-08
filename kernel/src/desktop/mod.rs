@@ -129,13 +129,14 @@ static mut PREV_LEFT:    bool  = false;
 
 // ── App launcher ──────────────────────────────────────────────────────────────
 struct AppDesc { icon: &'static str, name: &'static str, cmd: &'static str }
-const APPS: [AppDesc; 6] = [
+const APPS: [AppDesc; 7] = [
     AppDesc { icon: ">_", name: "Terminal",     cmd: ""        },
     AppDesc { icon: "FM", name: "File Manager", cmd: "fm"      },
     AppDesc { icon: "NT", name: "Note Pad",     cmd: "note"    },
     AppDesc { icon: "CA", name: "Calculator",   cmd: "calc"    },
     AppDesc { icon: "SI", name: "System Info",  cmd: "sysinfo" },
     AppDesc { icon: "IB", name: "Browser",      cmd: "browser" },
+    AppDesc { icon: "NW", name: "Network",      cmd: "netmgr"  },
 ];
 const LAUNCHER_COLS:  usize = 3;
 const TILE_W:         usize = 160;
@@ -157,7 +158,7 @@ static mut LAUNCHER_SEARCH_LEN: usize    = 0;
 
 // ── GUI Application Windows ───────────────────────────────────────────────────
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum ActiveApp { Terminal, Notepad, FileManager, Browser }
+enum ActiveApp { Terminal, Notepad, FileManager, Browser, Network }
 static mut ACTIVE_APP: ActiveApp = ActiveApp::Terminal;
 /// Y where app content starts (below the window titlebar).
 const APP_STATUS_H: usize = 20;
@@ -1116,6 +1117,11 @@ fn draw_win_titlebar(f: &mut fb::Framebuffer) {
             let tx = (w.saturating_sub(title.len() * FONT_W)) / 2;
             f.draw_str(tx, title_y, title, (0x44, 0xAA, 0xFF), WIN_BG);
         }
+        ActiveApp::Network => {
+            let title = "Network Manager";
+            let tx = (w.saturating_sub(title.len() * FONT_W)) / 2;
+            f.draw_str(tx, title_y, title, (0x44, 0xFF, 0xAA), WIN_BG);
+        }
     }
 
     // ── Right: three-dot menu indicator ───────────────────────────────────────
@@ -1229,6 +1235,7 @@ unsafe fn draw_active_app_overlay(f: &mut fb::Framebuffer) {
         ActiveApp::Notepad     => draw_notepad_overlay(f),
         ActiveApp::FileManager => draw_fm_overlay(f),
         ActiveApp::Browser     => draw_browser_overlay(f),
+        ActiveApp::Network     => draw_netmgr_overlay(f),
     }
 }
 
@@ -1256,6 +1263,7 @@ fn open_app_window(app_idx: usize) {
         }
         "Notepad" => notepad_open_gui(""),
         "Browser" => browser_open_gui(),
+        "Network" => netmgr_open(),
         _ => {
             let cmd = APPS[app_idx].cmd;
             if !cmd.is_empty() { crate::shell::launch_app(cmd); }
@@ -1924,6 +1932,263 @@ fn br_fetch(url: &str) -> usize {
     }
 }
 
+/// Public: perform a real HTTP GET and return the raw response body bytes.
+/// Called by browser.rs Tab::fetch_url() to get genuine HTML from the network.
+pub fn br_fetch_raw(url: &str) -> Vec<u8> {
+    let rest = url.trim_start_matches("http://").trim_start_matches("https://");
+    let (hostport, path_part) = if let Some(p) = rest.find('/') {
+        (&rest[..p], &rest[p..])
+    } else {
+        (rest, "/")
+    };
+    let (host, port) = if let Some(i) = hostport.rfind(':') {
+        (&hostport[..i], hostport[i+1..].parse::<u16>().unwrap_or(80))
+    } else {
+        (hostport, 80u16)
+    };
+    if host.is_empty() { return Vec::new(); }
+
+    let dst_ip = match crate::net::resolve(host) {
+        Some(a) => a,
+        None    => return Vec::new(),
+    };
+    let our_ip  = unsafe { crate::net::OUR_IP };
+    let our_mac = unsafe { crate::net::OUR_MAC };
+    let gw: [u8; 4] = [10, 0, 2, 2];
+    let dst_mac = if dst_ip[..3] == our_ip[..3] {
+        crate::net::arp_cache_lookup(&dst_ip).unwrap_or_else(|| {
+            crate::net::arp_request(dst_ip);
+            for _ in 0..5000 { crate::net::poll(); core::hint::spin_loop(); }
+            crate::net::arp_cache_lookup(&dst_ip).unwrap_or([0xFF; 6])
+        })
+    } else {
+        crate::net::arp_cache_lookup(&gw).unwrap_or_else(|| {
+            crate::net::arp_request(gw);
+            for _ in 0..5000 { crate::net::poll(); core::hint::spin_loop(); }
+            crate::net::arp_cache_lookup(&gw).unwrap_or([0xFF; 6])
+        })
+    };
+
+    let local_port = 49200u16.wrapping_add((crate::scheduler::uptime_ms() & 0x3FFF) as u16);
+    let isn: u32   = (crate::scheduler::uptime_ms() & 0xFFFF_FFFF) as u32;
+    let syn = crate::net::tcp::TcpHeader::build(
+        local_port, port, isn, 0, crate::net::tcp::SYN, 65535, our_ip, dst_ip, &[],
+    );
+    let ip_hdr = crate::net::Ipv4Header::build(crate::net::IP_PROTO_TCP, our_ip, dst_ip, syn.len());
+    let mut pkt = ip_hdr; pkt.extend_from_slice(&syn);
+    let frame = crate::net::EthFrame::build(dst_mac, our_mac, crate::net::ETHERTYPE_IPV4, &pkt);
+    crate::net::transmit(&frame);
+
+    let key = crate::net::tcp::TcpSocketKey { local_port, remote_ip: dst_ip, remote_port: port };
+    crate::net::tcp::SOCKETS.lock().insert(key.clone(), crate::net::tcp::TcpSocket {
+        state: crate::net::tcp::TcpState::SynSent,
+        snd_nxt: isn.wrapping_add(1), snd_una: isn,
+        rcv_nxt: 0, snd_wnd: 65535, rcv_buf: Vec::new(),
+    });
+
+    let deadline = crate::scheduler::uptime_ms() + 5000;
+    while crate::scheduler::uptime_ms() < deadline {
+        crate::net::poll();
+        if crate::net::tcp::SOCKETS.lock().get(&key)
+            .map(|s| s.state == crate::net::tcp::TcpState::Established).unwrap_or(false) { break; }
+        core::hint::spin_loop();
+    }
+    if !crate::net::tcp::SOCKETS.lock().get(&key)
+        .map(|s| s.state == crate::net::tcp::TcpState::Established).unwrap_or(false) {
+        crate::net::tcp::SOCKETS.lock().remove(&key);
+        return Vec::new();
+    }
+
+    let req = alloc::format!(
+        "GET {} HTTP/1.0\r\nHost: {}\r\nUser-Agent: NodeAI/0.1\r\nConnection: close\r\n\r\n",
+        path_part, host
+    );
+    crate::net::tcp::send(local_port, dst_ip, port, req.as_bytes());
+
+    let deadline = crate::scheduler::uptime_ms() + 10000;
+    while crate::scheduler::uptime_ms() < deadline {
+        crate::net::poll();
+        let done = crate::net::tcp::SOCKETS.lock().get(&key)
+            .map(|s| s.state == crate::net::tcp::TcpState::CloseWait || !s.rcv_buf.is_empty())
+            .unwrap_or(false);
+        if done { break; }
+        core::hint::spin_loop();
+    }
+
+    let raw = crate::net::tcp::SOCKETS.lock().get_mut(&key)
+        .map(|s| core::mem::take(&mut s.rcv_buf)).unwrap_or_default();
+    crate::net::tcp::close(local_port, dst_ip, port);
+
+    // Strip HTTP headers — body starts after \r\n\r\n
+    raw.windows(4).position(|w| w == b"\r\n\r\n")
+        .map(|i| raw[i+4..].to_vec())
+        .unwrap_or(raw)
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// ── Network Manager ───────────────────────────────────────────────────────────
+// Real data: IP/MAC/gateway from net globals, ARP cache, TCP sockets, counters.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+fn netmgr_open() {
+    unsafe { ACTIVE_APP = ActiveApp::Network; }
+    fb::with(|f| unsafe {
+        draw_win_titlebar(f);
+        draw_netmgr_overlay(f);
+    });
+}
+
+unsafe fn draw_netmgr_overlay(f: &mut fb::Framebuffer) {
+    let w   = f.width();
+    let h   = f.height();
+    let bg  = (0x0A, 0x10, 0x18);
+    let hdr = (0x44, 0xFF, 0xAA);
+    let fg  = (0xCC, 0xCC, 0xCC);
+    let dim = (0x66, 0x88, 0x66);
+    let val = (0xFF, 0xFF, 0x66);
+    let sep = (0x22, 0x33, 0x22);
+
+    f.fill_rect(0, TERM_Y, w, h.saturating_sub(TERM_Y), bg.0, bg.1, bg.2);
+
+    let mut y = TERM_Y + 8;
+    let x1    = 16usize;
+    let x2    = 200usize;
+
+    // ── Section: Interface ────────────────────────────────────────────────────
+    f.draw_str(x1, y, "INTERFACE", hdr, bg); y += FONT_H + 4;
+    f.fill_rect(x1, y, w - x1*2, 1, sep.0, sep.1, sep.2); y += 6;
+
+    let ip  = crate::net::OUR_IP;
+    let mac = crate::net::OUR_MAC;
+    f.draw_str(x1, y, "IP Address :", dim, bg);
+    f.draw_fmt(x2, y, val, bg, format_args!("{}.{}.{}.{}", ip[0], ip[1], ip[2], ip[3]));
+    y += FONT_H + 2;
+
+    f.draw_str(x1, y, "MAC Address:", dim, bg);
+    f.draw_fmt(x2, y, val, bg, format_args!("{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+        mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]));
+    y += FONT_H + 2;
+
+    let gw = crate::net::route_entries().into_iter()
+        .find(|r| r.destination == [0,0,0,0])
+        .map(|r| r.gateway)
+        .unwrap_or([10,0,2,2]);
+    f.draw_str(x1, y, "Gateway    :", dim, bg);
+    f.draw_fmt(x2, y, val, bg, format_args!("{}.{}.{}.{}", gw[0], gw[1], gw[2], gw[3]));
+    y += FONT_H + 2;
+
+    f.draw_str(x1, y, "DNS Server :", dim, bg);
+    f.draw_str(x2, y, "10.0.2.3  (QEMU virtual)", val, bg);
+    y += FONT_H + 8;
+
+    // ── Section: Traffic ─────────────────────────────────────────────────────
+    f.draw_str(x1, y, "TRAFFIC", hdr, bg); y += FONT_H + 4;
+    f.fill_rect(x1, y, w - x1*2, 1, sep.0, sep.1, sep.2); y += 6;
+
+    let rx = crate::telemetry::NET_RX_BYTES.load(core::sync::atomic::Ordering::Relaxed);
+    let tx = crate::telemetry::NET_TX_BYTES.load(core::sync::atomic::Ordering::Relaxed);
+    f.draw_str(x1, y, "RX bytes   :", dim, bg);
+    f.draw_fmt(x2, y, val, bg, format_args!("{}", rx));
+    y += FONT_H + 2;
+    f.draw_str(x1, y, "TX bytes   :", dim, bg);
+    f.draw_fmt(x2, y, val, bg, format_args!("{}", tx));
+    y += FONT_H + 8;
+
+    // ── Section: ARP Cache ───────────────────────────────────────────────────
+    f.draw_str(x1, y, "ARP CACHE", hdr, bg); y += FONT_H + 4;
+    f.fill_rect(x1, y, w - x1*2, 1, sep.0, sep.1, sep.2); y += 6;
+
+    let arp = crate::net::arp_cache_entries();
+    if arp.is_empty() {
+        f.draw_str(x1, y, "  (empty)", dim, bg); y += FONT_H + 2;
+    } else {
+        f.draw_str(x1, y, "  IP Address        MAC Address        Age(ms)", dim, bg);
+        y += FONT_H + 2;
+        let now = crate::scheduler::uptime_ms();
+        for (ip4, mac4, ts) in arp.iter().take(6) {
+            if y + FONT_H > h { break; }
+            let age = now.saturating_sub(*ts);
+            f.draw_fmt(x1 + 8, y, fg, bg, format_args!(
+                "{:>3}.{:>3}.{:>3}.{:>3}  {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}  {}ms",
+                ip4[0], ip4[1], ip4[2], ip4[3],
+                mac4[0], mac4[1], mac4[2], mac4[3], mac4[4], mac4[5],
+                age));
+            y += FONT_H + 2;
+        }
+    }
+    y += 6;
+
+    // ── Section: Active TCP connections ──────────────────────────────────────
+    if y + FONT_H * 4 < h {
+        f.draw_str(x1, y, "TCP CONNECTIONS", hdr, bg); y += FONT_H + 4;
+        f.fill_rect(x1, y, w - x1*2, 1, sep.0, sep.1, sep.2); y += 6;
+
+        let sockets = crate::net::tcp::SOCKETS.lock();
+        let active: alloc::vec::Vec<_> = sockets.iter().collect();
+        if active.is_empty() {
+            f.draw_str(x1, y, "  (no active connections)", dim, bg);
+            y += FONT_H + 2;
+        } else {
+            f.draw_str(x1, y, "  Local Port  Remote IP           Remote Port  State", dim, bg);
+            y += FONT_H + 2;
+            for (key, sock) in active.iter().take(5) {
+                if y + FONT_H > h { break; }
+                let state = match sock.state {
+                    crate::net::tcp::TcpState::Established => "ESTABLISHED",
+                    crate::net::tcp::TcpState::SynSent     => "SYN_SENT",
+                    crate::net::tcp::TcpState::CloseWait   => "CLOSE_WAIT",
+                    _                                       => "OTHER",
+                };
+                f.draw_fmt(x1 + 8, y, fg, bg, format_args!(
+                    "{:<13} {}.{}.{}.{:<16} {:<12} {}",
+                    key.local_port,
+                    key.remote_ip[0], key.remote_ip[1], key.remote_ip[2], key.remote_ip[3],
+                    key.remote_port, state));
+                y += FONT_H + 2;
+            }
+        }
+        drop(sockets);
+        y += 6;
+    }
+
+    // ── Ping button hint ──────────────────────────────────────────────────────
+    if y + FONT_H < h {
+        f.draw_str(x1, y, "Press P to ping gateway  |  Press R to refresh", dim, bg);
+    }
+}
+
+fn netmgr_key(b: u8) {
+    match b | 0x20 { // lowercase
+        b'p' => {
+            // Ping the gateway and show result in terminal on close
+            let gw = crate::net::route_entries().into_iter()
+                .find(|r| r.destination == [0,0,0,0])
+                .map(|r| r.gateway)
+                .unwrap_or([10,0,2,2]);
+            let rtt = crate::net::ping(gw, 1, 1, 2000);
+            let msg: alloc::string::String = match rtt {
+                Some(ms) => alloc::format!("Ping {}.{}.{}.{}: {}ms\n",
+                    gw[0], gw[1], gw[2], gw[3], ms),
+                None     => alloc::format!("Ping {}.{}.{}.{}: timeout\n",
+                    gw[0], gw[1], gw[2], gw[3]),
+            };
+            // Redraw with ping result shown briefly in status area
+            fb::with(|f| unsafe {
+                let y = f.height().saturating_sub(FONT_H * 2);
+                let bg = (0x0A, 0x10, 0x18);
+                let ok = if rtt.is_some() { (0x44, 0xFF, 0x44) } else { (0xFF, 0x44, 0x44) };
+                f.fill_rect(16, y, f.width() - 32, FONT_H, bg.0, bg.1, bg.2);
+                f.draw_str(16, y, &msg, ok, bg);
+            });
+        }
+        b'r' => {
+            // Refresh display
+            fb::with(|f| unsafe { draw_netmgr_overlay(f); });
+        }
+        _ => {}
+    }
+}
+
 unsafe fn draw_browser_overlay(f: &mut fb::Framebuffer) {
     let w = f.width();
     let h = f.height();
@@ -2031,6 +2296,7 @@ pub fn app_char_key(b: u8) {
                 }
             }
             ActiveApp::Browser     => browser_key(b),
+            ActiveApp::Network     => netmgr_key(b),
         }
     }
 }
@@ -2043,6 +2309,7 @@ pub fn app_special_key(key: drivers::input::SpecialKey) {
             ActiveApp::Notepad     => notepad_special(key),
             ActiveApp::FileManager => fm_special(key),
             ActiveApp::Browser     => browser_special(key),
+            ActiveApp::Network     => {}
         }
     }
 }

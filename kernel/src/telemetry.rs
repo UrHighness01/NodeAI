@@ -97,8 +97,8 @@ static RING: Mutex<RingBuffer> = Mutex::new(RingBuffer::new());
 
 static SYSCALL_COUNT:   AtomicU64 = AtomicU64::new(0);
 static TASK_SWITCH_CNT: AtomicU64 = AtomicU64::new(0);
-static NET_RX_BYTES:    AtomicU64 = AtomicU64::new(0);
-static NET_TX_BYTES:    AtomicU64 = AtomicU64::new(0);
+pub static NET_RX_BYTES: AtomicU64 = AtomicU64::new(0);
+pub static NET_TX_BYTES: AtomicU64 = AtomicU64::new(0);
 static PAGE_FAULT_CNT:  AtomicU64 = AtomicU64::new(0);
 static AI_INFER_CNT:    AtomicU64 = AtomicU64::new(0);
 static SECURITY_ALERTS: AtomicU64 = AtomicU64::new(0);
