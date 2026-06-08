@@ -626,24 +626,37 @@ pub fn on_deschedule(pid: u64, actual_nice: i8, actual_burst_ticks: u32, actual_
                 };
                 let advantage = reward - baseline;
                 if advantage.abs() > 1.0 { // skip tiny advantages
+                    // Re-run the forward pass up to h1 so we have the hidden
+                    // activations needed for weight gradients.  This is cheap
+                    // (no alloc for embedding+attention — we share fb.ctx).
+                    let tokens  = model.embed_sequence(&fb.ctx);
+                    let (attn_out, _, _, _, _) = model.attention(&tokens);
+                    let inv_t   = 1.0 / CONTEXT_LEN as f32;
+                    let mut pooled = alloc::vec![0.0f32; ATTN_DIM];
+                    for t in 0..CONTEXT_LEN {
+                        for k in 0..ATTN_DIM {
+                            pooled[k] += attn_out[t * ATTN_DIM + k] * inv_t;
+                        }
+                    }
+                    let h1_pre = dense_forward(&model.h1_w, &model.h1_b, &pooled, HEAD_HIDDEN);
+                    let mut h1 = h1_pre.clone();
+                    relu_inplace(&mut h1);
+
                     let mut pg_grad = [0.0f32; N_OUTPUTS];
                     for i in 0..N_OUTPUTS {
-                        let sigma = SIGMA_INIT[i] * sigma_scale;
-                        let action_i = fb.raw_out[i]; // sampled action = raw output
-                        // -advantage * d_log_pi/d_mu = advantage * (a-mu)/sigma²
-                        // (negate because we minimize loss, maximize reward)
-                        pg_grad[i] = -advantage * (action_i - target[i]) / (sigma * sigma);
-                        pg_grad[i] = pg_grad[i].clamp(-1.0, 1.0);
+                        let sigma    = SIGMA_INIT[i] * sigma_scale;
+                        let action_i = fb.raw_out[i];
+                        pg_grad[i]   = (-advantage * (action_i - target[i]) / (sigma * sigma))
+                                        .clamp(-1.0, 1.0);
                     }
-                    // Apply pg_grad as an additional gradient on the output head.
+
+                    // Full output-layer gradient: update both weights and biases.
+                    // dL/dh2_w[i,j] = pg_grad[i] * h1[j]
+                    // dL/dh2_b[i]   = pg_grad[i]
                     for i in 0..N_OUTPUTS {
                         model.h2_b[i] -= REINFORCE_LR * pg_grad[i];
                         for j in 0..HEAD_HIDDEN {
-                            // Can't easily get h1 here without re-running forward.
-                            // Use a simpler estimate: gradient on bias only for REINFORCE.
-                            // Full PG backprop through layers deferred — bias update is
-                            // the dominant signal in early policy gradient learning.
-                            let _ = j; // suppress unused warning
+                            model.h2_w[i * HEAD_HIDDEN + j] -= REINFORCE_LR * pg_grad[i] * h1[j];
                         }
                     }
                 }
@@ -700,7 +713,7 @@ pub fn format_report() -> alloc::vec::Vec<u8> {
     out.push_str(&alloc::format!("sgd_steps       : {}\n", steps));
     out.push_str(&alloc::format!("active_pids     : {} ({} warm)\n", ctx_n, warm_n));
     out.push_str(&alloc::format!("cooc_init_done  : {}\n", cooc));
-    out.push_str(&alloc::format!("reinforce       : {} (gate={})\n",
+    out.push_str(&alloc::format!("reinforce       : {} (gate={}, full h2_w+h2_b)\n",
         if reinforce_active { "ACTIVE" } else { "warming up" }, REINFORCE_GATE));
     out.push_str(&alloc::format!("context_len     : {}\n", CONTEXT_LEN));
     out.push_str(&alloc::format!("blend_mode      : confidence-weighted (attn_entropy + fp_cosine + causal_prob)\n"));

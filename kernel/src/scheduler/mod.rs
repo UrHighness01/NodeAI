@@ -400,17 +400,22 @@ pub fn set_woke_by(wakee_pid: Pid, waker_pid: Pid) {
 /// If `pid` is the current task, halts; otherwise returns normally.
 pub fn exit_current_direct(pid: Pid, code: i32) -> ! {
     crate::klog!(INFO, "Scheduler: exit pid={} code={}", pid, code);
-    let parent_pid = {
+    let (parent_pid, task_cr3) = {
         let mut tasks = TASKS.lock();
         let ppid = tasks.get(&pid).map(|t| t.parent_pid).unwrap_or(0);
+        let cr3  = tasks.get(&pid).map(|t| t.cr3).unwrap_or(0);
         if let Some(task) = tasks.get_mut(&pid) {
             task.state     = task::TaskState::Zombie;
             task.exit_code = Some(code);
         }
         drop(tasks);
         runqueue::remove(pid);
-        ppid
+        (ppid, cr3)
     };
+    // Release CoW-shared frame references so frames are freed when the last owner exits.
+    if task_cr3 != 0 {
+        unsafe { crate::memory::release_user_cow_refs(task_cr3); }
+    }
     crate::syscall_stats::remove(pid);
     crate::transformer_sched::remove(pid);
     crate::syscall::cleanup_pid_fds(pid);
@@ -439,6 +444,14 @@ pub fn exit_current(code: i32) -> ! {
     } else {
         0
     };
+
+    // Release CoW-shared frame references.
+    if pid != 0 {
+        let task_cr3 = TASKS.lock().get(&pid).map(|t| t.cr3).unwrap_or(0);
+        if task_cr3 != 0 {
+            unsafe { crate::memory::release_user_cow_refs(task_cr3); }
+        }
+    }
 
     // Clean up per-task data.
     crate::syscall_stats::remove(pid);
@@ -490,13 +503,24 @@ pub fn fork_task(parent_pid: Pid) -> Option<Pid> {
         v & !0xFFF
     });
 
-    // Deep-copy all user-space pages from parent to child.
+    // CoW-share all user-space pages from parent to child.
+    // copy_user_address_space strips WRITABLE from parent's PTEs and sets CoW
+    // bits — the TLB flush below is mandatory to invalidate cached writable entries.
     let pages = unsafe {
         crate::memory::copy_user_address_space(parent_cr3, child_cr3)
     };
     match &pages {
-        Ok(n)  => crate::klog!(INFO, "Scheduler: fork parent={} → child={} ({} pages copied)", parent_pid, child_pid, n),
-        Err(e) => crate::klog!(WARN, "Scheduler: fork child={} page copy incomplete: {}", child_pid, e),
+        Ok(n)  => crate::klog!(INFO, "Scheduler: fork parent={} → child={} ({} pages CoW-shared)", parent_pid, child_pid, n),
+        Err(e) => crate::klog!(WARN, "Scheduler: fork child={} page share incomplete: {}", child_pid, e),
+    }
+
+    // Flush the parent's TLB: we stripped WRITABLE from its PTEs above but the
+    // CPU may still have cached writable translations.  A CR3 reload invalidates
+    // all non-global entries without changing the address space.
+    unsafe {
+        let cr3: u64;
+        core::arch::asm!("mov {}, cr3", out(reg) cr3, options(nomem, nostack));
+        core::arch::asm!("mov cr3, {}", in(reg) cr3, options(nomem, nostack));
     }
 
     let mut tasks = TASKS.lock();

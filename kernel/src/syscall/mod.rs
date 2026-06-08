@@ -53,9 +53,17 @@ static FD_PATH_TABLE: Mutex<BTreeMap<FdKey, alloc::string::String>> = Mutex::new
 static SOCKET_PORTS: Mutex<BTreeMap<FdKey, u16>> = Mutex::new(BTreeMap::new());
 
 // ── epoll interest-list tables ────────────────────────────────────────────────
-/// Per-interest-list entry: the events mask and the opaque user data word.
+/// Per-interest-list entry: the events mask, opaque user data, and ET state.
 #[derive(Clone, Copy)]
-struct EpollInterest { events: u32, data: u64 }
+struct EpollInterest {
+    events:     u32,
+    data:       u64,
+    /// True if EPOLLET was requested for this fd.
+    edge:       bool,
+    /// Edge-trigger state: was this fd ready at the last epoll_wait scan?
+    /// A transition from false→true fires exactly one event for EPOLLET.
+    last_ready: bool,
+}
 
 /// One epoll instance: maps watched-fd → interest.
 struct EpollInstance { interests: alloc::collections::BTreeMap<i32, EpollInterest> }
@@ -75,8 +83,7 @@ const EPOLLIN:  u32 = 0x0001;
 const EPOLLOUT: u32 = 0x0004;
 const EPOLLERR: u32 = 0x0008;
 const EPOLLHUP: u32 = 0x0010;
-// Edge-triggered flag — we implement level-triggered; ET flag is accepted but ignored.
-const EPOLLET: u32 = 1 << 31;
+const EPOLLET: u32 = 1 << 31; // edge-triggered — fires on low→high readiness transition
 
 /// VfsNode for directory fds — used by getdents64 to call readdir().
 static DIR_NODES: spin::Mutex<BTreeMap<FdKey, alloc::sync::Arc<dyn crate::vfs::VfsNode>>>
@@ -2233,9 +2240,9 @@ unsafe fn sys_futex(uaddr: u64, op: i32, val: u32, _timeout: u64) -> i64 {
 
 // ── sys_epoll ────────────────────────────────────────────────────────────────
 //
-// Level-triggered epoll. Edge-triggered (EPOLLET) is accepted without error but
-// falls back to level-triggered behaviour — correct for all well-written callers
-// that drain the fd before re-arming.
+// Both level-triggered (default) and edge-triggered (EPOLLET) are implemented.
+// Edge-triggered fires exactly once per low→high readiness transition; the state
+// is persisted in EpollInterest::last_ready across epoll_wait calls.
 //
 // struct epoll_event layout (Linux x86_64, __packed__):
 //   offset 0: events u32
@@ -2254,14 +2261,22 @@ unsafe fn sys_epoll_ctl(epfd: u64, op: i32, watched_fd: i32, event_ptr: u64) -> 
     let interest = if op != EPOLL_CTL_DEL && event_ptr != 0 {
         match validate_user_ptr(event_ptr, 12) {
             Ok(p) => {
-                let events = core::ptr::read_unaligned(p as *const u32);
-                let data   = core::ptr::read_unaligned(p.add(4) as *const u64);
-                EpollInterest { events: events & !EPOLLET, data }
+                let events_raw = core::ptr::read_unaligned(p as *const u32);
+                let data       = core::ptr::read_unaligned(p.add(4) as *const u64);
+                let is_edge    = events_raw & EPOLLET != 0;
+                // Preserve EPOLLET in `edge`; strip it from the poll mask so
+                // the readiness checks below only see standard event flags.
+                EpollInterest {
+                    events:     events_raw & !EPOLLET,
+                    data,
+                    edge:       is_edge,
+                    last_ready: false,
+                }
             }
             Err(e) => return e,
         }
     } else {
-        EpollInterest { events: 0, data: 0 }
+        EpollInterest { events: 0, data: 0, edge: false, last_ready: false }
     };
 
     let mut table = EPOLL_TABLE.lock();
@@ -2293,7 +2308,7 @@ unsafe fn sys_epoll_wait(epfd: u64, events_out: u64, maxevents: i32, timeout_ms:
     };
 
     loop {
-        // Snapshot interest list (drop EPOLL_TABLE lock before touching FD_TABLE).
+        // Snapshot interest list so we can query FD_TABLE without holding EPOLL_TABLE.
         let interests: alloc::vec::Vec<(i32, EpollInterest)> = {
             let table = EPOLL_TABLE.lock();
             match table.get(&(pid, epfd)) {
@@ -2303,28 +2318,49 @@ unsafe fn sys_epoll_wait(epfd: u64, events_out: u64, maxevents: i32, timeout_ms:
         };
 
         let mut n_ready: usize = 0;
-        // Hold FD_TABLE for the entire poll round — prevents TOCTOU between
-        // bytes_available() and contains_key() on the same fd.
+        // Updates to `last_ready` for edge-triggered fds — applied after the scan.
+        let mut et_updates: alloc::vec::Vec<(i32, bool)> = alloc::vec::Vec::new();
+
         let mut fd_tbl = FD_TABLE.lock();
         for (watched_fd, interest) in &interests {
             if n_ready >= max { break; }
             let wfd = *watched_fd as u64;
 
             let mut revents: u32 = 0;
+            let now_ready;
+
             if wfd == 1 || wfd == 2 {
-                if interest.events & EPOLLOUT != 0 { revents |= EPOLLOUT; }
+                let r = interest.events & EPOLLOUT != 0;
+                if r { revents |= EPOLLOUT; }
+                now_ready = r;
             } else {
                 match fd_tbl.get_mut(&(pid, wfd)) {
                     Some(h) => {
                         let available = h.bytes_available();
-                        if interest.events & EPOLLIN  != 0 && available > 0 { revents |= EPOLLIN; }
-                        if interest.events & EPOLLOUT != 0                    { revents |= EPOLLOUT; }
+                        let has_in  = interest.events & EPOLLIN  != 0 && available > 0;
+                        let has_out = interest.events & EPOLLOUT != 0;
+                        if has_in  { revents |= EPOLLIN; }
+                        if has_out { revents |= EPOLLOUT; }
+                        now_ready = has_in || has_out;
                     }
-                    None => { revents |= EPOLLHUP | EPOLLERR; }
+                    None => {
+                        revents   |= EPOLLHUP | EPOLLERR;
+                        now_ready  = true;
+                    }
                 }
             }
 
-            if revents != 0 {
+            // Level-triggered: fire whenever ready.
+            // Edge-triggered: fire only on low→high transition.
+            let should_report = if interest.edge {
+                let fire = now_ready && !interest.last_ready;
+                et_updates.push((*watched_fd, now_ready));
+                fire
+            } else {
+                revents != 0
+            };
+
+            if should_report && revents != 0 {
                 let slot = out_ptr.add(n_ready * 12);
                 core::ptr::write_unaligned(slot as *mut u32, revents);
                 core::ptr::write_unaligned(slot.add(4) as *mut u64, interest.data);
@@ -2332,6 +2368,18 @@ unsafe fn sys_epoll_wait(epfd: u64, events_out: u64, maxevents: i32, timeout_ms:
             }
         }
         drop(fd_tbl);
+
+        // Persist edge-trigger state back into the epoll instance.
+        if !et_updates.is_empty() {
+            let mut table = EPOLL_TABLE.lock();
+            if let Some(inst) = table.get_mut(&(pid, epfd)) {
+                for (fd, ready) in et_updates {
+                    if let Some(interest) = inst.interests.get_mut(&fd) {
+                        interest.last_ready = ready;
+                    }
+                }
+            }
+        }
 
         if n_ready > 0 || crate::scheduler::uptime_ms() >= deadline {
             return n_ready as i64;

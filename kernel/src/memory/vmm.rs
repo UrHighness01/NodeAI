@@ -10,6 +10,22 @@ use x86_64::{
 
 use spin::Once;
 
+// ── CoW tracking ─────────────────────────────────────────────────────────────
+
+/// Refcount of live CoW mappings per physical frame.
+/// A frame enters this table when fork() shares it; leaves when the last
+/// process either writes to it (triggering a private copy) or exits.
+static COW_REFS: spin::Mutex<alloc::collections::BTreeMap<u64, u8>> =
+    spin::Mutex::new(alloc::collections::BTreeMap::new());
+
+// Raw PTE bit constants (used in the CoW page-table walkers).
+const PTE_PRESENT:   u64 = 1;
+const PTE_WRITABLE:  u64 = 1 << 1;
+const PTE_HUGE:      u64 = 1 << 7;
+/// OS-defined AVL bit 9: this L1 PTE is a copy-on-write mapping.
+const PTE_COW:       u64 = 1 << 9;
+const PTE_ADDR_MASK: u64 = 0x000F_FFFF_FFFF_F000;
+
 static VMM: Once<spin::Mutex<OffsetPageTable<'static>>> = Once::new();
 
 /// Physical-memory offset stored for use by `PmmFrameAllocator`.
@@ -178,76 +194,206 @@ pub unsafe fn map_user_range_in_cr3(
     result
 }
 
-/// Copy all user-space mappings (L4 indices 0–255) from `src_cr3` into `dst_cr3`.
+/// Share all user-space mappings (L4 indices 0–255) from `src_cr3` into `dst_cr3`
+/// using copy-on-write semantics.
 ///
-/// Walks the source page table hierarchy through the PHYS_OFFSET window and
-/// writes PTEs directly into the destination tables — no CR3 switching, no
-/// TLB flushes, no `map_user_range` calls. Intermediate destination tables
-/// (L3/L2/L1) are allocated on demand.
+/// For each writable L1 PTE in `src_cr3`:
+///  - Clears the WRITABLE bit and sets the OS-defined CoW bit (bit 9) in the
+///    source PTE so the parent takes a #PF on its next write.
+///  - Copies the same (now read-only, CoW) PTE into the child's page table.
+///  - Increments `COW_REFS[phys]` to track the shared frame.
 ///
-/// Returns `Ok(pages_copied)` or `Err` if out of memory mid-copy.
+/// Read-only pages (code, rodata) are copied verbatim without CoW tracking —
+/// they can never be written anyway.
+///
+/// After all PTEs are processed the caller MUST flush the TLB of the CPU
+/// running `src_cr3` (i.e. the parent), because we stripped WRITABLE from
+/// cached translations.  `fork_task` handles this with a CR3 reload.
+///
+/// Returns `Ok(pages_shared)` or `Err` if out of memory mid-copy.
 pub unsafe fn copy_user_address_space(src_cr3: u64, dst_cr3: u64) -> Result<usize, &'static str> {
-    const PTE_PRESENT:   u64 = 1;
-    const PTE_HUGE:      u64 = 1 << 7;
-    const PTE_ADDR_MASK: u64 = 0x000F_FFFF_FFFF_F000;
-
     let phys_off = PHYS_OFFSET;
-    let mut pages_copied: usize = 0;
+    let mut pages_shared: usize = 0;
 
-    let src_l4 = (phys_off + src_cr3) as *const u64;
+    let src_l4 = (phys_off + src_cr3) as *mut u64;
     let dst_l4 = (phys_off + dst_cr3) as *mut u64;
+
+    // Acquire CoW refs table once for the whole walk.
+    let mut cow = COW_REFS.lock();
 
     for l4i in 0..256usize {
         let l4e = *src_l4.add(l4i);
         if l4e & PTE_PRESENT == 0 { continue; }
 
-        // Ensure destination L3 table exists.
         let dst_l3_phys = ensure_table(dst_l4.add(l4i), l4e, phys_off)?;
-        let src_l3 = (phys_off + (l4e & PTE_ADDR_MASK)) as *const u64;
+        let src_l3 = (phys_off + (l4e & PTE_ADDR_MASK)) as *mut u64;
         let dst_l3 = (phys_off + dst_l3_phys) as *mut u64;
 
         for l3i in 0..512usize {
             let l3e = *src_l3.add(l3i);
             if l3e & PTE_PRESENT == 0 { continue; }
-            if l3e & PTE_HUGE   != 0  { continue; } // 1 GiB pages — skip
+            if l3e & PTE_HUGE   != 0  { continue; }
 
             let dst_l2_phys = ensure_table(dst_l3.add(l3i), l3e, phys_off)?;
-            let src_l2 = (phys_off + (l3e & PTE_ADDR_MASK)) as *const u64;
+            let src_l2 = (phys_off + (l3e & PTE_ADDR_MASK)) as *mut u64;
             let dst_l2 = (phys_off + dst_l2_phys) as *mut u64;
 
             for l2i in 0..512usize {
                 let l2e = *src_l2.add(l2i);
                 if l2e & PTE_PRESENT == 0 { continue; }
-                if l2e & PTE_HUGE   != 0  { continue; } // 2 MiB pages — skip
+                if l2e & PTE_HUGE   != 0  { continue; }
 
                 let dst_l1_phys = ensure_table(dst_l2.add(l2i), l2e, phys_off)?;
-                let src_l1 = (phys_off + (l2e & PTE_ADDR_MASK)) as *const u64;
+                let src_l1 = (phys_off + (l2e & PTE_ADDR_MASK)) as *mut u64;
                 let dst_l1 = (phys_off + dst_l1_phys) as *mut u64;
 
                 for l1i in 0..512usize {
                     let l1e = *src_l1.add(l1i);
                     if l1e & PTE_PRESENT == 0 { continue; }
 
-                    // Allocate and copy the data frame.
-                    let src_phys = l1e & PTE_ADDR_MASK;
-                    let dst_phys = super::pmm::alloc_frame()
-                        .ok_or("copy_user_address_space: OOM")?;
+                    let phys = l1e & PTE_ADDR_MASK;
 
-                    core::ptr::copy_nonoverlapping(
-                        (phys_off + src_phys) as *const u8,
-                        (phys_off + dst_phys) as *mut u8,
-                        4096,
-                    );
+                    if l1e & PTE_WRITABLE != 0 || l1e & PTE_COW != 0 {
+                        // Make both parent and child CoW: no-write, CoW bit set.
+                        let cow_pte = (l1e & !PTE_WRITABLE) | PTE_COW;
+                        *src_l1.add(l1i) = cow_pte;
+                        *dst_l1.add(l1i) = cow_pte;
 
-                    // Write the leaf PTE with the new physical address, same flags.
-                    *dst_l1.add(l1i) = dst_phys | (l1e & !PTE_ADDR_MASK);
-                    pages_copied += 1;
+                        // Reference: child adds one more owner (parent already counted).
+                        let rc = cow.entry(phys).or_insert(1);
+                        *rc = rc.saturating_add(1);
+                    } else {
+                        // Read-only page — safe to share as-is without CoW tracking.
+                        *dst_l1.add(l1i) = l1e;
+                    }
+
+                    pages_shared += 1;
                 }
             }
         }
     }
 
-    Ok(pages_copied)
+    Ok(pages_shared)
+}
+
+/// Handle a user-mode write fault caused by a CoW page.
+///
+/// Called from `page_fault_handler` when `PROTECTION_VIOLATION` fires in user
+/// mode.  Returns `true` if the fault was a valid CoW write — the faulting
+/// instruction can be retried.  Returns `false` for a genuine protection fault
+/// (e.g. writing to a read-only code page) which the caller should turn into
+/// SIGSEGV.
+pub unsafe fn cow_page_fault(cr2: u64) -> bool {
+    let phys_off = PHYS_OFFSET;
+
+    let cr3: u64;
+    core::arch::asm!("mov {}, cr3", out(reg) cr3, options(nomem, nostack));
+    let cr3 = cr3 & !0xFFF;
+
+    let l4_idx = ((cr2 >> 39) & 0x1FF) as usize;
+    let l3_idx = ((cr2 >> 30) & 0x1FF) as usize;
+    let l2_idx = ((cr2 >> 21) & 0x1FF) as usize;
+    let l1_idx = ((cr2 >> 12) & 0x1FF) as usize;
+
+    // Walk the page table to the leaf PTE.
+    let l4e = *((phys_off + cr3) as *const u64).add(l4_idx);
+    if l4e & PTE_PRESENT == 0 { return false; }
+
+    let l3e = *((phys_off + (l4e & PTE_ADDR_MASK)) as *const u64).add(l3_idx);
+    if l3e & PTE_PRESENT == 0 || l3e & PTE_HUGE != 0 { return false; }
+
+    let l2e = *((phys_off + (l3e & PTE_ADDR_MASK)) as *const u64).add(l2_idx);
+    if l2e & PTE_PRESENT == 0 || l2e & PTE_HUGE != 0 { return false; }
+
+    let l1_ptr = ((phys_off + (l2e & PTE_ADDR_MASK)) as *mut u64).add(l1_idx);
+    let l1e    = *l1_ptr;
+
+    if l1e & PTE_PRESENT == 0 { return false; }
+    if l1e & PTE_COW     == 0 { return false; } // not a CoW page — real fault
+
+    let old_phys = l1e & PTE_ADDR_MASK;
+    // Flags to carry forward, minus CoW bit, plus WRITABLE.
+    let new_flags = (l1e & !PTE_ADDR_MASK & !PTE_COW) | PTE_WRITABLE;
+
+    // Atomically decrement refcount and decide whether to copy or just unlock.
+    let remaining = {
+        let mut refs = COW_REFS.lock();
+        match refs.get_mut(&old_phys) {
+            Some(rc) if *rc > 1 => {
+                *rc -= 1;
+                *rc
+            }
+            _ => {
+                // Last (or only) owner — no copy needed.
+                refs.remove(&old_phys);
+                0
+            }
+        }
+    };
+
+    if remaining == 0 {
+        // Sole owner: restore writable in place, no allocation.
+        *l1_ptr = old_phys | new_flags;
+    } else {
+        // Multiple owners: allocate a private copy.
+        let new_phys = match super::pmm::alloc_frame() {
+            Some(p) => p,
+            None    => return false, // OOM — treat as fault
+        };
+        core::ptr::copy_nonoverlapping(
+            (phys_off + old_phys) as *const u8,
+            (phys_off + new_phys) as *mut u8,
+            4096,
+        );
+        *l1_ptr = new_phys | new_flags;
+    }
+
+    // Invalidate the TLB entry for this single page.
+    core::arch::asm!("invlpg [{}]", in(reg) cr2, options(nostack, preserves_flags));
+    true
+}
+
+/// Decrement CoW reference counts for every user-space CoW page in `cr3`.
+/// Call this when a process exits to prevent permanent frame leaks.
+pub unsafe fn release_user_cow_refs(cr3: u64) {
+    let phys_off = PHYS_OFFSET;
+    let l4 = (phys_off + (cr3 & !0xFFF)) as *const u64;
+
+    let mut cow = COW_REFS.lock();
+
+    for l4i in 0..256usize {
+        let l4e = *l4.add(l4i);
+        if l4e & PTE_PRESENT == 0 { continue; }
+
+        let l3 = (phys_off + (l4e & PTE_ADDR_MASK)) as *const u64;
+        for l3i in 0..512usize {
+            let l3e = *l3.add(l3i);
+            if l3e & PTE_PRESENT == 0 || l3e & PTE_HUGE != 0 { continue; }
+
+            let l2 = (phys_off + (l3e & PTE_ADDR_MASK)) as *const u64;
+            for l2i in 0..512usize {
+                let l2e = *l2.add(l2i);
+                if l2e & PTE_PRESENT == 0 || l2e & PTE_HUGE != 0 { continue; }
+
+                let l1 = (phys_off + (l2e & PTE_ADDR_MASK)) as *const u64;
+                for l1i in 0..512usize {
+                    let l1e = *l1.add(l1i);
+                    if l1e & PTE_PRESENT == 0 { continue; }
+                    if l1e & PTE_COW     == 0 { continue; }
+
+                    let phys = l1e & PTE_ADDR_MASK;
+                    if let Some(rc) = cow.get_mut(&phys) {
+                        if *rc <= 1 {
+                            cow.remove(&phys);
+                            super::pmm::free_frame(phys);
+                        } else {
+                            *rc -= 1;
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 /// If `dst_pte` has a present child table, return its physical address.

@@ -115,7 +115,25 @@ extern "x86-interrupt" fn page_fault_handler(
         return;
     }
 
-    // Kernel fault or protection violation — unrecoverable.
+    if is_user && is_present {
+        // Protection-violation in user mode — may be a CoW write fault.
+        let is_write = error_code.contains(PageFaultErrorCode::CAUSED_BY_WRITE);
+        if is_write {
+            let pid = crate::scheduler::current_pid();
+            if unsafe { crate::memory::cow_page_fault(cr2) } {
+                crate::klog!(DEBUG, "#PF CoW resolved {:#x} pid={}", cr2, pid);
+                return; // handled — resume faulting instruction
+            }
+        }
+        // Genuine protection fault — SIGSEGV.
+        let pid = crate::scheduler::current_pid();
+        crate::klog!(ERROR, "#PF PROT SIGSEGV pid={} addr={:#x} ip={:#x}", pid, cr2, ip);
+        crate::scheduler::send_signal(pid, 11);
+        crate::scheduler::yield_cpu();
+        return;
+    }
+
+    // Kernel fault — unrecoverable.
     crate::klog!(ERROR, "#PF FATAL {:#x} (code {:?}) ip={:#x}", cr2, error_code, ip);
     loop { x86_64::instructions::hlt(); }
 }
