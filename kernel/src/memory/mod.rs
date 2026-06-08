@@ -11,7 +11,7 @@ pub mod slab; // Slab allocator for fixed-size kernel objects
 pub use heap::KERNEL_HEAP;
 pub use vmm::{map_page, unmap_page, translate, map_mmio, map_user_range,
               alloc_user_cr3, map_user_range_in_cr3, copy_user_address_space,
-              cow_page_fault, release_user_cow_refs,
+              cow_page_fault, release_user_cow_refs, update_user_pte_flags,
               VDSO_ADDR, PmmFrameAllocator};
 pub use pmm::{alloc_frame, free_frame, alloc_frames, free_frames, PAGE_SIZE};
 

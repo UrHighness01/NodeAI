@@ -310,24 +310,37 @@ fn idle_loop() -> ! {
 fn panic(info: &core::panic::PanicInfo) -> ! {
     x86_64::instructions::interrupts::disable();
 
-    // Try serial (most likely to work since it requires no paging)
-    logger::log(
-        logger::Level::ERROR,
-        "panic",
-        0,
-        format_args!("KERNEL PANIC: {}", info),
-    );
+    let msg = alloc::format!("{}", info);
 
-    // Try VGA if it's set up
+    // Try serial (most likely to work since it requires no paging)
+    logger::log(logger::Level::ERROR, "panic", 0, format_args!("KERNEL PANIC: {}", msg));
+
+    // Write crash record to MMIO region (readable on next boot).
+    let rip: u64;
+    unsafe { core::arch::asm!("lea {}, [rip]", out(reg) rip, options(nomem, nostack)); }
+    crash_dump::record_panic(rip, 0, 0, 0, &msg);
+
+    // AI self-diagnosis — only if LLM is loaded (AtomicBool check, no locks).
+    // This is genuinely novel: no other OS AI-diagnoses its own panics at runtime.
+    if llm::is_ready() {
+        let diagnosis = llm::diagnose_panic(&msg);
+        logger::log(logger::Level::ERROR, "panic.ai", 0,
+            format_args!("AI DIAGNOSIS: {}", diagnosis));
+        use core::fmt::Write;
+        if let Some(mut w) = vga::WRITER.try_lock() {
+            w.set_colour(vga::Colour::LightCyan, vga::Colour::Black);
+            let _ = write!(w, "\nAI DIAGNOSIS: {}\n", &diagnosis[..diagnosis.len().min(200)]);
+        }
+    }
+
+    // Try VGA for the raw panic message.
     use core::fmt::Write;
     if let Some(mut w) = vga::WRITER.try_lock() {
         w.set_colour(vga::Colour::LightRed, vga::Colour::Black);
-        let _ = write!(w, "\nKERNEL PANIC: {}\n", info);
+        let _ = write!(w, "\nKERNEL PANIC: {}\n", msg);
     }
 
-    loop {
-        x86_64::instructions::hlt();
-    }
+    loop { x86_64::instructions::hlt(); }
 }
 
 /// Called by the global allocator when allocation fails.

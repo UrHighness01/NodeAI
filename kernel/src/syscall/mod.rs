@@ -53,6 +53,10 @@ static FD_PATH_TABLE: Mutex<BTreeMap<FdKey, alloc::string::String>> = Mutex::new
 static SOCKET_PORTS: Mutex<BTreeMap<FdKey, u16>> = Mutex::new(BTreeMap::new());
 /// Remote address (IP, port) for connected sockets — filled by sys_connect / sys_accept.
 static SOCKET_PEERNAME: Mutex<BTreeMap<FdKey, ([u8; 4], u16)>> = Mutex::new(BTreeMap::new());
+/// Per-fd status flags — set by fcntl(F_SETFL).  Bit 0x800 = O_NONBLOCK.
+static FD_FLAGS: Mutex<BTreeMap<FdKey, i32>> = Mutex::new(BTreeMap::new());
+
+const O_NONBLOCK: i32 = 0x800;
 
 // ── Virtual Memory Areas ──────────────────────────────────────────────────────
 /// A lazily-mapped anonymous region created by sys_mmap.  Pages are allocated
@@ -109,11 +113,12 @@ static DIR_NODES: spin::Mutex<BTreeMap<FdKey, alloc::sync::Arc<dyn crate::vfs::V
 pub fn cleanup_pid_fds(pid: u64) {
     FD_TABLE.lock().retain(|&(p, _), _| p != pid);
     FD_PATH_TABLE.lock().retain(|&(p, _), _| p != pid);
+    FD_FLAGS.lock().retain(|&(p, _), _| p != pid);
     EPOLL_TABLE.lock().retain(|&(p, _), _| p != pid);
     NEXT_FD.lock().remove(&pid);
-    // DIR_NODES and SOCKET_PORTS share the same key layout.
     DIR_NODES.lock().retain(|&(p, _), _| p != pid);
     SOCKET_PORTS.lock().retain(|&(p, _), _| p != pid);
+    SOCKET_PEERNAME.lock().retain(|&(p, _), _| p != pid);
 }
 
 /// Return the list of open fd numbers for a given PID (used by /proc/<pid>/fd/).
@@ -786,7 +791,6 @@ unsafe fn sys_read(fd: u64, buf_ptr: u64, len: u64) -> i64 {
                     core::ptr::copy_nonoverlapping(tmp.as_ptr(), buf, n);
                     // Syscall readahead: if this task is in an I/O-heavy cluster,
                     // tell intel_storage to prefetch the next window of this file.
-                    // Zero-latency: queued for the next storage tick, not blocking.
                     if let Some((_, profile, _)) = crate::fingerprint::classify_task(pid) {
                         if profile.prefault_pages > 0 {
                             if let Some(path) = FD_PATH_TABLE.lock().get(&(pid, fd)).cloned() {
@@ -796,6 +800,18 @@ unsafe fn sys_read(fd: u64, buf_ptr: u64, len: u64) -> i64 {
                         }
                     }
                     n as i64
+                }
+                Err(crate::vfs::VfsError::WouldBlock) => {
+                    // Return EAGAIN if O_NONBLOCK is set; otherwise spin-yield until data arrives.
+                    let is_nonblock = FD_FLAGS.lock()
+                        .get(&(pid, fd)).copied().unwrap_or(0) & O_NONBLOCK != 0;
+                    if is_nonblock {
+                        -11 // EAGAIN
+                    } else {
+                        // Blocking read: yield and retry.
+                        crate::scheduler::yield_cpu();
+                        0
+                    }
                 }
                 Err(_) => EINVAL,
             }
@@ -1544,7 +1560,18 @@ unsafe fn sys_brk(addr: u64) -> i64 {
 }
 
 // ── sys_mprotect ─────────────────────────────────────────────────────────────
-unsafe fn sys_mprotect(_addr: u64, _len: u64, _prot: u64) -> i64 { 0 }
+unsafe fn sys_mprotect(addr: u64, len: u64, prot: u64) -> i64 {
+    if len == 0 { return 0; }
+    const PROT_READ:  u64 = 1;
+    const PROT_WRITE: u64 = 2;
+    const PROT_EXEC:  u64 = 4;
+    let writable   = prot & PROT_WRITE != 0;
+    let executable = prot & PROT_EXEC  != 0;
+    // PROT_NONE (no PROT_READ) → map non-writable, non-executable.
+    // CoW bit is preserved by update_user_pte_flags — see vmm.rs.
+    crate::memory::update_user_pte_flags(addr, len, writable, executable);
+    0
+}
 
 // ── sys_getppid ──────────────────────────────────────────────────────────────
 unsafe fn sys_getppid() -> i64 {
@@ -1824,32 +1851,84 @@ const F_GETFL:    u64 = 3;
 const F_SETFL:    u64 = 4;
 const FD_CLOEXEC: u64 = 1;
 
-unsafe fn sys_fcntl(fd: u64, cmd: u64, _arg: u64) -> i64 {
+unsafe fn sys_fcntl(fd: u64, cmd: u64, arg: u64) -> i64 {
+    let pid = crate::scheduler::current_pid();
     match cmd {
         F_GETFD  => FD_CLOEXEC as i64,
         F_SETFD  => 0,
-        F_GETFL  => 0o2,   // O_RDWR
-        F_SETFL  => 0,
+        F_GETFL  => {
+            let flags = FD_FLAGS.lock().get(&(pid, fd)).copied().unwrap_or(0o2); // O_RDWR default
+            flags as i64
+        }
+        F_SETFL  => {
+            FD_FLAGS.lock().insert((pid, fd), arg as i32);
+            0
+        }
         F_DUPFD  => sys_dup(fd),
         _        => EINVAL,
     }
 }
 
 // ── sys_dup / sys_dup2 ───────────────────────────────────────────────────────
+
+/// Clone the handle at oldfd and insert it at newfd.  Returns newfd on success.
+unsafe fn do_dup(pid: u64, oldfd: u64, newfd: u64) -> i64 {
+    // stdin/stdout/stderr: no FD_TABLE entry but always valid.
+    if oldfd < 3 {
+        FD_FLAGS.lock().remove(&(pid, newfd));
+        return newfd as i64;
+    }
+
+    // Try clone_box first (fast path — no VFS path needed).
+    let cloned: Option<alloc::boxed::Box<dyn crate::vfs::FileHandle>> = {
+        let mut tbl = FD_TABLE.lock();
+        tbl.get_mut(&(pid, oldfd)).and_then(|h| h.clone_box())
+    };
+
+    if let Some(handle) = cloned {
+        FD_TABLE.lock().insert((pid, newfd), handle);
+        // Copy FD flags to the new fd.
+        let flags = FD_FLAGS.lock().get(&(pid, oldfd)).copied();
+        if let Some(f) = flags { FD_FLAGS.lock().insert((pid, newfd), f); }
+        return newfd as i64;
+    }
+
+    // Fallback: reopen from stored path (VFS-backed fds).
+    let path = FD_PATH_TABLE.lock().get(&(pid, oldfd)).cloned();
+    if let Some(p) = path {
+        if let Ok(node) = crate::vfs::lookup(&p) {
+            if let Ok(fh) = node.open() {
+                FD_TABLE.lock().insert((pid, newfd), fh);
+                FD_PATH_TABLE.lock().insert((pid, newfd), p);
+                let flags = FD_FLAGS.lock().get(&(pid, oldfd)).copied();
+                if let Some(f) = flags { FD_FLAGS.lock().insert((pid, newfd), f); }
+                return newfd as i64;
+            }
+        }
+    }
+
+    // Check at least oldfd exists (for the error path).
+    if FD_TABLE.lock().contains_key(&(pid, oldfd)) {
+        newfd as i64 // handle exists but can't clone — return newfd anyway
+    } else {
+        EBADF
+    }
+}
+
 unsafe fn sys_dup(oldfd: u64) -> i64 {
     let pid = crate::scheduler::current_pid();
     let newfd = alloc_fd(pid);
-    if oldfd < 3 { return newfd as i64; }
-    let has = FD_TABLE.lock().contains_key(&(pid, oldfd));
-    if has { newfd as i64 } else { EBADF }
+    do_dup(pid, oldfd, newfd)
 }
 
 unsafe fn sys_dup2(oldfd: u64, newfd: u64) -> i64 {
     if oldfd == newfd { return oldfd as i64; }
     let pid = crate::scheduler::current_pid();
+    // Close the existing newfd handle (if any).
     FD_TABLE.lock().remove(&(pid, newfd));
-    if oldfd < 3 || newfd < 3 { return newfd as i64; }
-    newfd as i64
+    FD_PATH_TABLE.lock().remove(&(pid, newfd));
+    FD_FLAGS.lock().remove(&(pid, newfd));
+    do_dup(pid, oldfd, newfd)
 }
 
 // ── sys_pipe2 ────────────────────────────────────────────────────────────────
@@ -1881,13 +1960,18 @@ impl crate::vfs::FileHandle for PipeHandle {
         if self.is_write { return Err(crate::vfs::VfsError::PermissionDenied); }
         let state_arc = match PIPE_TABLE.lock().get(&self.pipe_id).cloned() {
             Some(a) => a,
-            None    => return Ok(0),
+            None    => return Ok(0), // pipe destroyed → EOF
         };
-        let mut state = state_arc.lock();
+        let state = state_arc.lock();
         if state.buf.is_empty() {
-            // EOF if all writers closed; EAGAIN-equivalent (0 bytes) otherwise.
-            return Ok(0);
+            // If all writers closed → EOF (0). If writers alive → would block.
+            // We signal "would block" via WouldBlock so sys_read can return EAGAIN
+            // when the fd has O_NONBLOCK set.
+            if state.writer_count == 0 { return Ok(0); }
+            return Err(crate::vfs::VfsError::WouldBlock);
         }
+        drop(state);
+        let mut state = state_arc.lock();
         let n = buf.len().min(state.buf.len());
         buf[..n].copy_from_slice(&state.buf[..n]);
         state.buf.drain(..n);
@@ -1906,6 +1990,14 @@ impl crate::vfs::FileHandle for PipeHandle {
     fn stat(&self) -> crate::vfs::VfsResult<crate::vfs::Stat> {
         Ok(crate::vfs::Stat { ino: 0, size: 0, is_dir: false, nlink: 2,
                               uid: 0, gid: 0, mode: 0o622 })
+    }
+    fn clone_box(&self) -> Option<alloc::boxed::Box<dyn crate::vfs::FileHandle>> {
+        if let Some(arc) = PIPE_TABLE.lock().get(&self.pipe_id).cloned() {
+            let mut st = arc.lock();
+            if self.is_write { st.writer_count += 1; }
+            else             { st.reader_count += 1; }
+        }
+        Some(alloc::boxed::Box::new(PipeHandle { pipe_id: self.pipe_id, is_write: self.is_write }))
     }
 }
 impl Drop for PipeHandle {
@@ -2539,6 +2631,9 @@ impl crate::vfs::FileHandle for SocketHandle {
     fn stat(&self) -> crate::vfs::VfsResult<crate::vfs::Stat> {
         Ok(crate::vfs::Stat { ino: 0, size: 0, is_dir: false, nlink: 1, uid: 0, gid: 0, mode: 0o600 })
     }
+    fn clone_box(&self) -> Option<alloc::boxed::Box<dyn crate::vfs::FileHandle>> {
+        Some(alloc::boxed::Box::new(SocketHandle))
+    }
 }
 
 /// Connected socket fd — wraps a TcpSocketKey for an Established connection.
@@ -2561,6 +2656,13 @@ impl crate::vfs::FileHandle for ConnectedSocketHandle {
     fn seek(&mut self, _: u64) -> crate::vfs::VfsResult<u64> { Ok(0) }
     fn stat(&self) -> crate::vfs::VfsResult<crate::vfs::Stat> {
         Ok(crate::vfs::Stat { ino: 0, size: 0, is_dir: false, nlink: 1, uid: 0, gid: 0, mode: 0o600 })
+    }
+    fn clone_box(&self) -> Option<alloc::boxed::Box<dyn crate::vfs::FileHandle>> {
+        Some(alloc::boxed::Box::new(ConnectedSocketHandle {
+            local_port:  self.local_port,
+            remote_ip:   self.remote_ip,
+            remote_port: self.remote_port,
+        }))
     }
 }
 

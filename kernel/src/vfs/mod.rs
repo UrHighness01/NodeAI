@@ -29,6 +29,8 @@ pub enum VfsError {
     OutOfSpace,
     ReadOnly,
     TooManyOpenFiles,
+    /// Operation would block; caller should return EAGAIN when O_NONBLOCK is set.
+    WouldBlock,
 }
 
 pub type VfsResult<T> = Result<T, VfsError>;
@@ -60,6 +62,10 @@ pub trait FileHandle: Send + Sync {
     fn flush(&mut self)                 -> VfsResult<()> { Ok(()) }
     /// Discard all content beyond `len` bytes.  Default: no-op.
     fn truncate(&mut self, _len: u64)   -> VfsResult<()> { Ok(()) }
+    /// Duplicate this handle for sys_dup/sys_dup2.
+    /// Returns Some(new_handle) if duplication is supported, None otherwise
+    /// (caller falls back to reopening via path).
+    fn clone_box(&self) -> Option<Box<dyn FileHandle>> { None }
 }
 
 // ── Directory entry ───────────────────────────────────────────────────────────

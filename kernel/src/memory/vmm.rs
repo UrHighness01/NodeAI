@@ -508,6 +508,56 @@ pub fn map_mmio(phys: u64, virt: u64, size: u64) {
     }
 }
 
+/// Change protection flags on an existing user-space mapping.
+///
+/// Walks the L1 PTEs for [vaddr, vaddr+len) and updates the WRITABLE and
+/// NO_EXECUTE bits without changing the physical frame or CoW bit.
+/// TLB entries are invalidated with INVLPG after each PTE update.
+///
+/// CoW safety: the CoW marker (bit 9) is preserved.  A CoW page with
+/// `writable=true` keeps its CoW bit so the first write still triggers a
+/// proper cow_page_fault() — that is the correct behaviour.
+pub unsafe fn update_user_pte_flags(vaddr: u64, len: u64, writable: bool, executable: bool) {
+    let phys_off = PHYS_OFFSET;
+    let cr3: u64;
+    core::arch::asm!("mov {}, cr3", out(reg) cr3, options(nomem, nostack));
+    let cr3 = cr3 & !0xFFF;
+
+    let page_size = super::pmm::PAGE_SIZE;
+    let mut addr  = vaddr & !(page_size - 1);
+    let end       = vaddr + len;
+
+    while addr < end {
+        let l4i = ((addr >> 39) & 0x1FF) as usize;
+        let l3i = ((addr >> 30) & 0x1FF) as usize;
+        let l2i = ((addr >> 21) & 0x1FF) as usize;
+        let l1i = ((addr >> 12) & 0x1FF) as usize;
+
+        let l4e = *((phys_off + cr3) as *const u64).add(l4i);
+        if l4e & PTE_PRESENT == 0 { addr += page_size; continue; }
+
+        let l3e = *((phys_off + (l4e & PTE_ADDR_MASK)) as *const u64).add(l3i);
+        if l3e & PTE_PRESENT == 0 || l3e & PTE_HUGE != 0 { addr += page_size; continue; }
+
+        let l2e = *((phys_off + (l3e & PTE_ADDR_MASK)) as *const u64).add(l2i);
+        if l2e & PTE_PRESENT == 0 || l2e & PTE_HUGE != 0 { addr += page_size; continue; }
+
+        let l1_ptr = ((phys_off + (l2e & PTE_ADDR_MASK)) as *mut u64).add(l1i);
+        let mut pte = *l1_ptr;
+        if pte & PTE_PRESENT == 0 { addr += page_size; continue; }
+
+        // Update protection bits.  Preserve all other bits including CoW (bit 9).
+        if writable    { pte |=  PTE_WRITABLE; } else { pte &= !PTE_WRITABLE; }
+        // NO_EXECUTE is bit 63.
+        const PTE_NX: u64 = 1 << 63;
+        if !executable { pte |= PTE_NX; } else { pte &= !PTE_NX; }
+
+        *l1_ptr = pte;
+        core::arch::asm!("invlpg [{}]", in(reg) addr, options(nostack, preserves_flags));
+        addr += page_size;
+    }
+}
+
 /// Allocate physical frames and map them as user-accessible pages for ELF segments.
 ///
 /// `vaddr` must be page-aligned. `size` is rounded up to the next page boundary.
