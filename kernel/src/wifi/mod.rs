@@ -126,17 +126,23 @@ pub fn connect(ssid: &str, passphrase: &str) -> bool {
         ar9271::connect_open(slot, &ap)
     };
     if ok {
-        let mut state = WIFI_STATE.lock();
-        state.connected  = true;
-        state.current_ap = Some(ap.clone());
-        crate::klog!(INFO, "WiFi: associated to \"{}\"", ssid);
+        {
+            let mut state = WIFI_STATE.lock();
+            state.connected  = true;
+            state.current_ap = Some(ap.clone());
+        }
+        crate::klog!(INFO, "WiFi: associated to \"{}\" — running DHCP", ssid);
+        if !crate::net::dhcp_request_wifi(slot) {
+            crate::klog!(WARN, "WiFi: DHCP failed — interface has no IP");
+        }
     }
     ok
 }
 
 /// Return the WiFi interface IP (0.0.0.0 if not connected or no DHCP yet).
-pub fn get_ip()  -> [u8; 4] { *WIFI_IP.lock() }
-pub fn wifi_mac() -> [u8; 6] { *WIFI_MAC.lock() }
+pub fn get_ip()    -> [u8; 4]    { *WIFI_IP.lock() }
+pub fn wifi_mac()  -> [u8; 6]    { *WIFI_MAC.lock() }
+pub fn scan_cache() -> Vec<ApInfo> { WIFI_STATE.lock().scan_cache.clone() }
 
 /// Set WiFi IP after DHCP completes.
 pub fn set_ip(ip: [u8; 4]) { *WIFI_IP.lock() = ip; }
@@ -263,6 +269,13 @@ fn wifi_tx(slot: u8, eth_frame: alloc::vec::Vec<u8>, tk: &[u8; 16],
     tx.extend_from_slice(&ccmp_hdr);
     tx.extend_from_slice(&ciphertext);
     let _ = crate::usb::bulk_out(slot, 0x01, &tx);
+}
+
+/// Public thin wrapper for DHCP-over-WiFi (called from net::dhcp_request_wifi).
+pub fn wifi_tx_open_pub(slot: u8, eth_frame: alloc::vec::Vec<u8>) {
+    let bssid   = *WIFI_BSSID.lock();
+    let our_mac = *WIFI_MAC.lock();
+    wifi_tx_open(slot, eth_frame, &bssid, &our_mac);
 }
 
 /// Transmit an Ethernet frame over WiFi without encryption (pre-EAPOL / open network).

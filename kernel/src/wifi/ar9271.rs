@@ -410,6 +410,11 @@ pub fn connect_wpa2(slot: u8, ap: &ApInfo, passphrase: &str) -> bool {
     // Message 4: STA → AP: ACK
     send_eapol_msg4(slot, our_mac, ap.bssid, kck);
     crate::klog!(INFO, "WiFi: EAPOL msg4 sent — WPA2 handshake complete");
+
+    // Install TK so CCMP encrypt/decrypt in wifi::poll() / wifi_tx() works
+    let tk: &[u8; 16] = ptk[32..48].try_into().unwrap();
+    crate::wifi::set_tk(tk, &ap.bssid, &our_mac);
+    crate::klog!(INFO, "WiFi: CCMP TK installed");
     true
 }
 

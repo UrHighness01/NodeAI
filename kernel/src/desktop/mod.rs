@@ -2151,9 +2151,60 @@ unsafe fn draw_netmgr_overlay(f: &mut fb::Framebuffer) {
         y += 6;
     }
 
+    // ── Section: WiFi ────────────────────────────────────────────────────────
+    if y + FONT_H * 3 < h {
+        y += 4;
+        f.draw_str(x1, y, "WIFI", hdr, bg); y += FONT_H + 4;
+        f.fill_rect(x1, y, w - x1*2, 1, sep.0, sep.1, sep.2); y += 6;
+
+        let wifi_avail = crate::wifi::is_available();
+        let wifi_conn  = crate::wifi::is_connected();
+        let wifi_ip    = crate::wifi::get_ip();
+
+        if !wifi_avail {
+            f.draw_str(x1, y, "  No AR9271 adapter detected", dim, bg); y += FONT_H + 2;
+        } else if !wifi_conn {
+            f.draw_str(x1, y, "Status     :", dim, bg);
+            f.draw_str(x2, y, "Not connected", (0xFF, 0x88, 0x44), bg); y += FONT_H + 2;
+            // Show scan results if any
+            let aps = crate::wifi::scan_cache();
+            if aps.is_empty() {
+                f.draw_str(x1, y, "  Press W to scan for networks", dim, bg); y += FONT_H + 2;
+            } else {
+                f.draw_str(x1, y, "  SSID                           RSSI  CH  SEC", dim, bg);
+                y += FONT_H + 2;
+                for (i, ap) in aps.iter().take(6).enumerate() {
+                    if y + FONT_H > h { break; }
+                    let sec = if ap.secured { "WPA2" } else { "open" };
+                    f.draw_fmt(x1 + 8, y, fg, bg, format_args!(
+                        "[{}] {:<32} {:>4}  {:>2}  {}",
+                        i + 1, ap.ssid, ap.rssi, ap.channel, sec));
+                    y += FONT_H + 2;
+                }
+                f.draw_str(x1, y, "  Press C+<n> to connect to network #n", dim, bg);
+                y += FONT_H + 2;
+            }
+        } else {
+            let ssid = crate::wifi::ssid().unwrap_or_default();
+            f.draw_str(x1, y, "Status     :", dim, bg);
+            f.draw_str(x2, y, "Connected", (0x44, 0xFF, 0x88), bg); y += FONT_H + 2;
+            f.draw_str(x1, y, "Network    :", dim, bg);
+            f.draw_str(x2, y, &ssid, val, bg); y += FONT_H + 2;
+            f.draw_str(x1, y, "WiFi IP    :", dim, bg);
+            f.draw_fmt(x2, y, val, bg, format_args!("{}.{}.{}.{}",
+                wifi_ip[0], wifi_ip[1], wifi_ip[2], wifi_ip[3])); y += FONT_H + 2;
+            let wm = crate::wifi::wifi_mac();
+            f.draw_str(x1, y, "WiFi MAC   :", dim, bg);
+            f.draw_fmt(x2, y, val, bg, format_args!("{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+                wm[0], wm[1], wm[2], wm[3], wm[4], wm[5])); y += FONT_H + 2;
+        }
+        y += 4;
+    }
+
     // ── Ping button hint ──────────────────────────────────────────────────────
     if y + FONT_H < h {
-        f.draw_str(x1, y, "Press P to ping gateway  |  Press R to refresh", dim, bg);
+        f.draw_str(x1, y,
+            "P=ping gw  R=refresh  W=wifi scan  D=wifi disconnect", dim, bg);
     }
 }
 
@@ -2182,7 +2233,30 @@ fn netmgr_key(b: u8) {
             });
         }
         b'r' => {
-            // Refresh display
+            fb::with(|f| unsafe { draw_netmgr_overlay(f); });
+        }
+        b'w' => {
+            // WiFi scan
+            fb::with(|f| {
+                let bg = (0x0A, 0x10, 0x18);
+                let y  = f.height().saturating_sub(FONT_H * 2);
+                f.fill_rect(16, y, f.width() - 32, FONT_H, bg.0, bg.1, bg.2);
+                f.draw_str(16, y, "Scanning for WiFi networks...", (0xFF, 0xFF, 0x44), bg);
+            });
+            let count = crate::wifi::scan().len();
+            fb::with(|f| unsafe {
+                let bg = (0x0A, 0x10, 0x18);
+                let ok = (0x44, 0xFF, 0x88);
+                let y  = f.height().saturating_sub(FONT_H * 2);
+                f.fill_rect(16, y, f.width() - 32, FONT_H, bg.0, bg.1, bg.2);
+                let msg = alloc::format!("Found {} network(s) — press R to refresh list", count);
+                f.draw_str(16, y, &msg, ok, bg);
+                draw_netmgr_overlay(f);
+            });
+        }
+        b'd' => {
+            // WiFi disconnect
+            crate::wifi::disconnect();
             fb::with(|f| unsafe { draw_netmgr_overlay(f); });
         }
         _ => {}

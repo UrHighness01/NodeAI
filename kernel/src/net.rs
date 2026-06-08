@@ -818,6 +818,73 @@ pub fn dhcp_request() -> bool {
     true
 }
 
+/// DHCP on the WiFi interface (AR9271 USB dongle).
+/// Sends DISCOVER/REQUEST over the WiFi TX path and stores the acquired IP in
+/// `wifi::set_ip()` — leaves the VirtIO NIC's OUR_IP unchanged.
+pub fn dhcp_request_wifi(slot: u8) -> bool {
+    let our_mac = crate::wifi::wifi_mac();
+    if our_mac == [0u8; 6] {
+        crate::klog!(WARN, "DHCP-WiFi: no WiFi MAC — adapter not attached");
+        return false;
+    }
+
+    // Build and send DISCOVER over WiFi (unencrypted — pre-key exchange)
+    let discover = build_dhcp_msg(DHCP_DISCOVER, our_mac, None);
+    let udp = UdpDatagram::build(68, 67, &discover);
+    let ip_hdr = Ipv4Header::build(IP_PROTO_UDP, [0,0,0,0], [255,255,255,255], udp.len());
+    let mut pkt = ip_hdr;
+    pkt.extend_from_slice(&udp);
+    let frame = EthFrame::build([0xFF; 6], our_mac, ETHERTYPE_IPV4, &pkt);
+
+    *DHCP_REPLY.lock() = None;
+    DHCP_PENDING.store(true, Ordering::Release);
+    // Transmit via WiFi open path (no CCMP — DHCP runs before data keys installed)
+    crate::wifi::wifi_tx_open_pub(slot, frame);
+
+    // Wait for OFFER (up to 5 seconds) — poll WiFi RX directly
+    let deadline = crate::scheduler::uptime_ms() + 5000;
+    let offer = loop {
+        crate::wifi::poll();
+        if let Some(o) = DHCP_REPLY.lock().take() { break o; }
+        if crate::scheduler::uptime_ms() >= deadline {
+            DHCP_PENDING.store(false, Ordering::Release);
+            crate::klog!(WARN, "DHCP-WiFi: no OFFER received");
+            return false;
+        }
+        core::hint::spin_loop();
+    };
+
+    // Send REQUEST
+    let request = build_dhcp_msg(DHCP_REQUEST, our_mac, Some(offer.your_ip));
+    let udp = UdpDatagram::build(68, 67, &request);
+    let ip_hdr = Ipv4Header::build(IP_PROTO_UDP, [0,0,0,0], [255,255,255,255], udp.len());
+    let mut pkt = ip_hdr;
+    pkt.extend_from_slice(&udp);
+    let frame = EthFrame::build([0xFF; 6], our_mac, ETHERTYPE_IPV4, &pkt);
+
+    *DHCP_REPLY.lock() = None;
+    crate::wifi::wifi_tx_open_pub(slot, frame);
+
+    // Wait for ACK
+    let deadline = crate::scheduler::uptime_ms() + 5000;
+    let ack = loop {
+        crate::wifi::poll();
+        if let Some(a) = DHCP_REPLY.lock().take() { break a; }
+        if crate::scheduler::uptime_ms() >= deadline {
+            DHCP_PENDING.store(false, Ordering::Release);
+            crate::klog!(WARN, "DHCP-WiFi: no ACK received");
+            return false;
+        }
+        core::hint::spin_loop();
+    };
+    DHCP_PENDING.store(false, Ordering::Release);
+
+    crate::wifi::set_ip(ack.your_ip);
+    crate::klog!(INFO, "DHCP-WiFi: acquired {}.{}.{}.{} lease={}s",
+        ack.your_ip[0], ack.your_ip[1], ack.your_ip[2], ack.your_ip[3], ack.lease);
+    true
+}
+
 // ── Routing table ────────────────────────────────────────────────────────────
 
 /// Simple routing table entry.
