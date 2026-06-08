@@ -226,13 +226,12 @@ impl AhciPort {
         };
 
         // Command header slot 0
-        let ct_phys = va_to_pa(ct as *const _ as u64, self.phys_off);
         self.cmd_list[0] = CommandHeader {
             flags:  (core::mem::size_of::<FisRegH2D>() / 4) as u16,
             prdtl:  1,
             prdbc:  0,
-            ctba:   ct_phys as u32,
-            ctbau:  (ct_phys >> 32) as u32,
+            ctba:   self.cmd_table_pa as u32,
+            ctbau:  (self.cmd_table_pa >> 32) as u32,
             _res:   [0; 4],
         };
 
@@ -386,18 +385,12 @@ pub fn init(phys_offset: u64) {
                 // 0x00000101 = ATA drive, 0xEB140101 = ATAPI
                 if sig != 0x0000_0101 { continue; }
 
-                let cmd_list_box: Box<[CommandHeader; 32]> = Box::new(unsafe { core::mem::zeroed() });
-                let recv_fis_box: Box<RecvFis> = Box::new(RecvFis { data: [0; 256] });
-                let cmd_table_box: Box<CommandTable> = Box::new(unsafe { core::mem::zeroed() });
-                let cl_pa  = va_to_pa(cmd_list_box.as_ptr()  as u64, phys_offset);
-                let rf_pa  = va_to_pa(&*recv_fis_box          as *const RecvFis as u64, phys_offset);
-                let ct_pa  = va_to_pa(&*cmd_table_box         as *const CommandTable as u64, phys_offset);
-                let cmd_list = Box::new(unsafe { core::mem::zeroed() });
-                let recv_fis = Box::new(RecvFis { data: [0; 256] });
-                let cmd_table = Box::new(unsafe { core::mem::zeroed() });
-                let cmd_list_pa = va_to_pa(cmd_list.as_ptr() as u64, phys_offset);
-                let recv_fis_pa = va_to_pa(&*recv_fis as *const RecvFis as u64, phys_offset);
-                let cmd_table_pa = va_to_pa(cmd_table.as_ptr() as u64, phys_offset);
+                let cmd_list:     Box<[CommandHeader; 32]> = Box::new(unsafe { core::mem::zeroed() });
+                let recv_fis:     Box<RecvFis>             = Box::new(RecvFis { data: [0; 256] });
+                let cmd_table:    Box<CommandTable>        = Box::new(unsafe { core::mem::zeroed() });
+                let cmd_list_pa  = va_to_pa(cmd_list.as_ptr()   as u64, phys_offset);
+                let recv_fis_pa  = va_to_pa(&*recv_fis as *const RecvFis as u64, phys_offset);
+                let cmd_table_pa = va_to_pa(&*cmd_table as *const CommandTable as u64, phys_offset);
 
                 let mut port = AhciPort {
                     regs_base:    hba_va,
