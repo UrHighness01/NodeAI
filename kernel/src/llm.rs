@@ -70,7 +70,7 @@ fn load_model_bg() -> ! {
             }
         }
         Err(_) => {
-            crate::klog!(WARN, "llm: model not found at {}", MODEL_PATH);
+            crate::klog!(INFO, "llm: no model at {} — inference disabled", MODEL_PATH);
         }
     }
     // Background thread — loop forever yielding CPU.
