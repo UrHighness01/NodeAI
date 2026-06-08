@@ -272,6 +272,64 @@ unsafe fn ensure_table(
     Ok(new_phys)
 }
 
+/// Ensure intermediate page tables exist for `virt`.
+///
+/// `OffsetPageTable::map_to` (used by `map_page`) requires all intermediate
+/// tables (L3, L2, L1) to already exist — it returns `MapToError::NotMapped`
+/// if any are missing.  This is a problem for VAs outside the bootloader's
+/// pre-mapped physical memory window (e.g. APIC MMIO at L4 index 257 when
+/// the bootloader only maps L4[256]).
+///
+/// Walks the page table hierarchy through the phys_offset window, allocating
+/// and zeroing intermediate table frames for any missing entries.  Does NOT
+/// touch the leaf PTE — call `map_page` afterwards.
+fn ensure_page_table_path(virt: u64) -> Result<(), &'static str> {
+    let phys_off = unsafe { PHYS_OFFSET };
+    let cr3: u64;
+    unsafe { core::arch::asm!("mov {}, cr3", out(reg) cr3, options(nomem, nostack)); }
+    let l4_virt = (phys_off + (cr3 & !0xFFF)) as *mut u64;
+
+    let l4_idx = ((virt >> 39) & 0x1FF) as usize;
+    let l3_idx = ((virt >> 30) & 0x1FF) as usize;
+    let l2_idx = ((virt >> 21) & 0x1FF) as usize;
+
+    unsafe {
+        let l3_phys = ensure_child_table(l4_virt, l4_idx, phys_off)?;
+        let l3_virt = (phys_off + l3_phys) as *mut u64;
+        let l2_phys = ensure_child_table(l3_virt, l3_idx, phys_off)?;
+        let l2_virt = (phys_off + l2_phys) as *mut u64;
+        let _l1_phys = ensure_child_table(l2_virt, l2_idx, phys_off)?;
+    }
+    Ok(())
+}
+
+/// Helper: check `table[index]` — if it points to a child table return its
+/// physical address; if unused, allocate a zeroed frame, write PRESENT|WRITABLE
+/// into the entry, and return the new frame's physical address.
+///
+/// Fails if the entry is a huge page (caller should handle splitting separately).
+unsafe fn ensure_child_table(
+    table: *mut u64,
+    index: usize,
+    phys_off: u64,
+) -> Result<u64, &'static str> {
+    const PTE_PRESENT:   u64 = 1;
+    const PTE_HUGE:      u64 = 1 << 7;
+    const PTE_ADDR_MASK: u64 = 0x000F_FFFF_FFFF_F000;
+
+    let entry = *table.add(index);
+    if entry & PTE_PRESENT != 0 {
+        if entry & PTE_HUGE != 0 {
+            return Err("huge page in page table path — cannot split");
+        }
+        return Ok(entry & PTE_ADDR_MASK);
+    }
+    let new_phys = super::pmm::alloc_frame().ok_or("OOM creating page table frame")?;
+    core::ptr::write_bytes((phys_off + new_phys) as *mut u8, 0, 4096);
+    *table.add(index) = new_phys | 0x3; // PRESENT | WRITABLE
+    Ok(new_phys)
+}
+
 /// Map an MMIO physical region as write-through, no-cache, writable.
 ///
 /// The bootloader's `Mapping::Dynamic` already maps all physical memory
@@ -283,6 +341,10 @@ unsafe fn ensure_table(
 /// This function unmaps any existing PTE at `virt` first, then creates a
 /// fresh mapping with `NO_CACHE | WRITE_THROUGH` so that each APIC MMIO
 /// access hits the bus immediately.
+///
+/// It also ensures intermediate page tables exist before mapping, handling
+/// VAs that fall outside the bootloader's pre-mapped L4 entry (e.g. APIC
+/// MMIO at `phys_offset + 0xFEE00000` lives in L4[257], not L4[256]).
 pub fn map_mmio(phys: u64, virt: u64, size: u64) {
     use x86_64::structures::paging::PageTableFlags as F;
     let flags = F::PRESENT | F::WRITABLE | F::NO_CACHE | F::WRITE_THROUGH;
@@ -290,9 +352,10 @@ pub fn map_mmio(phys: u64, virt: u64, size: u64) {
     while addr < size {
         let page  = Page::containing_address(VirtAddr::new(virt + addr));
         let frame = PhysFrame::containing_address(PhysAddr::new(phys + addr));
-        // Bootloader already mapped this VA (phys mem window) — drop the
-        // existing PTE first so map_page can create a fresh one with MMIO
-        // caching flags instead of the default WB.
+        // Ensure intermediate page tables exist first — OffsetPageTable::map_to
+        // (called by map_page) requires them and returns NotMapped for VAs
+        // outside the bootloader's L4[256] physical-memory window.
+        let _ = ensure_page_table_path(virt + addr);
         let _ = unmap_page(page);
         let _ = map_page(page, frame, flags);
         addr += super::pmm::PAGE_SIZE;

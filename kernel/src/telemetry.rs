@@ -207,11 +207,12 @@ pub fn apply_proposal(key: &str, value: i64) {
 }
 
 /// Called every timer tick from the scheduler (fast, no allocation).
-/// Full VFS refresh happens only every ~1 s to amortise serialisation cost.
+/// Refresh telemetry VFS file once per second.
+/// Heavy procfs refresh (ai/fingerprints, transformer_sched etc.) is intentionally
+/// NOT called here — it runs from idle_loop's 5-second heartbeat to keep the
+/// 100ms tick path lightweight and lock-free.
 pub fn tick(uptime_ms: u64) {
-    // Refresh telemetry VFS file once per second
     if uptime_ms % 1000 < 10 {
         refresh_vfs();
-        crate::vfs::procfs::refresh(); // meminfo, syscall_stats, ai/status
     }
 }
