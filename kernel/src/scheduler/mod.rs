@@ -134,13 +134,20 @@ pub unsafe extern "C" fn schedule_from_interrupt(old_rsp: u64) -> u64 {
     // Step 3: compute AI-predicted quantum for the incoming task, then tick.
     // burst_estimate_us is maintained by ai_engine's SGD; 1 tick = 10 ms = 10_000 µs.
     // We peek at the *front* of the run queue to predict for the next task.
+    // Memory pressure scales down burst_ticks under Low/Medium/High/Critical
+    // conditions so allocation-heavy tasks get shorter quanta and shed pages faster.
+    let pressure_scale = crate::mem_pressure::current().burst_scale();
+
     let next_burst_ticks: Option<u32> = {
         let rq_guard  = runqueue::peek_front();
         let tasks_guard = TASKS.lock();
         rq_guard.and_then(|pid| {
             tasks_guard.get(&pid).map(|t| {
                 let us = t.ai_profile.burst_estimate_us;
-                if us == 0 { None } else { Some(((us / 10_000) as u32).max(1)) }
+                if us == 0 { None } else {
+                    let ticks = ((us / 10_000) as f32 * pressure_scale) as u32;
+                    Some(ticks.max(1))
+                }
             }).flatten()
         })
     };

@@ -70,6 +70,7 @@ pub mod tunables;       // live AI-adjustable kernel parameters
 pub mod fingerprint;    // behavioral cluster classifier
 pub mod causal;         // live causal process wakeup DAG
 pub mod transformer_sched; // transformer-based scheduling policy
+pub mod mem_pressure;      // memory pressure monitor + AI-aware reclaim
 
 /// Bootloader configuration — tells the bootloader to map all physical memory
 /// at a dynamic virtual offset so we can access physical frames by VA.
@@ -218,6 +219,7 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     predictive_hibernate::init();
     intent_config::init();
     auto_security::init();
+    mem_pressure::init();
     intel_storage::init();
     llm::init();
     klog!(INFO, "AI-parity features active (transformer, causal, anomaly)");
@@ -270,6 +272,7 @@ fn idle_loop() -> ! {
         crate::desktop::process_input_events();
         net::poll();
         wifi::poll();
+        mem_pressure::tick();
         net::http_server_poll();
         net::ssh_server_poll();
         crate::desktop::browser_fetch_tick();

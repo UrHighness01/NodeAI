@@ -23,6 +23,7 @@ pub fn init() {
     write_file("/proc", "syscall_stats",  crate::syscall_stats::format_summary());
     write_file("/proc", "sched_latency",  crate::scheduler::format_sched_latency());
     write_file("/proc", "epoll",          crate::syscall::format_epoll_table());
+    write_file("/proc", "mem_pressure",   crate::mem_pressure::format_status());
 
     // /ai
     write_file("/ai", "status",       ai_status());
@@ -49,6 +50,7 @@ pub fn refresh() {
     write_file("/proc", "syscall_stats",  crate::syscall_stats::format_summary());
     write_file("/proc", "sched_latency",  crate::scheduler::format_sched_latency());
     write_file("/proc", "epoll",          crate::syscall::format_epoll_table());
+    write_file("/proc", "mem_pressure",   crate::mem_pressure::format_status());
     write_file("/ai",   "anomalies",     crate::anomaly::format_report());
     write_file("/ai",   "tunables",      crate::tunables::format_table());
     write_file("/ai",   "status",        ai_status());

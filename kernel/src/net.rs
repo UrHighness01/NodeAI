@@ -1095,6 +1095,9 @@ impl<'a> UdpDatagram<'a> {
 pub static mut OUR_IP:  [u8; 4] = [10, 0, 2, 15];   // QEMU default
 pub static mut OUR_MAC: [u8; 6] = [0x52, 0x54, 0x00, 0x12, 0x34, 0x56];
 
+/// Safe read of the current local IPv4 address.
+pub fn our_ip() -> [u8; 4] { unsafe { OUR_IP } }
+
 /// Handle a received raw Ethernet frame.
 /// Returns an optional reply frame to transmit.
 pub fn handle_frame(raw: &[u8]) -> Option<Vec<u8>> {

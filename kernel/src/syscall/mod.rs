@@ -49,8 +49,10 @@ static FD_TABLE: Mutex<BTreeMap<FdKey, alloc::boxed::Box<dyn crate::vfs::FileHan
 static NEXT_FD:  Mutex<BTreeMap<u64, u64>> = Mutex::new(BTreeMap::new());
 /// Maps (pid, fd) → file path for AI readahead — populated by sys_open.
 static FD_PATH_TABLE: Mutex<BTreeMap<FdKey, alloc::string::String>> = Mutex::new(BTreeMap::new());
-/// Bound port for socket fds — separate from FD_TABLE to avoid trait-object downcast.
+/// Bound/local port for socket fds — separate from FD_TABLE to avoid trait-object downcast.
 static SOCKET_PORTS: Mutex<BTreeMap<FdKey, u16>> = Mutex::new(BTreeMap::new());
+/// Remote address (IP, port) for connected sockets — filled by sys_connect / sys_accept.
+static SOCKET_PEERNAME: Mutex<BTreeMap<FdKey, ([u8; 4], u16)>> = Mutex::new(BTreeMap::new());
 
 // ── Virtual Memory Areas ──────────────────────────────────────────────────────
 /// A lazily-mapped anonymous region created by sys_mmap.  Pages are allocated
@@ -2602,8 +2604,9 @@ unsafe fn sys_connect(sockfd: u64, addr_ptr: u64, alen: u64) -> i64 {
                 (pid, sockfd),
                 alloc::boxed::Box::new(ConnectedSocketHandle { local_port, remote_ip, remote_port }),
             );
-            // Record the port mapping so getpeername/getsockname can retrieve it.
+            // Record local port for getsockname, remote addr for getpeername.
             SOCKET_PORTS.lock().insert((pid, sockfd), local_port);
+            SOCKET_PEERNAME.lock().insert((pid, sockfd), (remote_ip, remote_port));
             crate::klog!(INFO, "TCP: connect pid={} fd={} → {}:{} ok (local:{})",
                 pid, sockfd, remote_ip[0], remote_port, local_port);
             0
@@ -2656,6 +2659,8 @@ unsafe fn sys_accept(sockfd: u64, _addr: u64, _alen: u64) -> i64 {
             };
             let new_fd = alloc_fd(pid);
             FD_TABLE.lock().insert((pid, new_fd), alloc::boxed::Box::new(conn));
+            SOCKET_PORTS.lock().insert((pid, new_fd), key.local_port);
+            SOCKET_PEERNAME.lock().insert((pid, new_fd), (key.remote_ip, key.remote_port));
             crate::klog!(INFO, "sys_accept: new conn fd={} port {}↔{}", new_fd, port, key.remote_port);
             new_fd as i64
         }
@@ -2665,24 +2670,44 @@ unsafe fn sys_accept(sockfd: u64, _addr: u64, _alen: u64) -> i64 {
 unsafe fn sys_sendto(s: u64, b: u64, l: u64, _f: u64, _a: u64, _al: u64) -> i64 { sys_write(s, b, l) }
 unsafe fn sys_recvfrom(s: u64, b: u64, l: u64, _f: u64, _a: u64, _al: u64) -> i64 { sys_read(s, b, l) }
 
-// getsockname / getpeername — return stub AF_INET 0.0.0.0:0 address
-unsafe fn sys_getsockname(_s: u64, addr_ptr: u64, addrlen_ptr: u64) -> i64 {
-    if addr_ptr == 0 { return EFAULT; }
-    // struct sockaddr_in: u16 family, u16 port, u32 addr, [8]pad
+/// Write a `struct sockaddr_in` (AF_INET, port_be, addr_be) into user memory.
+unsafe fn write_sockaddr_in(addr_ptr: u64, addrlen_ptr: u64, ip: [u8; 4], port: u16) -> i64 {
     const SA_LEN: u64 = 16;
-    if let Ok(p) = validate_user_ptr_mut(addr_ptr, SA_LEN) {
-        core::ptr::write_bytes(p, 0, SA_LEN as usize);
-        *(p as *mut u16) = 2u16.to_be(); // AF_INET in native byte order = 2
-        if addrlen_ptr != 0 {
-            if let Ok(lp) = validate_user_ptr_mut(addrlen_ptr, 4) {
-                *(lp as *mut u32) = SA_LEN as u32;
-            }
+    let p = match validate_user_ptr_mut(addr_ptr, SA_LEN) {
+        Ok(p)  => p,
+        Err(e) => return e,
+    };
+    core::ptr::write_bytes(p, 0, SA_LEN as usize);
+    core::ptr::write_unaligned(p as *mut u16, 2u16);             // AF_INET (LE 2)
+    core::ptr::write_unaligned(p.add(2) as *mut u16, port.to_be()); // port big-endian
+    core::ptr::write_unaligned(p.add(4) as *mut u32,             // addr big-endian
+        u32::from_be_bytes(ip));
+    if addrlen_ptr != 0 {
+        if let Ok(lp) = validate_user_ptr_mut(addrlen_ptr, 4) {
+            core::ptr::write_unaligned(lp as *mut u32, SA_LEN as u32);
         }
     }
     0
 }
+
+unsafe fn sys_getsockname(s: u64, addr_ptr: u64, addrlen_ptr: u64) -> i64 {
+    if addr_ptr == 0 { return EFAULT; }
+    let pid = crate::scheduler::current_pid();
+    let (ip, port) = match SOCKET_PORTS.lock().get(&(pid, s)).copied() {
+        Some(p) => (unsafe { crate::net::our_ip() }, p),
+        None    => ([0u8; 4], 0u16),
+    };
+    write_sockaddr_in(addr_ptr, addrlen_ptr, ip, port)
+}
+
 unsafe fn sys_getpeername(s: u64, addr_ptr: u64, addrlen_ptr: u64) -> i64 {
-    sys_getsockname(s, addr_ptr, addrlen_ptr)
+    if addr_ptr == 0 { return EFAULT; }
+    let pid = crate::scheduler::current_pid();
+    let (ip, port) = match SOCKET_PEERNAME.lock().get(&(pid, s)).copied() {
+        Some((ip, p)) => (ip, p),
+        None          => ([0u8; 4], 0u16),
+    };
+    write_sockaddr_in(addr_ptr, addrlen_ptr, ip, port)
 }
 
 const SO_REUSEADDR: u64 = 2;
