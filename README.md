@@ -119,4 +119,4 @@ The LLM loader reads `/var/lib/llm/model.bin` (NLLM format) at boot, parses weig
 
 ## License
 
-MIT OR Apache-2.0
+MIT
