@@ -326,12 +326,227 @@ pub fn connect_open(slot: u8, ap: &ApInfo) -> bool {
     wait_for_assoc_response(slot, &ap.bssid)
 }
 
-pub fn connect_wpa2(_slot: u8, ap: &ApInfo, _passphrase: &str) -> bool {
-    // Phase 4: WPA2-PSK (PBKDF2-SHA1 + 4-way EAPOL + CCMP/AES)
-    // Implementation pending — see WIFI_ROADMAP.md Phase 4
-    crate::klog!(WARN,
-        "WiFi: WPA2 not yet implemented for \"{}\" — use open network for now", ap.ssid);
+/// WPA2-PSK connection: open auth → association → 4-way EAPOL handshake.
+pub fn connect_wpa2(slot: u8, ap: &ApInfo, passphrase: &str) -> bool {
+    use super::crypto::{derive_pmk, derive_ptk, eapol_mic};
+
+    crate::klog!(INFO, "WiFi: WPA2 — deriving PMK (PBKDF2-SHA1, 4096 iter)...");
+    let pmk = derive_pmk(passphrase.as_bytes(), ap.ssid.as_bytes());
+    crate::klog!(INFO, "WiFi: PMK derived");
+
+    // Phase 1: open auth + assoc (same as open, but with RSN IE for WPA2)
+    let our_mac = unsafe { crate::net::OUR_MAC };
+    let mut auth = build_mgmt_header(FC_AUTH, our_mac, ap.bssid);
+    auth.extend_from_slice(&[0x00, 0x00, 0x01, 0x00, 0x00, 0x00]);
+    let _ = crate::usb::bulk_out(slot, 0x01, &auth);
+    if !wait_for_auth_response(slot, &ap.bssid) {
+        crate::klog!(WARN, "WiFi: WPA2 auth response timeout");
+        return false;
+    }
+
+    // Association request with RSN IE (WPA2-PSK, CCMP)
+    let mut assoc = build_mgmt_header(FC_ASSOC_REQ, our_mac, ap.bssid);
+    assoc.extend_from_slice(&[0x31, 0x04]); // capability: ESS+WEP-bit-for-WPA2
+    assoc.extend_from_slice(&[0x64, 0x00]); // listen interval
+    // SSID IE
+    assoc.push(IE_SSID); assoc.push(ap.ssid.len() as u8);
+    assoc.extend_from_slice(ap.ssid.as_bytes());
+    // Supported Rates IE
+    assoc.push(IE_RATES); assoc.push(4);
+    assoc.extend_from_slice(&[0x82, 0x84, 0x8B, 0x96]);
+    // RSN IE (tag=48): WPA2-PSK with CCMP
+    let rsn: &[u8] = &[
+        0x30, 0x14,             // tag=48, len=20
+        0x01, 0x00,             // version=1
+        0x00, 0x0F, 0xAC, 0x04, // group cipher: CCMP
+        0x01, 0x00,             // pairwise count=1
+        0x00, 0x0F, 0xAC, 0x04, // pairwise: CCMP
+        0x01, 0x00,             // AKM count=1
+        0x00, 0x0F, 0xAC, 0x02, // AKM: PSK
+        0x00, 0x00,             // RSN capabilities
+    ];
+    assoc.extend_from_slice(rsn);
+    let _ = crate::usb::bulk_out(slot, 0x01, &assoc);
+    if !wait_for_assoc_response(slot, &ap.bssid) {
+        crate::klog!(WARN, "WiFi: WPA2 assoc response timeout");
+        return false;
+    }
+
+    // Phase 2: 4-way EAPOL handshake
+    // Generate SNonce (random-ish using uptime + MAC)
+    let ts = crate::scheduler::uptime_ms();
+    let mut snonce = [0u8; 32];
+    for i in 0..8  { snonce[i]    = ((ts >> (i * 8)) & 0xFF) as u8; }
+    for i in 0..6  { snonce[8+i]  = our_mac[i]; }
+    for i in 0..6  { snonce[14+i] = ap.bssid[i]; }
+    for i in 20..32 { snonce[i] = (i as u8).wrapping_mul(0x37).wrapping_add(snonce[i-1]); }
+
+    // Message 1: AP → STA: ANonce + key info
+    let anonce = receive_eapol_msg1(slot, &ap.bssid, 3000);
+    let anonce = match anonce {
+        Some(n) => n,
+        None => { crate::klog!(WARN, "WiFi: EAPOL msg1 timeout"); return false; }
+    };
+    crate::klog!(INFO, "WiFi: EAPOL msg1 received (ANonce)");
+
+    // Derive PTK from PMK + ANonce + SNonce + AP MAC + STA MAC
+    let ptk = derive_ptk(&pmk, &anonce, &snonce, &ap.bssid, &our_mac);
+    let kck: &[u8; 16] = ptk[0..16].try_into().unwrap();
+    let _kek: &[u8; 16] = ptk[16..32].try_into().unwrap();
+    // TK = ptk[32..48] — used for CCMP (Phase 5)
+    crate::klog!(INFO, "WiFi: PTK derived (KCK+KEK+TK)");
+
+    // Message 2: STA → AP: SNonce + MIC
+    send_eapol_msg2(slot, our_mac, ap.bssid, &snonce, kck);
+    crate::klog!(INFO, "WiFi: EAPOL msg2 sent");
+
+    // Message 3: AP → STA: GTK (encrypted with KEK) + MIC
+    if !receive_eapol_msg3(slot, &ap.bssid, kck, 3000) {
+        crate::klog!(WARN, "WiFi: EAPOL msg3 failed MIC check");
+        return false;
+    }
+    crate::klog!(INFO, "WiFi: EAPOL msg3 verified");
+
+    // Message 4: STA → AP: ACK
+    send_eapol_msg4(slot, our_mac, ap.bssid, kck);
+    crate::klog!(INFO, "WiFi: EAPOL msg4 sent — WPA2 handshake complete");
+    true
+}
+
+// ── EAPOL frame helpers ───────────────────────────────────────────────────────
+
+const EAPOL_TYPE: u16 = 0x888E;
+const EAPOL_VERSION: u8 = 2;
+const EAPOL_KEY: u8 = 3;
+// Key Info bits
+const KEY_INFO_MIC:     u16 = 1 << 8;
+const KEY_INFO_ACK:     u16 = 1 << 7;
+const KEY_INFO_INSTALL: u16 = 1 << 6;
+const KEY_INFO_KEY_TYPE:u16 = 1 << 3; // 1=Pairwise
+const KEY_INFO_SECURE:  u16 = 1 << 9;
+const KEY_DESC_AES:     u8  = 2; // AES key descriptor
+
+/// Wait for EAPOL Message 1 (AP→STA: ANonce, Msg 1 has ACK bit set, no MIC).
+fn receive_eapol_msg1(slot: u8, ap_mac: &[u8; 6], timeout_ms: u64) -> Option<[u8; 32]> {
+    let deadline = crate::scheduler::uptime_ms() + timeout_ms;
+    while crate::scheduler::uptime_ms() < deadline {
+        let mut buf = [0u8; 256];
+        let n = crate::usb::bulk_in(slot, 0x81, &mut buf);
+        if n < 30 { core::hint::spin_loop(); continue; }
+        // AR9271 RX: skip 4-byte descriptor, then 802.11 data frame
+        let frame = &buf[4..n];
+        if let Some(eapol) = extract_eapol(frame, ap_mac) {
+            // EAPOL Key: [version(1), type(1)=3, len(2), desc(1), key_info(2), ...]
+            if eapol.len() < 95 { continue; }
+            let key_info = u16::from_be_bytes([eapol[5], eapol[6]]);
+            // Msg1: ACK=1, MIC=0
+            if key_info & KEY_INFO_ACK != 0 && key_info & KEY_INFO_MIC == 0 {
+                let mut anonce = [0u8; 32];
+                anonce.copy_from_slice(&eapol[17..49]);
+                return Some(anonce);
+            }
+        }
+    }
+    None
+}
+
+/// Build and send EAPOL Message 2 (STA→AP: SNonce + MIC).
+fn send_eapol_msg2(slot: u8, our_mac: [u8; 6], ap_mac: [u8; 6],
+                   snonce: &[u8; 32], kck: &[u8; 16]) {
+    use super::crypto::eapol_mic;
+    // Build EAPOL key frame (95 bytes minimum)
+    let key_info: u16 = KEY_INFO_MIC | KEY_INFO_KEY_TYPE; // Pairwise, MIC set
+    let mut eapol = [0u8; 99]; // header+body
+    eapol[0] = EAPOL_VERSION;
+    eapol[1] = EAPOL_KEY;
+    eapol[2] = 0x00; eapol[3] = 0x5F; // length = 95
+    eapol[4] = KEY_DESC_AES;
+    eapol[5..7].copy_from_slice(&key_info.to_be_bytes());
+    eapol[7] = 0x00; eapol[8] = 0x10; // key length = 16 (AES)
+    // Replay counter: bytes 9..17 = 0 (msg 1's counter)
+    // SNonce: bytes 17..49
+    eapol[17..49].copy_from_slice(snonce);
+    // MIC at bytes 77..93 (16 bytes) — compute over zeroed MIC field
+    let mic = eapol_mic(kck, &eapol[..99]);
+    eapol[77..93].copy_from_slice(&mic);
+
+    // Wrap in 802.11 data frame + LLC/SNAP + EtherType 0x888E
+    let frame = build_data_frame(our_mac, ap_mac, EAPOL_TYPE, &eapol);
+    let _ = crate::usb::bulk_out(slot, 0x01, &frame);
+}
+
+/// Verify EAPOL Message 3 MIC and extract GTK.
+fn receive_eapol_msg3(slot: u8, ap_mac: &[u8; 6], kck: &[u8; 16], timeout_ms: u64) -> bool {
+    use super::crypto::eapol_mic;
+    let deadline = crate::scheduler::uptime_ms() + timeout_ms;
+    while crate::scheduler::uptime_ms() < deadline {
+        let mut buf = [0u8; 512];
+        let n = crate::usb::bulk_in(slot, 0x81, &mut buf);
+        if n < 30 { core::hint::spin_loop(); continue; }
+        let frame = &buf[4..n];
+        if let Some(eapol) = extract_eapol(frame, ap_mac) {
+            if eapol.len() < 95 { continue; }
+            let key_info = u16::from_be_bytes([eapol[5], eapol[6]]);
+            // Msg3: ACK=1, MIC=1, Install=1
+            if key_info & (KEY_INFO_ACK | KEY_INFO_MIC | KEY_INFO_INSTALL) ==
+               (KEY_INFO_ACK | KEY_INFO_MIC | KEY_INFO_INSTALL) {
+                // Verify MIC: zero out MIC field, compute, compare
+                let mut frame_copy = eapol.to_vec();
+                for b in frame_copy[77..93].iter_mut() { *b = 0; }
+                let expected_mic = eapol_mic(kck, &frame_copy);
+                if expected_mic == eapol[77..93] { return true; }
+            }
+        }
+    }
     false
+}
+
+/// Send EAPOL Message 4 (STA→AP: acknowledge GTK install).
+fn send_eapol_msg4(slot: u8, our_mac: [u8; 6], ap_mac: [u8; 6], kck: &[u8; 16]) {
+    use super::crypto::eapol_mic;
+    let key_info: u16 = KEY_INFO_MIC | KEY_INFO_KEY_TYPE | KEY_INFO_SECURE;
+    let mut eapol = [0u8; 99];
+    eapol[0] = EAPOL_VERSION;
+    eapol[1] = EAPOL_KEY;
+    eapol[2] = 0x00; eapol[3] = 0x5F;
+    eapol[4] = KEY_DESC_AES;
+    eapol[5..7].copy_from_slice(&key_info.to_be_bytes());
+    let mic = eapol_mic(kck, &eapol[..99]);
+    eapol[77..93].copy_from_slice(&mic);
+    let frame = build_data_frame(our_mac, ap_mac, EAPOL_TYPE, &eapol);
+    let _ = crate::usb::bulk_out(slot, 0x01, &frame);
+}
+
+/// Extract EAPOL payload from an 802.11 data frame (skips 802.11 hdr + LLC/SNAP).
+fn extract_eapol<'a>(frame: &'a [u8], expected_src: &[u8; 6]) -> Option<&'a [u8]> {
+    if frame.len() < 36 { return None; }
+    let fc = u16::from_le_bytes([frame[0], frame[1]]);
+    // Data frame: type bits 2-3 = 10, subtype 0 = 0000
+    if fc & 0x000C != 0x0008 { return None; }
+    // Source MAC (addr2) at offset 10
+    if &frame[10..16] != expected_src.as_ref() { return None; }
+    // 802.11 header = 24 bytes, LLC/SNAP = 8 bytes → payload at offset 32
+    if frame.len() < 34 { return None; }
+    let ethertype = u16::from_be_bytes([frame[30], frame[31]]);
+    if ethertype != EAPOL_TYPE { return None; }
+    Some(&frame[32..])
+}
+
+/// Build an 802.11 data frame with LLC/SNAP header for the given EtherType.
+fn build_data_frame(src: [u8; 6], dst: [u8; 6], ethertype: u16, payload: &[u8]) -> alloc::vec::Vec<u8> {
+    let mut f = alloc::vec::Vec::new();
+    // 802.11 Data frame header (24 bytes)
+    f.extend_from_slice(&[0x08, 0x01]); // FC: Data, ToDS
+    f.extend_from_slice(&[0x00, 0x00]); // duration
+    f.extend_from_slice(&dst);          // BSSID (addr1)
+    f.extend_from_slice(&src);          // SA (addr2)
+    f.extend_from_slice(&dst);          // DA (addr3)
+    f.extend_from_slice(&[0x00, 0x00]); // sequence
+    // LLC/SNAP (8 bytes): DSAP=AA, SSAP=AA, ctrl=03, OUI=000000, EtherType
+    f.extend_from_slice(&[0xAA, 0xAA, 0x03, 0x00, 0x00, 0x00]);
+    f.extend_from_slice(&ethertype.to_be_bytes());
+    f.extend_from_slice(payload);
+    f
 }
 
 // ── Management frame helpers ──────────────────────────────────────────────────

@@ -9,6 +9,7 @@
 //! Reference: Linux drivers/net/wireless/ath/ath9k/htc_drv_*.c
 
 pub mod ar9271;
+pub mod crypto;
 
 use alloc::{vec::Vec, string::String};
 use spin::Mutex;

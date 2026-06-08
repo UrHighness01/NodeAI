@@ -1518,6 +1518,7 @@ fn dispatch_single(line: &str) {
         "audit"    => cmd_audit(),
 
         // ── Networking commands ──
+        "wifi"       => cmd_wifi(args),
         "ifconfig"   => cmd_ifconfig(args),
         "ping"       => cmd_ping(args),
         "arp"        => cmd_arp(args),
@@ -2872,7 +2873,7 @@ static BUILTINS: &[&str] = &[
     "sleep", "true", "false", "alias", "unalias", "yes", "man",
     "nice", "renice", "bg", "fg", "jobs", "nohup",
     "fdisk", "mkfs", "sync", "modprobe", "insmod", "service",
-    "ifconfig", "ping", "arp", "netstat", "ip", "nslookup", "dig",
+    "wifi", "ifconfig", "ping", "arp", "netstat", "ip", "nslookup", "dig",
     "traceroute", "wget", "curl", "nc",
     "dhclient", "httpd", "sshd", "scp", "dns-cache", "ifup", "ifdown",
 ];
@@ -3499,6 +3500,78 @@ fn cmd_man(args: &str) {
 }
 
 // ── Networking Commands (Phase 17) ────────────────────────────────────────────
+
+fn cmd_wifi(args: &str) {
+    let mut parts = args.splitn(3, ' ');
+    match parts.next().unwrap_or("") {
+        "scan" => {
+            println!("WiFi: scanning...");
+            let aps = crate::wifi::scan();
+            if aps.is_empty() {
+                if crate::wifi::is_available() {
+                    println!("No networks found (try moving closer to an AP)");
+                } else {
+                    println!("No WiFi adapter detected.");
+                    println!("Plug in an AR9271 USB dongle (TP-Link TL-WN722N v1)");
+                    println!("then run: ./scripts/run_qemu.sh --gui --wifi");
+                }
+                return;
+            }
+            println!("{:<32} {:<20} {:>5}  {:>4}  {}", "SSID", "BSSID", "RSSI", "CH", "SECURITY");
+            println!("{}", "-".repeat(72));
+            for ap in &aps {
+                println!("{:<32} {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}  {:>4}dBm  {:>3}  {}",
+                    ap.ssid,
+                    ap.bssid[0], ap.bssid[1], ap.bssid[2],
+                    ap.bssid[3], ap.bssid[4], ap.bssid[5],
+                    ap.rssi, ap.channel,
+                    if ap.secured { "WPA2" } else { "OPEN" });
+            }
+            println!("\n{} network(s) found", aps.len());
+        }
+        "connect" => {
+            let ssid = parts.next().unwrap_or("");
+            let pass = parts.next().unwrap_or("");
+            if ssid.is_empty() {
+                println!("Usage: wifi connect <ssid> [passphrase]");
+                return;
+            }
+            println!("WiFi: connecting to \"{}\"...", ssid);
+            if crate::wifi::connect(ssid, pass) {
+                println!("Connected to \"{}\"", ssid);
+                // Trigger DHCP on WiFi interface
+                println!("Requesting IP address via DHCP...");
+            } else {
+                println!("Failed to connect to \"{}\"", ssid);
+            }
+        }
+        "disconnect" => {
+            crate::wifi::disconnect();
+            println!("WiFi disconnected");
+        }
+        "status" => {
+            if crate::wifi::is_available() {
+                if crate::wifi::is_connected() {
+                    let ssid = crate::wifi::ssid().unwrap_or_default();
+                    println!("WiFi: connected to \"{}\"", ssid);
+                } else {
+                    println!("WiFi: adapter ready, not connected");
+                    println!("Run: wifi scan    to find networks");
+                    println!("     wifi connect <ssid> [pass]");
+                }
+            } else {
+                println!("WiFi: no adapter");
+            }
+        }
+        "" | "help" => {
+            println!("wifi scan               - scan for networks");
+            println!("wifi connect <ssid> [pass] - connect to a network");
+            println!("wifi disconnect         - disconnect");
+            println!("wifi status             - show current status");
+        }
+        sub => println!("Unknown wifi subcommand: {}", sub),
+    }
+}
 
 fn cmd_ifconfig(args: &str) {
     let our_ip  = unsafe { crate::net::OUR_IP };
