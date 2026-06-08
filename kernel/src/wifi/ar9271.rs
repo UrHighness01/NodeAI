@@ -123,22 +123,63 @@ fn load_firmware_bytes(slot: u8, fw: &[u8]) -> bool {
     true
 }
 
+// ── HTC/WMI framing ──────────────────────────────────────────────────────────
+// AR9271 firmware uses the HTC (Host Target Communications) protocol over USB.
+// Reference: Linux drivers/net/wireless/ath/ath9k/htc_hst.h
+//
+// HTC header (6 bytes, big-endian):
+//   endpoint_id(1) | flags(1) | payload_len(2 BE) | reserved(2)
+// WMI header (6 bytes, big-endian):
+//   cmd_id(2 BE) | seq_no(2 BE) | flags(2)
+// Payload: command-specific bytes
+//
+// AR9271 WMI endpoint: 2 (established after firmware boot + service connect)
+// AR9271 WMI command IDs (from htc_drv_cmd.h / ath9k_htc.h):
+const WMI_CMD_READ_REG:   u16 = 0x0009;
+const WMI_CMD_WRITE_REG:  u16 = 0x000A;
+const WMI_CMD_SET_CHANNEL:u16 = 0x0028;
+const HTC_ENDPOINT_WMI:   u8  = 2;
+
+static WMI_SEQ: core::sync::atomic::AtomicU16 = core::sync::atomic::AtomicU16::new(1);
+
+/// Build a complete HTC/WMI frame ready for USB bulk_out.
+fn htc_wmi_frame(cmd_id: u16, payload: &[u8]) -> Vec<u8> {
+    let seq = WMI_SEQ.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    let wmi_payload_len = 6 + payload.len(); // WMI header (6) + payload
+    let mut frame = Vec::with_capacity(6 + wmi_payload_len);
+
+    // HTC header (6 bytes)
+    frame.push(HTC_ENDPOINT_WMI);                          // endpoint
+    frame.push(0x00);                                       // flags
+    frame.push((wmi_payload_len >> 8) as u8);              // payload_len hi
+    frame.push((wmi_payload_len & 0xFF) as u8);            // payload_len lo
+    frame.push(0x00); frame.push(0x00);                    // reserved
+
+    // WMI header (6 bytes)
+    frame.push((cmd_id >> 8) as u8); frame.push((cmd_id & 0xFF) as u8);
+    frame.push((seq >> 8) as u8);    frame.push((seq & 0xFF) as u8);
+    frame.push(0x00); frame.push(0x00);                    // WMI flags
+
+    frame.extend_from_slice(payload);
+    frame
+}
+
 // ── Register access via WMI ───────────────────────────────────────────────────
 
-/// Read a 32-bit register from AR9271 via WMI over USB bulk.
+/// Read a 32-bit register from AR9271 via WMI over USB bulk (with HTC framing).
 fn read_reg(slot: u8, addr: u32) -> u32 {
-    // WMI READ command: [cmd_id(2), seq(2), addr(4)]
-    let cmd: [u8; 8] = [
-        0x00, 0x09,                          // WMI_READ_REG = 9
-        0x00, 0x01,                          // sequence number
+    let payload = [
         (addr & 0xFF) as u8, ((addr >> 8) & 0xFF) as u8,
         ((addr >> 16) & 0xFF) as u8, ((addr >> 24) & 0xFF) as u8,
     ];
-    let _ = crate::usb::bulk_out(slot, 0x01, &cmd);
-    let mut resp = [0u8; 8];
+    let frame = htc_wmi_frame(WMI_CMD_READ_REG, &payload);
+    let _ = crate::usb::bulk_out(slot, 0x01, &frame);
+
+    // Response: HTC header (6) + WMI header (6) + [seq(4), val(4)] = 20 bytes
+    let mut resp = [0u8; 20];
     let n = crate::usb::bulk_in(slot, 0x81, &mut resp);
-    if n >= 8 {
-        u32::from_le_bytes([resp[4], resp[5], resp[6], resp[7]])
+    if n >= 16 {
+        u32::from_le_bytes([resp[12], resp[13], resp[14], resp[15]])
     } else {
         0
     }
@@ -271,19 +312,19 @@ pub fn scan_networks(slot: u8) -> Vec<ApInfo> {
     aps
 }
 
-/// Set radio channel via WMI command.
+/// Set radio channel via WMI_SET_CHANNEL (with full HTC/WMI framing).
+/// AR9271 WMI_SET_CHANNEL payload from htc_drv_cmd.h:
+///   freq(2 BE) | channel_mode(1) | channel(1)
 fn set_channel(slot: u8, channel: u8) {
-    // WMI SET_CHANNEL (simplified — real implementation sends full HTC/WMI frame)
-    // cmd_id=0x000F (WMI_SET_CHANNEL), channel frequency in MHz
-    let freq: u16 = 2407 + (channel as u16) * 5; // 2.4GHz: 2412MHz = ch1
-    let cmd: [u8; 8] = [
-        0x00, 0x0F,                          // WMI_SET_CHANNEL
-        0x00, 0x01,                          // sequence
-        (freq & 0xFF) as u8, (freq >> 8) as u8,
-        channel, 0x00,
+    let freq: u16 = 2407 + (channel as u16) * 5; // 2.4GHz: ch1=2412MHz
+    let payload = [
+        (freq >> 8) as u8, (freq & 0xFF) as u8, // freq big-endian
+        0x00,   // channel mode: 0=auto
+        channel,
     ];
-    let _ = crate::usb::bulk_out(slot, 0x01, &cmd);
-    // Short dwell time
+    let frame = htc_wmi_frame(WMI_CMD_SET_CHANNEL, &payload);
+    let _ = crate::usb::bulk_out(slot, 0x01, &frame);
+    // Dwell 10ms for radio to settle on new channel
     let t0 = crate::scheduler::uptime_ms();
     while crate::scheduler::uptime_ms().wrapping_sub(t0) < 10 {
         core::hint::spin_loop();
