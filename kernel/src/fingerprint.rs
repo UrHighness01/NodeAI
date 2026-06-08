@@ -86,7 +86,8 @@ impl FingerprintModel {
     }
 
     /// Assign a normalized histogram to its nearest centroid (cosine similarity).
-    fn classify(&self, norm_hist: &[f32]) -> usize {
+    /// Returns (cluster_id, best_cosine_score). Score in [0,1] — higher = more confident.
+    fn classify(&self, norm_hist: &[f32]) -> (usize, f32) {
         let mut best_cluster = 0;
         let mut best_score   = f32::NEG_INFINITY;
         for c in 0..N_CLUSTERS {
@@ -95,7 +96,7 @@ impl FingerprintModel {
                 .map(|(h, w)| h * w).sum();
             if score > best_score { best_score = score; best_cluster = c; }
         }
-        best_cluster
+        (best_cluster, best_score.max(0.0))
     }
 
     /// Online centroid update: move centroid toward `norm_hist` (k-means style).
@@ -144,9 +145,9 @@ pub fn init() {
     *MODEL.lock() = Some(FingerprintModel::new());
 }
 
-/// Classify a task and return its cluster ID + scheduling profile.
+/// Classify a task and return its cluster ID, scheduling profile, and cosine confidence.
 /// Called by the scheduler on descheduling to get the AI-suggested priority.
-pub fn classify_task(pid: u64) -> Option<(usize, ClusterProfile)> {
+pub fn classify_task(pid: u64) -> Option<(usize, ClusterProfile, f32)> {
     let hist_raw = {
         let map = crate::syscall_stats::STATS.lock();
         map.get(&pid)?.iter().copied().collect::<Vec<u32>>()
@@ -155,9 +156,9 @@ pub fn classify_task(pid: u64) -> Option<(usize, ClusterProfile)> {
     let norm = FingerprintModel::normalize(&hist_raw);
     let mut guard = MODEL.lock();
     let model = guard.as_mut()?;
-    let cluster = model.classify(&norm);
+    let (cluster, cosine_score) = model.classify(&norm);
     model.update_centroid(cluster, &norm);
-    Some((cluster, model.profiles[cluster]))
+    Some((cluster, model.profiles[cluster], cosine_score))
 }
 
 /// Called when a process declares intent — pins its cluster's label.
@@ -172,7 +173,7 @@ pub fn label_from_intent(pid: u64, intent: u8) {
     let norm = FingerprintModel::normalize(&hist_raw);
     let mut guard = MODEL.lock();
     if let Some(model) = guard.as_mut() {
-        let cluster = model.classify(&norm);
+        let (cluster, _) = model.classify(&norm);
         model.label_cluster(cluster, intent);
         crate::klog!(INFO, "Fingerprint: pid={} intent={} → cluster={}", pid, intent, cluster);
     }

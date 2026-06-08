@@ -709,7 +709,7 @@ unsafe fn sys_read(fd: u64, buf_ptr: u64, len: u64) -> i64 {
                     // Syscall readahead: if this task is in an I/O-heavy cluster,
                     // tell intel_storage to prefetch the next window of this file.
                     // Zero-latency: queued for the next storage tick, not blocking.
-                    if let Some((_, profile)) = crate::fingerprint::classify_task(pid) {
+                    if let Some((_, profile, _)) = crate::fingerprint::classify_task(pid) {
                         if profile.prefault_pages > 0 {
                             if let Some(path) = FD_PATH_TABLE.lock().get(&(pid, fd)).cloned() {
                                 crate::intel_storage::readahead_for_cluster(
@@ -798,7 +798,7 @@ unsafe fn sys_ai_query(query_type: u64, arg: u64) -> i64 {
         3 => {
             let pid = crate::scheduler::current_pid();
             match crate::fingerprint::classify_task(pid) {
-                Some((cluster, profile)) => {
+                Some((cluster, profile, _)) => {
                     // Pack: [31:16] = cluster id, [15:8] = nice_adjust as u8, [7:0] = label
                     ((cluster as i64) << 16)
                         | (((profile.nice_adjust as u8) as i64) << 8)
@@ -1011,7 +1011,7 @@ unsafe fn sys_mmap(addr: u64, len: u64, prot: u64, flags: u64, _fd: i64, _offset
             // range. This eliminates page-fault latency on first access for
             // I/O-heavy and batch workloads.
             let pid = crate::scheduler::current_pid();
-            if let Some((_, profile)) = crate::fingerprint::classify_task(pid) {
+            if let Some((_, profile, _)) = crate::fingerprint::classify_task(pid) {
                 let extra = profile.prefault_pages as u64;
                 if extra > 0 {
                     let prefault_base  = vaddr + len_aligned;

@@ -88,7 +88,7 @@ pub unsafe extern "C" fn schedule_from_interrupt(old_rsp: u64) -> u64 {
     // Step 2a: fingerprint + transformer update + causal producer boost.
     if let Some(pid) = old_pid {
         // Fingerprint cluster update.
-        if let Some((_, fp_profile)) = crate::fingerprint::classify_task(pid) {
+        if let Some((_, fp_profile, _fp_conf)) = crate::fingerprint::classify_task(pid) {
             let mut tasks = TASKS.lock();
             if let Some(task) = tasks.get_mut(&pid) {
                 if task.intent == 0 {
@@ -97,21 +97,6 @@ pub unsafe extern "C" fn schedule_from_interrupt(old_rsp: u64) -> u64 {
             }
         }
 
-        // Predictive causal reprioritization: if this task is a habitual producer
-        // (wakes some other task with probability ≥ 0.5), temporarily boost its
-        // nice by -5 so it finishes its data production before the consumer runs.
-        // This cuts pipeline stall latency: the consumer wakes to data already ready.
-        if let Some((_next_wakee, prob)) = crate::causal::predict_next_wake(pid) {
-            if prob >= 0.5 {
-                let mut tasks = TASKS.lock();
-                if let Some(task) = tasks.get_mut(&pid) {
-                    task.ai_nice_adjust = task.ai_nice_adjust.saturating_sub(5);
-                    crate::klog!(TRACE,
-                        "CausalBoost: pid={} producer prob={:.2} nice→{}",
-                        pid, prob, task.ai_nice_adjust);
-                }
-            }
-        }
         // Transformer SGD feedback: compare previous prediction to what actually happened.
         let (actual_nice, actual_burst, actual_pf) = {
             let tasks = TASKS.lock();
@@ -169,12 +154,43 @@ pub unsafe extern "C" fn schedule_from_interrupt(old_rsp: u64) -> u64 {
         }
     }
 
-    // Step 3c: run transformer prediction for the incoming task and blend with
-    // fingerprint profile. Transformer sees the syscall *sequence* (temporal
-    // pattern); fingerprint sees the *histogram* (frequency distribution).
-    // We take the transformer's burst_ticks over the global quantum if it's
-    // confident (i.e. the task has filled its context window — ≥16 syscalls).
+    // Step 3c: confidence-weighted blend of three AI signals.
+    //
+    // Three sources of scheduling intelligence:
+    //   - Transformer (sequence model): nice_delta, burst_ticks. Confidence =
+    //     1 - attention_entropy (peaked attention = confident).
+    //   - Fingerprint (histogram k-means): nice_adjust. Confidence = cosine_score.
+    //   - Causal graph (producer probability): -5 nice bonus. Confidence = prob.
+    //
+    // Final nice = sum_i(weight_i * nice_i) where weight_i = conf_i² / sum_j(conf_j²).
+    // When one source is very confident, it dominates. When all are uncertain, they
+    // average. This prevents random-init transformer from polluting good fingerprint
+    // decisions during cold start.
     let transformer_decision = crate::transformer_sched::predict(next_pid);
+
+    let (tf_nice, tf_conf) = transformer_decision
+        .map(|td| (td.nice_delta as f32, 1.0 - td.attention_entropy))
+        .unwrap_or((0.0, 0.0));
+
+    let (fp_nice, fp_conf) = crate::fingerprint::classify_task(next_pid)
+        .map(|(_, prof, cs)| (prof.nice_adjust as f32, cs))
+        .unwrap_or((0.0, 0.0));
+
+    let (causal_nice, causal_conf) = crate::causal::predict_next_wake(next_pid)
+        .map(|(_, prob)| if prob >= 0.5 { (-5.0f32, prob) } else { (0.0, 0.0) })
+        .unwrap_or((0.0, 0.0));
+
+    let blended_nice: f32 = {
+        let w_tf     = tf_conf     * tf_conf;
+        let w_fp     = fp_conf     * fp_conf;
+        let w_causal = causal_conf * causal_conf;
+        let total    = w_tf + w_fp + w_causal;
+        if total > 1e-6 {
+            (w_tf * tf_nice + w_fp * fp_nice + w_causal * causal_nice) / total
+        } else {
+            0.0
+        }
+    };
 
     // Step 4: set up the incoming task and return its kernel RSP.
     crate::klog!(TRACE, "Scheduler: {:?} → {}", old_pid, next_pid);
@@ -191,13 +207,13 @@ pub unsafe extern "C" fn schedule_from_interrupt(old_rsp: u64) -> u64 {
                 t.ai_profile.ticks_run += 1;
                 t.state = task::TaskState::Running;
 
-                // Apply transformer scheduling decision (blended with cluster profile).
+                // Apply confidence-weighted blend of all three AI signals.
+                if t.intent == 0 {
+                    t.ai_nice_adjust = blended_nice.clamp(-20.0, 20.0) as i8;
+                }
+                // Use transformer's burst_ticks if it has a confident prediction.
                 if let Some(td) = transformer_decision {
-                    if t.intent == 0 {
-                        let blended = ((td.nice_delta as i16 + t.ai_nice_adjust as i16) / 2) as i8;
-                        t.ai_nice_adjust = blended;
-                    }
-                    let _ = td.burst_ticks;
+                    let _ = td.burst_ticks; // picked up by next_burst_ticks path above
                 }
 
                 // Feed actual scheduling latency back to transformer as 4th target.
