@@ -8,7 +8,7 @@
 //!   /ai/status        — AI subsystem health (audit count, model flags)
 //!   /ai/suggestions   — placeholder ring buffer (populated by AI engine)
 
-use alloc::{format, vec::Vec};
+use alloc::{format, sync::Arc, vec::Vec};
 use super::{lookup, VfsNode};
 
 // ── Public entry point ────────────────────────────────────────────────────────
@@ -32,6 +32,13 @@ pub fn init() {
     write_file("/ai", "fingerprints",  crate::fingerprint::format_report());
     write_file("/ai", "causal_graph",      crate::causal::format_report());
     write_file("/ai", "transformer_sched", crate::transformer_sched::format_report());
+
+    // Mount ProcRootNode over /proc so that /proc/<pid>/ and /proc/self/
+    // resolve dynamically without pre-creating ramfs entries.
+    if let Ok(proc_inner) = lookup("/proc") {
+        let dynamic_proc = Arc::new(super::proc_pid::ProcRootNode { inner: proc_inner });
+        super::mount("/proc", dynamic_proc as Arc<dyn VfsNode>);
+    }
 
     crate::klog!(INFO, "procfs: /proc and /ai populated");
 }

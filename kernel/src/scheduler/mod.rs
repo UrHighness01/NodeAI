@@ -328,6 +328,47 @@ pub fn task_count() -> usize {
     TASKS.lock().len()
 }
 
+/// Snapshot of per-task data used by /proc/<pid>/.
+pub struct TaskInfo {
+    pub name:         alloc::string::String,
+    pub state_char:   char,
+    pub parent_pid:   Pid,
+    pub thread_count: u32,
+    pub vm_pages:     u64,
+}
+
+/// Return a TaskInfo snapshot for `pid`, or None if the task doesn't exist.
+pub fn task_info(pid: Pid) -> Option<TaskInfo> {
+    let tasks = TASKS.lock();
+    let t = tasks.get(&pid)?;
+    Some(TaskInfo {
+        name:         t.name.clone(),
+        state_char:   match t.state {
+            TaskState::Runnable => 'R',
+            TaskState::Sleeping => 'S',
+            TaskState::Zombie   => 'Z',
+            _                   => 'S',
+        },
+        parent_pid:   t.parent_pid,
+        thread_count: 1,
+        vm_pages:     0, // page accounting not tracked per-task yet
+    })
+}
+
+/// Return all live (non-zombie) PIDs.
+pub fn list_pids() -> alloc::vec::Vec<Pid> {
+    let tasks = TASKS.lock();
+    tasks.iter()
+        .filter(|(_, t)| t.state != TaskState::Zombie)
+        .map(|(&pid, _)| pid)
+        .collect()
+}
+
+/// Return true if `pid` is a live task.
+pub fn pid_exists(pid: Pid) -> bool {
+    TASKS.lock().contains_key(&pid)
+}
+
 /// Terminate task `pid` with `code` — marks zombie, wakes parent, removes from queue.
 /// If `pid` is the current task, halts; otherwise returns normally.
 pub fn exit_current_direct(pid: Pid, code: i32) -> ! {

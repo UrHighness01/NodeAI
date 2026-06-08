@@ -93,6 +93,16 @@ pub fn cleanup_pid_fds(pid: u64) {
     SOCKET_PORTS.lock().retain(|&(p, _), _| p != pid);
 }
 
+/// Return the list of open fd numbers for a given PID (used by /proc/<pid>/fd/).
+pub fn list_pid_fds(pid: u64) -> alloc::vec::Vec<u64> {
+    FD_TABLE.lock().keys().filter_map(|&(p, fd)| if p == pid { Some(fd) } else { None }).collect()
+}
+
+/// Return the filesystem path for (pid, fd), if known.
+pub fn fd_path(pid: u64, fd: u64) -> Option<alloc::string::String> {
+    FD_PATH_TABLE.lock().get(&(pid, fd)).cloned()
+}
+
 /// Allocate the next available fd for a given pid (first-fit above 2).
 fn alloc_fd(pid: u64) -> u64 {
     let mut map = NEXT_FD.lock();
@@ -2285,37 +2295,35 @@ unsafe fn sys_epoll_wait(epfd: u64, events_out: u64, maxevents: i32, timeout_ms:
         };
 
         let mut n_ready: usize = 0;
+        // Hold FD_TABLE for the entire poll round — prevents TOCTOU between
+        // bytes_available() and contains_key() on the same fd.
+        let mut fd_tbl = FD_TABLE.lock();
         for (watched_fd, interest) in &interests {
             if n_ready >= max { break; }
             let wfd = *watched_fd as u64;
 
-            // Determine readiness — same logic as sys_poll.
             let mut revents: u32 = 0;
             if wfd == 1 || wfd == 2 {
-                // stdout/stderr: always writable.
                 if interest.events & EPOLLOUT != 0 { revents |= EPOLLOUT; }
             } else {
-                let available = {
-                    let mut fd_tbl = FD_TABLE.lock();
-                    fd_tbl.get_mut(&(pid, wfd)).map(|h| h.bytes_available()).unwrap_or(0)
-                };
-                if interest.events & EPOLLIN  != 0 && available > 0 { revents |= EPOLLIN; }
-                if interest.events & EPOLLOUT != 0                    { revents |= EPOLLOUT; }
-                // If the fd is gone entirely, signal HUP.
-                if available == 0 {
-                    let exists = FD_TABLE.lock().contains_key(&(pid, wfd));
-                    if !exists { revents |= EPOLLHUP | EPOLLERR; }
+                match fd_tbl.get_mut(&(pid, wfd)) {
+                    Some(h) => {
+                        let available = h.bytes_available();
+                        if interest.events & EPOLLIN  != 0 && available > 0 { revents |= EPOLLIN; }
+                        if interest.events & EPOLLOUT != 0                    { revents |= EPOLLOUT; }
+                    }
+                    None => { revents |= EPOLLHUP | EPOLLERR; }
                 }
             }
 
             if revents != 0 {
-                // Write epoll_event { events, data } at slot n_ready (12-byte packed).
                 let slot = out_ptr.add(n_ready * 12);
                 core::ptr::write_unaligned(slot as *mut u32, revents);
                 core::ptr::write_unaligned(slot.add(4) as *mut u64, interest.data);
                 n_ready += 1;
             }
         }
+        drop(fd_tbl);
 
         if n_ready > 0 || crate::scheduler::uptime_ms() >= deadline {
             return n_ready as i64;

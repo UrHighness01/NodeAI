@@ -5,6 +5,7 @@
 //! Path resolution and file descriptor management live here too.
 
 pub mod path;
+pub mod proc_pid;
 pub mod procfs;
 pub mod ramfs;
 pub mod devfs;
