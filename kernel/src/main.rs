@@ -121,6 +121,10 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     // ── Phase 1: Remap APIC to virtual address ────────────────────────────────
     interrupts::apic::remap_to_virtual(phys_offset);
 
+    // ── Phase 1: per-CPU GS base (must be before interrupts so timer handler
+    //             can safely read gs:[fpu_off] on every tick) ─────────────────
+    syscall::init_gs_base();
+
     // ── Phase 1: IDT + APIC ───────────────────────────────────────────────────
     interrupts::init();
 
@@ -281,18 +285,40 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
 }
 
 fn idle_loop() -> ! {
+    let mut last_heartbeat: u64 = 0;
+    let mut last_desktop_tick: u64 = 0;
     loop {
-        // Poll the NIC for incoming frames
         net::poll();
-        // Service HTTP/SSH if running
         net::http_server_poll();
         net::ssh_server_poll();
-        // Execute any browser fetch that was queued from the keyboard IRQ
-        // (runs here so interrupts remain enabled during the blocking fetch)
         crate::desktop::browser_fetch_tick();
+
+        let now = crate::scheduler::uptime_ms();
+
+        // Desktop + telemetry tick.
+        if now.saturating_sub(last_desktop_tick) >= 100 {
+            last_desktop_tick = now;
+            crate::desktop::tick(now);
+            crate::telemetry::tick(now);
+        }
+
+        // Heartbeat every 5 seconds.
+        if now.saturating_sub(last_heartbeat) >= 5000 {
+            last_heartbeat = now;
+            let tasks = crate::scheduler::task_count();
+            let free  = crate::memory::free_mb();
+            crate::klog!(INFO, "NodeAI alive — uptime={}s tasks={} free={}MiB",
+                now / 1000, tasks, free);
+            crate::vfs::procfs::refresh();
+        }
         x86_64::instructions::interrupts::enable_and_hlt();
     }
 }
+
+
+
+
+
 
 /// Kernel panic handler — prints info to serial and VGA, then halts.
 #[panic_handler]

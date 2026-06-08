@@ -39,7 +39,7 @@ fn build_idt() -> InterruptDescriptorTable {
             .set_stack_index(crate::gdt::DOUBLE_FAULT_IST_INDEX);
 
         idt[apic::TIMER_VECTOR]
-            .set_handler_addr(x86_64::VirtAddr::new(timer_handler as u64));
+            .set_handler_addr(x86_64::VirtAddr::new(timer_handler as *const () as u64));
         idt[apic::KEYBOARD_VECTOR]
             .set_handler_fn(keyboard_handler);
         idt[apic::MOUSE_VECTOR]

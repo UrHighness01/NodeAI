@@ -52,9 +52,33 @@ pub fn remap_to_virtual(phys_mem_offset: u64) {
 
 /// Initialise and enable the local APIC.
 /// # Safety
-/// Must be called with interrupts disabled. Identity mapping or higher-half
-/// mapping must cover the APIC MMIO region.
+/// Must be called with interrupts disabled. The VMM must be initialised before
+/// this function is called so that the APIC MMIO region can be explicitly mapped.
 pub unsafe fn init_apic() {
+    // ── Diagnostic: check IA32_APIC_BASE MSR bit 11 (APIC Global Enable) ──
+    let apic_base_msr: u32;
+    let apic_base_msr_hi: u32;
+    core::arch::asm!("rdmsr", in("ecx") 0x1Bu32, out("eax") apic_base_msr, out("edx") apic_base_msr_hi);
+    let apic_base = (apic_base_msr_hi as u64) << 32 | apic_base_msr as u64;
+    let enabled = (apic_base_msr >> 11) & 1;
+    let base_addr = apic_base_msr & 0xFFFFF000u32; // bits 12-31
+    crate::klog!(INFO, "IA32_APIC_BASE={:#x} enabled={} addr={:#05x}",
+        apic_base, enabled, base_addr);
+
+    // If APIC is globally disabled, enable it.
+    if enabled == 0 {
+        crate::klog!(WARN, "APIC globally disabled in IA32_APIC_BASE — enabling");
+        core::arch::asm!("wrmsr", in("ecx") 0x1Bu32,
+            in("eax") apic_base_msr | (1 << 11),
+            in("edx") apic_base_msr_hi);
+    }
+
+    // Explicitly map the LAPIC MMIO region into the virtual address space.
+    // The bootloader's Mapping::Dynamic already maps this VA but with WB
+    // caching (APIC writes would buffer and never reach the device).
+    // map_mmio unmaps the WB entry first and creates a UC+WT mapping.
+    crate::memory::map_mmio(LOCAL_APIC_BASE, APIC_VIRT_BASE, 0x1000);
+
     // Disable legacy 8259 PIC by masking all IRQs.
     disable_pic();
 
@@ -71,6 +95,15 @@ pub unsafe fn init_apic() {
     apic_write(REG_TIMER_DCR, 0x3);                               // divisor = 16
     apic_write(REG_TIMER_LVT, (1 << 17) | TIMER_VECTOR as u32);  // periodic mode
     apic_write(REG_TIMER_ICR, ticks_per_ms * 10);                 // 10 ms period → 100 Hz
+
+    // ── Diagnostic: readback REG_TIMER_LVT to confirm write stuck ──────────
+    let lvt_readback = apic_read(REG_TIMER_LVT);
+    if lvt_readback != ((1 << 17) | TIMER_VECTOR as u32) {
+        crate::klog!(ERROR, "TIMER LVT write did NOT stick! wrote={:#x} readback={:#x}",
+            (1 << 17) | TIMER_VECTOR as u32, lvt_readback);
+    } else {
+        crate::klog!(INFO, "TIMER LVT readback OK — value={:#x}", lvt_readback);
+    }
 
     let version = apic_read(REG_VERSION);
     crate::klog!(INFO, "LAPIC enabled — version={:#x}", version & 0xFF);

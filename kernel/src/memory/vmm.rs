@@ -273,6 +273,16 @@ unsafe fn ensure_table(
 }
 
 /// Map an MMIO physical region as write-through, no-cache, writable.
+///
+/// The bootloader's `Mapping::Dynamic` already maps all physical memory
+/// (including MMIO regions) at `phys_offset` — but it uses Write-Back (WB)
+/// caching which is the x86 default for RAM.  MMIO registers require
+/// uncacheable or write-through semantics; otherwise writes get stuck in
+/// the store buffer or CPU cache and never reach the device.
+///
+/// This function unmaps any existing PTE at `virt` first, then creates a
+/// fresh mapping with `NO_CACHE | WRITE_THROUGH` so that each APIC MMIO
+/// access hits the bus immediately.
 pub fn map_mmio(phys: u64, virt: u64, size: u64) {
     use x86_64::structures::paging::PageTableFlags as F;
     let flags = F::PRESENT | F::WRITABLE | F::NO_CACHE | F::WRITE_THROUGH;
@@ -280,6 +290,10 @@ pub fn map_mmio(phys: u64, virt: u64, size: u64) {
     while addr < size {
         let page  = Page::containing_address(VirtAddr::new(virt + addr));
         let frame = PhysFrame::containing_address(PhysAddr::new(phys + addr));
+        // Bootloader already mapped this VA (phys mem window) — drop the
+        // existing PTE first so map_page can create a fresh one with MMIO
+        // caching flags instead of the default WB.
+        let _ = unmap_page(page);
         let _ = map_page(page, frame, flags);
         addr += super::pmm::PAGE_SIZE;
     }

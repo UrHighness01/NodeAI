@@ -75,6 +75,23 @@ pub unsafe extern "C" fn schedule_from_interrupt(old_rsp: u64) -> u64 {
 
     // Step 1: save old_rsp into the CURRENT (outgoing) task.
     let old_pid = runqueue::current_pid();
+
+    // CRITICAL: if there is no current task (we are on the idle/boot stack),
+    // do NOT attempt a context switch. The idle stack has no Task entry, so
+    // we cannot save its RSP. If we switch away here we permanently lose the
+    // idle execution context — idle_loop never wakes, uptime advances but
+    // the heartbeat never fires. Always return old_rsp when old_pid is None.
+    if old_pid.is_none() {
+        // Still do per-tick subsystem work — but ONLY call interrupt-safe
+        // functions here. desktop::tick() and telemetry::tick() both use
+        // fb::with() which takes the framebuffer spin-lock. If the idle loop
+        // holds that lock when the timer fires (e.g. inside browser_fetch_tick),
+        // re-acquiring it from interrupt context deadlocks the CPU forever.
+        crate::ai_engine::process_tick(uptime_ms);
+        crate::audio::tick();
+        return old_rsp;
+    }
+
     if let Some(pid) = old_pid {
         let mut tasks = TASKS.lock();
         if let Some(task) = tasks.get_mut(&pid) {
@@ -257,24 +274,26 @@ pub fn free_mb() -> u64 {
 /// Format scheduling latency stats for /proc/sched_latency.
 pub fn format_sched_latency() -> alloc::vec::Vec<u8> {
     use alloc::string::String;
-    let tasks = TASKS.lock();
-    let mut out = String::from("PID   NAME             AVG_WAIT_US  TOTAL_WAIT_US  SCHEDULES\n");
-    out.push_str("----  ---------------  -----------  -------------  ---------\n");
-    let mut entries: alloc::vec::Vec<(u64, u64, u64, u64, alloc::string::String)> = tasks.iter()
-        .filter(|(_, t)| t.sched_count > 0)
-        .map(|(pid, t)| {
-            let avg = t.sched_latency_total_us / t.sched_count;
-            (*pid, avg, t.sched_latency_total_us, t.sched_count, t.name.clone())
-        })
-        .collect();
-    // Sort by average wait descending (highest latency first).
-    entries.sort_by(|a, b| b.1.cmp(&a.1));
-    for (pid, avg, total, count, name) in &entries {
-        out.push_str(&alloc::format!(
-            "{:<5} {:<16} {:<12} {:<14} {}\n",
-            pid, &name[..name.len().min(15)], avg, total, count));
-    }
-    out.into_bytes()
+    x86_64::instructions::interrupts::without_interrupts(|| {
+        let tasks = TASKS.lock();
+        let mut out = String::from("PID   NAME             AVG_WAIT_US  TOTAL_WAIT_US  SCHEDULES\n");
+        out.push_str("----  ---------------  -----------  -------------  ---------\n");
+        let mut entries: alloc::vec::Vec<(u64, u64, u64, u64, alloc::string::String)> = tasks.iter()
+            .filter(|(_, t)| t.sched_count > 0)
+            .map(|(pid, t)| {
+                let avg = t.sched_latency_total_us / t.sched_count;
+                (*pid, avg, t.sched_latency_total_us, t.sched_count, t.name.clone())
+            })
+            .collect();
+        // Sort by average wait descending (highest latency first).
+        entries.sort_by(|a, b| b.1.cmp(&a.1));
+        for (pid, avg, total, count, name) in &entries {
+            out.push_str(&alloc::format!(
+                "{:<5} {:<16} {:<12} {:<14} {}\n",
+                pid, &name[..name.len().min(15)], avg, total, count));
+        }
+        out.into_bytes()
+    })
 }
 
 /// Apply an AI-proposed scheduler quantum.  0 = reset to default.
@@ -323,9 +342,11 @@ pub fn current_pid() -> Pid {
     runqueue::current_pid().unwrap_or(1)
 }
 
-/// Return the number of living tasks in the task table.
+/// Get the current number of tasks.
 pub fn task_count() -> usize {
-    TASKS.lock().len()
+    x86_64::instructions::interrupts::without_interrupts(|| {
+        TASKS.lock().len()
+    })
 }
 
 /// Snapshot of per-task data used by /proc/<pid>/.

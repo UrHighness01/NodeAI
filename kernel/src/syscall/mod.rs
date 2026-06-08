@@ -356,21 +356,29 @@ _syscall_entry:
 
 // ── Initialise SYSCALL MSRs ───────────────────────────────────────────────────
 
-/// Set up the SYSCALL/SYSRET fast path.
-///
-/// Must be called after `gdt::init()` because we read the GDT segment selectors.
-/// Also initialises per-CPU data so the assembly stub can load the kernel stack.
-pub fn init_lstar() {
+/// Initialise GS base for the boot CPU.
+/// Must be called BEFORE the LAPIC timer is started (interrupts::init) so that
+/// the timer handler's `gs:[fpu_off]` read hits a valid per-CPU struct.
+pub fn init_gs_base() {
     unsafe {
-        // ── Per-CPU data for boot CPU ─────────────────────────────────────────
         let stack_top = BOOT_SYSCALL_STACK.0.as_ptr().add(SYSCALL_STACK_SIZE) as u64;
         BOOT_PERCPU.self_ptr     = &raw const BOOT_PERCPU as u64;
         BOOT_PERCPU.cpu_id       = 0;
         BOOT_PERCPU.kernel_rsp   = stack_top;
         BOOT_PERCPU.user_rsp     = 0;
         BOOT_PERCPU.ticks_per_ms = 0;
-
+        BOOT_PERCPU.fpu_ptr      = 0; // no FPU context for the idle task
         hal::arch_x86_64::set_gs_base(&raw mut BOOT_PERCPU);
+    }
+}
+
+/// Set up the SYSCALL/SYSRET fast path.
+///
+/// Must be called after `gdt::init()`. GS base must already be set (call
+/// `init_gs_base()` before `interrupts::init()`).
+pub fn init_lstar() {
+    unsafe {
+        // GS base already set by init_gs_base(); just configure SYSCALL MSRs.
 
         // ── STAR ─────────────────────────────────────────────────────────────
         // bits[47:32] = kernel CS selector → SS = that + 8 = kernel DS
@@ -386,7 +394,7 @@ pub fn init_lstar() {
 
         // ── LSTAR — syscall handler entry point ───────────────────────────────
         extern "C" { fn _syscall_entry(); }
-        wrmsr(MSR_IA32_LSTAR, _syscall_entry as u64);
+        wrmsr(MSR_IA32_LSTAR, _syscall_entry as *const () as u64);
 
         // ── FMASK — clear IF (interrupts) on SYSCALL so kernel is uninterruptible
         //            at entry until we enable them explicitly.
