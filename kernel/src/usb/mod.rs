@@ -210,11 +210,14 @@ impl XhciCtrl {
     }
 
     /// Poll the event ring for a completion TRB matching the expected type.
-    /// Returns the completion code (0=success, 1=short packet, etc.).
-    unsafe fn poll_event(&mut self, expected_type: u32, timeout_ms: u64) -> u32 {
+    /// Returns `(completion_code, residual)`.
+    /// `residual` = bytes NOT transferred (xHCI §6.4.2.1 Transfer Event TRB status[23:0]).
+    /// For bulk IN: actual_received = requested_len - residual.
+    /// Timeout returns (0xFF, 0).
+    unsafe fn poll_event(&mut self, expected_type: u32, timeout_ms: u64) -> (u32, u32) {
         let deadline = crate::scheduler::uptime_ms() + timeout_ms;
         loop {
-            if crate::scheduler::uptime_ms() >= deadline { return 0xFF; } // timeout
+            if crate::scheduler::uptime_ms() >= deadline { return (0xFF, 0); }
             let evt = &self.evt_ring[self.evt_deq];
             let cycle = evt.control & 1;
             if cycle != self.evt_cycle {
@@ -222,6 +225,7 @@ impl XhciCtrl {
                 continue;
             }
             let trb_type = (evt.control >> 10) & 0x3F;
+            let status   = evt.status;
             self.evt_deq += 1;
             if self.evt_deq >= RING_LEN {
                 self.evt_deq = 0;
@@ -234,7 +238,9 @@ impl XhciCtrl {
             core::ptr::write_volatile((ir0 + 0x10) as *mut u64, erdp | (1 << 3));
 
             if trb_type == expected_type {
-                return (evt.status >> 24) & 0xFF; // completion code
+                let cc       = (status >> 24) & 0xFF;
+                let residual = status & 0x00FF_FFFF;
+                return (cc, residual);
             }
         }
     }
@@ -287,7 +293,7 @@ impl XhciCtrl {
 
         self.ring_doorbell(slot, 1); // endpoint 1 = control EP0
 
-        let cc = self.poll_event(TRB_TRANSFER_EVT, 2000);
+        let (cc, _) = self.poll_event(TRB_TRANSFER_EVT, 2000);
         if cc == 0 || cc == 13 { data_len } else { 0 } // 13=short packet OK
     }
 
@@ -309,12 +315,12 @@ impl XhciCtrl {
         };
         ring.enqueue(trb);
         self.ring_doorbell(slot, ep_out & 0x0F);
-        let cc = self.poll_event(TRB_TRANSFER_EVT, 2000);
+        let (cc, _) = self.poll_event(TRB_TRANSFER_EVT, 2000);
         if cc == 0 || cc == 13 { data.len() } else { 0 }
     }
 
     /// Execute a USB bulk IN transfer.
-    /// Returns bytes received.
+    /// Returns actual bytes received (requested_len - residual from Transfer Event TRB).
     unsafe fn bulk_in(&mut self, slot: u8, ep_in: u8, buf: &mut [u8]) -> usize {
         if !self.xfer_rings.contains_key(&slot) {
             self.xfer_rings.insert(slot, TransferRing::new(self.phys_off));
@@ -331,8 +337,13 @@ impl XhciCtrl {
         };
         ring.enqueue(trb);
         self.ring_doorbell(slot, (ep_in & 0x0F) * 2 + 1); // IN endpoint doorbell
-        let cc = self.poll_event(TRB_TRANSFER_EVT, 2000);
-        if cc == 0 || cc == 13 { buf.len() } else { 0 }
+        // residual = bytes NOT transferred (xHCI §6.4.2.1 status[23:0])
+        let (cc, residual) = self.poll_event(TRB_TRANSFER_EVT, 2000);
+        if cc == 0 || cc == 13 {
+            buf.len().saturating_sub(residual as usize)
+        } else {
+            0
+        }
     }
 
     /// Wait for controller to become ready after reset.
