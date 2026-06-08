@@ -160,6 +160,11 @@ pub struct Task {
     pub sched_latency_total_us: u64,
     /// Number of times this task was scheduled — for computing average latency.
     pub sched_count: u64,
+    /// Kernel stack canary value — written to the bottom of the kernel stack at
+    /// task creation.  Checked on every context switch; corruption = stack overflow.
+    pub stack_canary: u64,
+    /// Physical-offset virtual address where the canary lives (bottom of stack).
+    pub stack_canary_addr: u64,
 }
 
 impl Task {
@@ -233,6 +238,8 @@ impl Task {
             runnable_at:           0,
             sched_latency_total_us: 0,
             sched_count:           0,
+            stack_canary:      0,
+            stack_canary_addr: 0,
         }
     }
 
@@ -292,6 +299,8 @@ impl Task {
             runnable_at:            0,
             sched_latency_total_us: 0,
             sched_count:            0,
+            stack_canary:      0,
+            stack_canary_addr: 0,
         })
     }
 }

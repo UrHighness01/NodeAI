@@ -81,6 +81,36 @@ const HISTORY_LEN: usize = 64;
 
 // ── Public API ────────────────────────────────────────────────────────────────
 
+// ── madvise access-pattern hints ─────────────────────────────────────────────
+
+/// Per-task memory access pattern — set by madvise(MADV_SEQUENTIAL / MADV_RANDOM).
+/// The AI scheduler reads this to scale prefetch aggressiveness.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum AccessPattern { Normal, Sequential, Random }
+
+static ACCESS_HINTS: spin::Mutex<alloc::collections::BTreeMap<u64, AccessPattern>> =
+    spin::Mutex::new(alloc::collections::BTreeMap::new());
+
+/// Record an access-pattern hint from madvise() for the AI scheduler.
+pub fn record_access_hint(pid: u64, _va_start: u64, _va_end: u64, advice: i32) {
+    let pattern = match advice {
+        2 => AccessPattern::Sequential,
+        1 => AccessPattern::Random,
+        _ => AccessPattern::Normal,
+    };
+    ACCESS_HINTS.lock().insert(pid, pattern);
+}
+
+/// Return the current access pattern hint for `pid` (Normal if not set).
+pub fn access_pattern(pid: u64) -> AccessPattern {
+    ACCESS_HINTS.lock().get(&pid).copied().unwrap_or(AccessPattern::Normal)
+}
+
+/// Clear access hints when a process exits.
+pub fn remove_pid(pid: u64) {
+    ACCESS_HINTS.lock().remove(&pid);
+}
+
 pub fn init() {
     crate::klog!(INFO, "mem_pressure: monitor active");
 }

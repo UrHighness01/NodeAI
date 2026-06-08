@@ -159,6 +159,31 @@ pub fn on_privesc_attempt(pid: u64, syscall_nr: u64) {
     respond(&ev);
 }
 
+/// Called when a stack canary mismatch is detected during context switch.
+/// The task has already been killed by the scheduler; this records the forensic event.
+pub fn on_stack_overflow(pid: u64) {
+    if !ENABLED.load(Ordering::Relaxed) { return; }
+    let now  = crate::scheduler::uptime_ms();
+    let name = crate::scheduler::task_name(pid as crate::scheduler::Pid)
+        .unwrap_or_else(|| "???".to_owned());
+    let ev = ThreatEvent {
+        pid, name, level: ThreatLevel::Critical,
+        kind:   "stack-overflow-canary".to_owned(),
+        action: "killed".to_owned(),
+        timestamp: now,
+    };
+    let mut state = SEC.lock();
+    state.log.push(ev.clone());
+    drop(state);
+    EVENTS_CT.fetch_add(1, Ordering::Relaxed);
+    crate::klog!(WARN, "auto_security: CRITICAL stack overflow pid={}", pid);
+    let text = format!(
+        "{}: pid={} name={} kind=stack-overflow action=killed\n",
+        now, pid, ev.name
+    );
+    let _ = crate::vfs::append_file("/var/log/security.log", text.as_bytes());
+}
+
 // ── Background watchdog ───────────────────────────────────────────────────────
 
 /// Called from the idle loop every tick.

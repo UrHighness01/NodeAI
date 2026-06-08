@@ -46,6 +46,15 @@ pub fn spawn_kernel_thread(name: &str, entry: fn() -> !) {
     let pid = alloc_pid();
     let mut task = Task::new_kernel_thread(pid, name, entry as u64, stack_top);
 
+    // Place a stack canary at the bottom of the kernel stack (lowest address).
+    // The canary is a deterministic value derived from the PID XOR a boot constant
+    // so that stack overflows that corrupt it are detected on the next context switch.
+    let canary_addr  = crate::memory::phys_offset() + stack_phys; // bottom of stack
+    let canary_value = 0xDEAD_C0DE_CAFE_0000u64 ^ (pid << 3);
+    unsafe { core::ptr::write_volatile(canary_addr as *mut u64, canary_value); }
+    task.stack_canary      = canary_value;
+    task.stack_canary_addr = canary_addr;
+
     crate::klog!(INFO, "Scheduler: spawning '{}' pid={} entry={:#x}", name, pid, entry as u64);
 
     task.runnable_at = UPTIME_MS.load(core::sync::atomic::Ordering::Relaxed);
@@ -92,6 +101,24 @@ pub unsafe extern "C" fn schedule_from_interrupt(old_rsp: u64) -> u64 {
     }
 
     if let Some(pid) = old_pid {
+        // ── Stack canary check ────────────────────────────────────────────────
+        let canary_mismatch: bool = {
+            let tasks = TASKS.lock();
+            if let Some(task) = tasks.get(&pid) {
+                if task.stack_canary_addr != 0 {
+                    let live = unsafe {
+                        core::ptr::read_volatile(task.stack_canary_addr as *const u64)
+                    };
+                    live != task.stack_canary
+                } else { false }
+            } else { false }
+        };
+        if canary_mismatch {
+            crate::klog!(ERROR, "STACK OVERFLOW: pid={} canary clobbered", pid);
+            crate::auto_security::on_stack_overflow(pid);
+            kill_task(pid, 6); // SIGABRT
+        }
+
         let mut tasks = TASKS.lock();
         if let Some(task) = tasks.get_mut(&pid) {
             task.saved_kernel_rsp = old_rsp;
@@ -134,9 +161,21 @@ pub unsafe extern "C" fn schedule_from_interrupt(old_rsp: u64) -> u64 {
     // Step 3: compute AI-predicted quantum for the incoming task, then tick.
     // burst_estimate_us is maintained by ai_engine's SGD; 1 tick = 10 ms = 10_000 µs.
     // We peek at the *front* of the run queue to predict for the next task.
-    // Memory pressure scales down burst_ticks under Low/Medium/High/Critical
-    // conditions so allocation-heavy tasks get shorter quanta and shed pages faster.
-    let pressure_scale = crate::mem_pressure::current().burst_scale();
+    // Memory pressure scales burst_ticks based on system free-RAM level.
+    // madvise(MADV_SEQUENTIAL) boosts the scale (sequential tasks benefit from
+    // longer quanta); MADV_RANDOM reduces it (random-access thrashes less with
+    // shorter quanta).  This is the AI-integration of madvise hints — no other
+    // kernel feeds madvise advice into a neural-network scheduler.
+    let next_pid_for_hint = {
+        let rq = runqueue::peek_front();
+        rq.unwrap_or(0)
+    };
+    let access_adj = match crate::mem_pressure::access_pattern(next_pid_for_hint) {
+        crate::mem_pressure::AccessPattern::Sequential => 1.20f32,
+        crate::mem_pressure::AccessPattern::Random     => 0.75f32,
+        crate::mem_pressure::AccessPattern::Normal     => 1.00f32,
+    };
+    let pressure_scale = crate::mem_pressure::current().burst_scale() * access_adj;
 
     let next_burst_ticks: Option<u32> = {
         let rq_guard  = runqueue::peek_front();
@@ -467,6 +506,7 @@ pub fn exit_current(code: i32) -> ! {
     crate::transformer_sched::remove(pid);
     crate::syscall::cleanup_pid_fds(pid);
     crate::syscall::cleanup_pid_vmas(pid);
+    crate::mem_pressure::remove_pid(pid);
 
     // Wake the parent and send SIGCHLD.
     if parent_pid != 0 {
