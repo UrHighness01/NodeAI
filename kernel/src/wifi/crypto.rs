@@ -9,7 +9,7 @@
 //!   - CCMP (IEEE 802.11i §8.3.3) — data frame encryption/decryption
 //!   - AES-128-CMAC (RFC 4493) — EAPOL MIC computation
 //!
-//! Not implemented here (Phase 5): CCMP for data frame encryption.
+//!   - CCMP (IEEE 802.11i §8.3.3) — data frame encryption/decryption
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // SHA-1 — FIPS 180-4

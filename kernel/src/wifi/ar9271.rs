@@ -621,7 +621,7 @@ fn wait_for_auth_response(slot: u8, bssid: &[u8; 6]) -> bool {
         let src: &[u8; 6] = frame[10..16].try_into().unwrap_or(&[0;6]);
         if src != bssid { continue; }
         let seq_num = u16::from_le_bytes([frame[24], frame[25]]);
-        let status  = u16::from_le_bytes([frame[26].min(0), frame[27].min(0)]);
+        let status  = u16::from_le_bytes([frame[26], frame[27]]);
         if seq_num == 2 && status == 0 { return true; }
     }
     false
@@ -641,7 +641,7 @@ fn wait_for_assoc_response(slot: u8, bssid: &[u8; 6]) -> bool {
         if src != bssid { continue; }
         let status = u16::from_le_bytes([frame[26], frame[27]]);
         if status == 0 {
-            let aid = u16::from_le_bytes([frame[28].min(0), frame[29].min(0)]) & 0x3FFF;
+            let aid = u16::from_le_bytes([frame[28], frame[29]]) & 0x3FFF;
             crate::klog!(INFO, "WiFi: associated, AID={}", aid);
             return true;
         }
