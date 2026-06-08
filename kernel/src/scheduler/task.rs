@@ -153,6 +153,13 @@ pub struct Task {
     /// Causal wakeup: which PID last woke this task (via futex, pipe, socket, or exit).
     /// None = self-woken (initial run, or woke from timer with no blocked wait).
     pub woke_by: Option<Pid>,
+    /// Uptime (ms) when this task last became Runnable (woken or enqueued for first time).
+    /// Used to compute scheduling latency: time between becoming runnable and actually running.
+    pub runnable_at: u64,
+    /// Cumulative scheduling latency (µs) — sum of all wait times for this task.
+    pub sched_latency_total_us: u64,
+    /// Number of times this task was scheduled — for computing average latency.
+    pub sched_count: u64,
 }
 
 impl Task {
@@ -220,9 +227,12 @@ impl Task {
             intent_hint:         0,
             pending_signals: 0,
             fpu_state:       FpuState::default_state(),
-            user_brk:        0,
-            fs_base:         0,
-            woke_by:         None,
+            user_brk:              0,
+            fs_base:               0,
+            woke_by:               None,
+            runnable_at:           0,
+            sched_latency_total_us: 0,
+            sched_count:           0,
         }
     }
 
@@ -276,9 +286,12 @@ impl Task {
             intent_hint:          self.intent_hint,
             pending_signals:  0,
             fpu_state:        self.fpu_state, // copy parent's FPU state to child
-            user_brk:         self.user_brk,
-            fs_base:          self.fs_base,
-            woke_by:          None,
+            user_brk:               self.user_brk,
+            fs_base:                self.fs_base,
+            woke_by:                None,
+            runnable_at:            0,
+            sched_latency_total_us: 0,
+            sched_count:            0,
         })
     }
 }

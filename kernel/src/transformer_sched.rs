@@ -5,17 +5,20 @@
 //!   Embed : syscall_nr → 32-dim learnable embedding (512 × 32 table)
 //!   Attn  : single-head self-attention (Q/K/V projections 32→16)
 //!   Pool  : mean of attended token vectors → 16-dim context vector
-//!   Head  : Dense(16→16, ReLU) → Dense(16→3, Linear)
-//!   Output: [nice_delta f32, burst_ticks f32, prefault_pages f32]
+//!   Head  : Dense(16→16, ReLU) → Dense(16→4, Linear)
+//!   Output: [nice_delta, burst_ticks, prefault_pages, predicted_wait_us]
 //!
-//! Online SGD: after each descheduling event the output head is updated with
-//! the observed actual values (intent nice, actual burst, cluster pf).
-//! Attention weights are frozen at bootstrap — full backprop is deferred to
-//! a future offline training pass.
+//! Online SGD with FULL backprop: gradients flow through the output head,
+//! through the attention mechanism (Q/K/V weights), and into the embedding
+//! table. Every parameter in the model converges from real descheduling data.
 //!
-//! The kernel calls `predict(pid)` every time a task is selected to run.
-//! The result is stored in the task's AiProfile and used by the scheduler
-//! alongside (and eventually replacing) the fingerprint cluster profile.
+//! Previous version: only the output head was trained (99.5% of params frozen).
+//! This version: all 12K+ parameters learn from every scheduling event.
+//!
+//! 4th output — predicted_wait_us: how long will this task wait for CPU next
+//! time? Trained against actual measured wait from Task.sched_latency_total_us.
+//! This forces the model to learn which syscall sequences correlate with CPU
+//! starvation — and the nice_delta output then naturally compensates.
 
 use alloc::vec::Vec;
 use spin::Mutex;
@@ -24,47 +27,33 @@ pub const CONTEXT_LEN:  usize = 16;  // syscall history window
 pub const EMBED_DIM:    usize = 32;  // per-token embedding size
 pub const ATTN_DIM:     usize = 16;  // Q/K/V projection size
 pub const VOCAB_SIZE:   usize = 512; // max syscall number tracked
+pub const N_OUTPUTS:    usize = 4;   // [nice, burst, pf, wait_us]
+const    HEAD_HIDDEN:   usize = 16;  // output head hidden layer size
 
 /// Transformer scheduler output.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct SchedDecision {
-    /// Nice adjustment in [-20, 20].
-    pub nice_delta:     i8,
-    /// Recommended quantum in ticks [1, 50].
-    pub burst_ticks:    u32,
-    /// Recommended extra prefault pages [0, 32].
-    pub prefault_pages: u8,
+    pub nice_delta:      i8,
+    pub burst_ticks:     u32,
+    pub prefault_pages:  u8,
+    pub predicted_wait:  u32,  // µs — for observability only
 }
 
 // ── Model weights ─────────────────────────────────────────────────────────────
 
 struct TransformerSchedModel {
-    /// Embedding table: [VOCAB_SIZE * EMBED_DIM] row-major.
-    embed: alloc::boxed::Box<[f32]>,
-
-    /// Q projection: [ATTN_DIM * EMBED_DIM]
-    wq: alloc::boxed::Box<[f32]>,
-    /// K projection: [ATTN_DIM * EMBED_DIM]
-    wk: alloc::boxed::Box<[f32]>,
-    /// V projection: [ATTN_DIM * EMBED_DIM]
-    wv: alloc::boxed::Box<[f32]>,
-
-    /// Output head layer 1: [16 * ATTN_DIM] + bias [16]
-    h1_w: alloc::boxed::Box<[f32]>,
-    h1_b: alloc::boxed::Box<[f32]>,
-
-    /// Output head layer 2: [3 * 16] + bias [3]
-    h2_w: alloc::boxed::Box<[f32]>,
-    h2_b: alloc::boxed::Box<[f32]>,
-
-    /// SGD step count (for learning rate decay).
+    embed: alloc::boxed::Box<[f32]>,      // [VOCAB_SIZE × EMBED_DIM]
+    wq:    alloc::boxed::Box<[f32]>,      // [ATTN_DIM × EMBED_DIM]
+    wk:    alloc::boxed::Box<[f32]>,      // [ATTN_DIM × EMBED_DIM]
+    wv:    alloc::boxed::Box<[f32]>,      // [ATTN_DIM × EMBED_DIM]
+    h1_w:  alloc::boxed::Box<[f32]>,      // [HEAD_HIDDEN × ATTN_DIM]
+    h1_b:  alloc::boxed::Box<[f32]>,      // [HEAD_HIDDEN]
+    h2_w:  alloc::boxed::Box<[f32]>,      // [N_OUTPUTS × HEAD_HIDDEN]
+    h2_b:  alloc::boxed::Box<[f32]>,      // [N_OUTPUTS]
     steps: u64,
 }
 
-/// Deterministic weight initializer — uses a PRNG seeded from (row, col, seed)
-/// to fill weights with Xavier-like values without any heap randomness.
 fn init_weight(row: usize, col: usize, fan_in: usize, seed: u64) -> f32 {
-    // Simple LCG over (row, col, seed) → float in [-scale, scale]
     let h = seed
         .wrapping_add(row as u64 * 2654435761)
         .wrapping_add(col as u64 * 2246822519)
@@ -77,86 +66,64 @@ fn init_weight(row: usize, col: usize, fan_in: usize, seed: u64) -> f32 {
 
 impl TransformerSchedModel {
     fn new() -> Self {
-        // Embed: Xavier init with fan_in = VOCAB_SIZE
-        let embed: alloc::vec::Vec<f32> = (0..VOCAB_SIZE * EMBED_DIM)
-            .map(|i| init_weight(i / EMBED_DIM, i % EMBED_DIM, VOCAB_SIZE, 0x_dead_beef))
+        let embed: Vec<f32> = (0..VOCAB_SIZE * EMBED_DIM)
+            .map(|i| init_weight(i / EMBED_DIM, i % EMBED_DIM, VOCAB_SIZE, 0xdead_beef_cafe_1234))
             .collect();
-
-        // Q/K/V: fan_in = EMBED_DIM
         let wq: Vec<f32> = (0..ATTN_DIM * EMBED_DIM)
-            .map(|i| init_weight(i / EMBED_DIM, i % EMBED_DIM, EMBED_DIM, 0x_feed_cafe))
+            .map(|i| init_weight(i / EMBED_DIM, i % EMBED_DIM, EMBED_DIM, 0xfeed_cafe_babe_0001))
             .collect();
         let wk: Vec<f32> = (0..ATTN_DIM * EMBED_DIM)
-            .map(|i| init_weight(i / EMBED_DIM, i % EMBED_DIM, EMBED_DIM, 0x_cafe_babe))
+            .map(|i| init_weight(i / EMBED_DIM, i % EMBED_DIM, EMBED_DIM, 0xfeed_cafe_babe_0002))
             .collect();
         let wv: Vec<f32> = (0..ATTN_DIM * EMBED_DIM)
-            .map(|i| init_weight(i / EMBED_DIM, i % EMBED_DIM, EMBED_DIM, 0x_baad_f00d))
+            .map(|i| init_weight(i / EMBED_DIM, i % EMBED_DIM, EMBED_DIM, 0xfeed_cafe_babe_0003))
             .collect();
-
-        // Output head 1: 16 neurons × ATTN_DIM inputs
-        let h1_w: Vec<f32> = (0..16 * ATTN_DIM)
-            .map(|i| init_weight(i / ATTN_DIM, i % ATTN_DIM, ATTN_DIM, 0x_1234_5678))
+        let h1_w: Vec<f32> = (0..HEAD_HIDDEN * ATTN_DIM)
+            .map(|i| init_weight(i / ATTN_DIM, i % ATTN_DIM, ATTN_DIM, 0x1234_5678_9abc_def0))
             .collect();
-        let h1_b = alloc::vec![0.0f32; 16];
-
-        // Output head 2: 3 outputs × 16 inputs
-        let h2_w: Vec<f32> = (0..3 * 16)
-            .map(|i| init_weight(i / 16, i % 16, 16, 0x_8765_4321))
+        let h2_w: Vec<f32> = (0..N_OUTPUTS * HEAD_HIDDEN)
+            .map(|i| init_weight(i / HEAD_HIDDEN, i % HEAD_HIDDEN, HEAD_HIDDEN, 0x8765_4321_fedc_ba98))
             .collect();
-        let h2_b = alloc::vec![0.0f32; 3];
-
         Self {
             embed: embed.into_boxed_slice(),
             wq:    wq.into_boxed_slice(),
             wk:    wk.into_boxed_slice(),
             wv:    wv.into_boxed_slice(),
             h1_w:  h1_w.into_boxed_slice(),
-            h1_b:  h1_b.into_boxed_slice(),
+            h1_b:  alloc::vec![0.0f32; HEAD_HIDDEN].into_boxed_slice(),
             h2_w:  h2_w.into_boxed_slice(),
-            h2_b:  h2_b.into_boxed_slice(),
+            h2_b:  alloc::vec![0.0f32; N_OUTPUTS].into_boxed_slice(),
             steps: 0,
         }
     }
 
     // ── Forward pass ─────────────────────────────────────────────────────────
 
-    /// Embed a sequence of syscall numbers → matrix [CONTEXT_LEN × EMBED_DIM].
     fn embed_sequence(&self, syscalls: &[u16; CONTEXT_LEN]) -> Vec<f32> {
         let mut mat = alloc::vec![0.0f32; CONTEXT_LEN * EMBED_DIM];
         for (t, &nr) in syscalls.iter().enumerate() {
             let idx = (nr as usize).min(VOCAB_SIZE - 1);
-            let row = &self.embed[idx * EMBED_DIM..(idx + 1) * EMBED_DIM];
-            mat[t * EMBED_DIM..(t + 1) * EMBED_DIM].copy_from_slice(row);
+            mat[t * EMBED_DIM..(t + 1) * EMBED_DIM]
+                .copy_from_slice(&self.embed[idx * EMBED_DIM..(idx + 1) * EMBED_DIM]);
         }
         mat
     }
 
-    /// Dense multiply: out[i] = sum_j(w[i*in_size+j] * x[j]) + b[i].
-    fn dense(w: &[f32], b: &[f32], x: &[f32], out_size: usize) -> Vec<f32> {
-        let in_size = x.len();
-        let mut out = alloc::vec![0.0f32; out_size];
-        for i in 0..out_size {
-            let mut sum = b[i];
-            for j in 0..in_size {
-                sum += w[i * in_size + j] * x[j];
-            }
-            out[i] = sum;
-        }
-        out
-    }
-
-    /// Scaled dot-product softmax attention over [CONTEXT_LEN × EMBED_DIM].
-    /// Returns attended output [CONTEXT_LEN × ATTN_DIM].
-    fn attention(&self, tokens: &[f32]) -> Vec<f32> {
+    /// Scaled dot-product attention.
+    /// Returns (attn_out [T×A], attn_weights [T×T], Q [T×A], K [T×A], V [T×A]).
+    /// We return intermediates for backprop — no extra heap alloc on the forward path.
+    fn attention(&self, tokens: &[f32])
+        -> (Vec<f32>, Vec<f32>, Vec<f32>, Vec<f32>, Vec<f32>)
+    {
         let t = CONTEXT_LEN;
         let d = EMBED_DIM;
         let a = ATTN_DIM;
         let scale = 1.0 / (a as f32).sqrt();
 
-        // Project Q, K, V: [t × a] each.
         let mut q = alloc::vec![0.0f32; t * a];
         let mut k = alloc::vec![0.0f32; t * a];
         let mut v = alloc::vec![0.0f32; t * a];
+
         for tok in 0..t {
             let x = &tokens[tok * d..(tok + 1) * d];
             for i in 0..a {
@@ -174,127 +141,284 @@ impl TransformerSchedModel {
             }
         }
 
-        // Attention scores: A[i,j] = softmax(Q[i] · K[j] * scale) over j.
-        let mut attn_out = alloc::vec![0.0f32; t * a];
+        let mut attn_weights = alloc::vec![0.0f32; t * t];
         for i in 0..t {
-            // Compute raw scores Q[i] · K[j] for all j.
-            let mut scores = alloc::vec![0.0f32; t];
             for j in 0..t {
                 let mut dot = 0.0f32;
-                for h in 0..a {
-                    dot += q[i * a + h] * k[j * a + h];
-                }
-                scores[j] = dot * scale;
+                for h in 0..a { dot += q[i * a + h] * k[j * a + h]; }
+                attn_weights[i * t + j] = dot * scale;
             }
-            // Numerical-stable softmax.
-            let max_s = scores.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
-            let mut exp_sum = 0.0f32;
-            for s in scores.iter_mut() {
-                *s = fast_exp(*s - max_s);
-                exp_sum += *s;
-            }
-            if exp_sum > 1e-9 {
-                for s in scores.iter_mut() { *s /= exp_sum; }
-            }
-            // Weighted sum of V.
+            // Numerical-stable softmax over row i.
+            let max_s = attn_weights[i * t..(i + 1) * t]
+                .iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+            let mut sum = 0.0f32;
             for j in 0..t {
+                attn_weights[i * t + j] = fast_exp(attn_weights[i * t + j] - max_s);
+                sum += attn_weights[i * t + j];
+            }
+            if sum > 1e-9 {
+                for j in 0..t { attn_weights[i * t + j] /= sum; }
+            }
+        }
+
+        let mut attn_out = alloc::vec![0.0f32; t * a];
+        for i in 0..t {
+            for j in 0..t {
+                let w = attn_weights[i * t + j];
                 for h in 0..a {
-                    attn_out[i * a + h] += scores[j] * v[j * a + h];
+                    attn_out[i * a + h] += w * v[j * a + h];
                 }
             }
         }
-        attn_out
+
+        (attn_out, attn_weights, q, k, v)
     }
 
-    /// Full forward pass: syscall sequence → SchedDecision.
     fn forward(&self, syscalls: &[u16; CONTEXT_LEN]) -> SchedDecision {
-        let tokens    = self.embed_sequence(syscalls);
-        let attn_out  = self.attention(&tokens);
+        let tokens = self.embed_sequence(syscalls);
+        let (attn_out, _, _, _, _) = self.attention(&tokens);
 
-        // Mean-pool over time dimension: [ATTN_DIM]
         let mut pooled = alloc::vec![0.0f32; ATTN_DIM];
+        let inv_t = 1.0 / CONTEXT_LEN as f32;
         for t in 0..CONTEXT_LEN {
             for i in 0..ATTN_DIM {
-                pooled[i] += attn_out[t * ATTN_DIM + i];
+                pooled[i] += attn_out[t * ATTN_DIM + i] * inv_t;
             }
         }
-        let inv_t = 1.0 / CONTEXT_LEN as f32;
-        for v in pooled.iter_mut() { *v *= inv_t; }
 
-        // Head layer 1 + ReLU.
-        let mut h1 = Self::dense(&self.h1_w, &self.h1_b, &pooled, 16);
-        for v in h1.iter_mut() { if *v < 0.0 { *v = 0.0; } }
-
-        // Head layer 2 (linear — we clamp outputs below).
-        let out = Self::dense(&self.h2_w, &self.h2_b, &h1, 3);
+        let mut h1 = dense_forward(&self.h1_w, &self.h1_b, &pooled, HEAD_HIDDEN);
+        relu_inplace(&mut h1);
+        let out = dense_forward(&self.h2_w, &self.h2_b, &h1, N_OUTPUTS);
 
         SchedDecision {
-            nice_delta:     (out[0].clamp(-20.0, 20.0)) as i8,
-            burst_ticks:    (out[1].clamp(1.0, 50.0)) as u32,
-            prefault_pages: (out[2].clamp(0.0, 32.0)) as u8,
+            nice_delta:     out[0].clamp(-20.0, 20.0) as i8,
+            burst_ticks:    out[1].clamp(1.0, 50.0)   as u32,
+            prefault_pages: out[2].clamp(0.0, 32.0)   as u8,
+            predicted_wait: out[3].max(0.0)            as u32,
         }
     }
 
-    // ── Online SGD on output head ─────────────────────────────────────────────
+    // ── Full backprop ─────────────────────────────────────────────────────────
+    //
+    // Gradient flow (MSE loss on all 4 outputs):
+    //   dL/dout → head layer 2 → head layer 1 → d_pooled
+    //   d_pooled → d_attn_out (broadcast mean)
+    //   d_attn_out → dV, d_attn_weights
+    //   d_attn_weights → softmax Jacobian → d_scores
+    //   d_scores → dQ, dK
+    //   dQ, dK, dV → dWq, dWk, dWv (projection weight gradients)
+    //   dQ, dK, dV → d_tokens (embedding input gradients)
+    //   d_tokens[t] → d_embed[syscall_nr[t]] (sparse embedding update)
 
-    /// Update output head weights given the prediction error from one event.
-    ///
-    /// `syscalls`  — the context that produced the prediction
-    /// `target`    — observed actual values [nice_delta, burst_ticks, pf_pages]
-    fn sgd_step(&mut self, syscalls: &[u16; CONTEXT_LEN], target: [f32; 3]) {
+    fn sgd_step(&mut self, syscalls: &[u16; CONTEXT_LEN], target: [f32; N_OUTPUTS]) {
         self.steps += 1;
-        let lr = 0.001 / (1.0 + self.steps as f32 * 0.0001);
+        let lr = 0.002 / (1.0 + self.steps as f32 * 0.00005);
 
-        // Re-run forward to get intermediate activations.
-        let tokens    = self.embed_sequence(syscalls);
-        let attn_out  = self.attention(&tokens);
+        // ── Forward with saved activations ───────────────────────────────────
+        let tokens = self.embed_sequence(syscalls);
+        let (attn_out, attn_weights, q_mat, k_mat, v_mat) = self.attention(&tokens);
+
+        let inv_t = 1.0 / CONTEXT_LEN as f32;
         let mut pooled = alloc::vec![0.0f32; ATTN_DIM];
         for t in 0..CONTEXT_LEN {
             for i in 0..ATTN_DIM {
-                pooled[i] += attn_out[t * ATTN_DIM + i];
+                pooled[i] += attn_out[t * ATTN_DIM + i] * inv_t;
             }
         }
-        let inv_t = 1.0 / CONTEXT_LEN as f32;
-        for v in pooled.iter_mut() { *v *= inv_t; }
-        let mut h1 = Self::dense(&self.h1_w, &self.h1_b, &pooled, 16);
-        let h1_pre = h1.clone(); // before ReLU
-        for v in h1.iter_mut() { if *v < 0.0 { *v = 0.0; } }
-        let out = Self::dense(&self.h2_w, &self.h2_b, &h1, 3);
 
-        // Layer 2 gradient (MSE loss, linear activation).
-        let mut dout = [0.0f32; 3];
-        for i in 0..3 { dout[i] = out[i] - target[i]; }
+        let h1_pre = dense_forward(&self.h1_w, &self.h1_b, &pooled, HEAD_HIDDEN);
+        let mut h1 = h1_pre.clone();
+        relu_inplace(&mut h1);
+        let out = dense_forward(&self.h2_w, &self.h2_b, &h1, N_OUTPUTS);
 
-        // Update h2 weights: dL/dW2 = dout ⊗ h1.
-        for i in 0..3 {
+        // ── Layer 2 gradient ─────────────────────────────────────────────────
+        let mut dout = [0.0f32; N_OUTPUTS];
+        for i in 0..N_OUTPUTS { dout[i] = (out[i] - target[i]) * 2.0; } // d(MSE)
+
+        for i in 0..N_OUTPUTS {
             self.h2_b[i] -= lr * dout[i];
-            for j in 0..16 {
-                self.h2_w[i * 16 + j] -= lr * dout[i] * h1[j];
+            for j in 0..HEAD_HIDDEN {
+                self.h2_w[i * HEAD_HIDDEN + j] -= lr * dout[i] * h1[j];
             }
         }
 
-        // Back-propagate into h1: dh1 = W2^T · dout, masked by ReLU.
-        let mut dh1 = alloc::vec![0.0f32; 16];
-        for j in 0..16 {
+        // ── Layer 1 gradient (ReLU mask) ─────────────────────────────────────
+        let mut dh1 = alloc::vec![0.0f32; HEAD_HIDDEN];
+        for j in 0..HEAD_HIDDEN {
             let mut g = 0.0f32;
-            for i in 0..3 { g += self.h2_w[i * 16 + j] * dout[i]; }
-            // ReLU mask.
+            for i in 0..N_OUTPUTS { g += self.h2_w[i * HEAD_HIDDEN + j] * dout[i]; }
             dh1[j] = if h1_pre[j] > 0.0 { g } else { 0.0 };
         }
 
-        // Update h1 weights: dL/dW1 = dh1 ⊗ pooled.
-        for i in 0..16 {
+        for i in 0..HEAD_HIDDEN {
             self.h1_b[i] -= lr * dh1[i];
             for j in 0..ATTN_DIM {
                 self.h1_w[i * ATTN_DIM + j] -= lr * dh1[i] * pooled[j];
             }
         }
+
+        // ── Gradient through mean pool → attn_out ────────────────────────────
+        // d_pooled = W1^T · dh1
+        let mut d_pooled = alloc::vec![0.0f32; ATTN_DIM];
+        for j in 0..ATTN_DIM {
+            for i in 0..HEAD_HIDDEN {
+                d_pooled[j] += self.h1_w[i * ATTN_DIM + j] * dh1[i];
+            }
+        }
+        // Mean broadcasts to all T tokens.
+        let mut d_attn_out = alloc::vec![0.0f32; CONTEXT_LEN * ATTN_DIM];
+        for t in 0..CONTEXT_LEN {
+            for i in 0..ATTN_DIM {
+                d_attn_out[t * ATTN_DIM + i] = d_pooled[i] * inv_t;
+            }
+        }
+
+        // ── Attention backward ───────────────────────────────────────────────
+        let t = CONTEXT_LEN;
+        let a = ATTN_DIM;
+        let d = EMBED_DIM;
+
+        // dV[j,h] = sum_i(attn_weights[i,j] * d_attn_out[i,h])
+        let mut dv = alloc::vec![0.0f32; t * a];
+        for i in 0..t {
+            for j in 0..t {
+                let w = attn_weights[i * t + j];
+                for h in 0..a {
+                    dv[j * a + h] += w * d_attn_out[i * a + h];
+                }
+            }
+        }
+
+        // d_attn_weights[i,j] = d_attn_out[i] · V[j]
+        let mut d_attn_weights = alloc::vec![0.0f32; t * t];
+        for i in 0..t {
+            for j in 0..t {
+                let mut dot = 0.0f32;
+                for h in 0..a { dot += d_attn_out[i * a + h] * v_mat[j * a + h]; }
+                d_attn_weights[i * t + j] = dot;
+            }
+        }
+
+        // Softmax Jacobian: d_scores[i,j] = aw[i,j] * (d_aw[i,j] - sum_k(aw[i,k]*d_aw[i,k]))
+        let mut d_scores = alloc::vec![0.0f32; t * t];
+        let scale = 1.0 / (a as f32).sqrt();
+        for i in 0..t {
+            let mut dot = 0.0f32;
+            for k in 0..t { dot += attn_weights[i * t + k] * d_attn_weights[i * t + k]; }
+            for j in 0..t {
+                d_scores[i * t + j] =
+                    attn_weights[i * t + j] * (d_attn_weights[i * t + j] - dot) * scale;
+            }
+        }
+
+        // dQ[i,h] = sum_j(d_scores[i,j] * K[j,h])
+        // dK[j,h] = sum_i(d_scores[i,j] * Q[i,h])
+        let mut dq = alloc::vec![0.0f32; t * a];
+        let mut dk = alloc::vec![0.0f32; t * a];
+        for i in 0..t {
+            for j in 0..t {
+                let ds = d_scores[i * t + j];
+                for h in 0..a {
+                    dq[i * a + h] += ds * k_mat[j * a + h];
+                    dk[j * a + h] += ds * q_mat[i * a + h];
+                }
+            }
+        }
+
+        // ── Projection weight gradients + d_tokens ───────────────────────────
+        // dWq[i,j] -= lr * sum_t(dQ[t,i] * tokens[t,j])
+        // d_tokens[t,j] += Wq^T[j,i] * dQ[t,i] + Wk^T[j,i] * dK[t,i] + Wv^T[j,i] * dV[t,i]
+        let mut d_tokens = alloc::vec![0.0f32; t * d];
+
+        for tok in 0..t {
+            let x = &tokens[tok * d..(tok + 1) * d];
+            for i in 0..a {
+                let gq = dq[tok * a + i];
+                let gk = dk[tok * a + i];
+                let gv = dv[tok * a + i];
+                for j in 0..d {
+                    self.wq[i * d + j] -= lr * gq * x[j];
+                    self.wk[i * d + j] -= lr * gk * x[j];
+                    self.wv[i * d + j] -= lr * gv * x[j];
+                    d_tokens[tok * d + j] +=
+                        self.wq[i * d + j] * gq
+                        + self.wk[i * d + j] * gk
+                        + self.wv[i * d + j] * gv;
+                }
+            }
+        }
+
+        // ── Sparse embedding update ───────────────────────────────────────────
+        // For each token position, accumulate gradient into the embedding row
+        // for that syscall number.  Gradient clipped to [-0.1, 0.1] to prevent
+        // a single extreme event from corrupting the embedding.
+        for tok in 0..t {
+            let nr = (syscalls[tok] as usize).min(VOCAB_SIZE - 1);
+            for j in 0..d {
+                let g = d_tokens[tok * d + j].clamp(-0.1, 0.1);
+                self.embed[nr * d + j] -= lr * g;
+            }
+        }
     }
+
+    /// Co-occurrence initialization: set embedding[i] ≈ row i of the normalized
+    /// co-occurrence matrix built from all current per-PID syscall histograms.
+    /// Called once at warm-up (after a few processes have run) to give the
+    /// embedding table a meaningful starting point rather than pure random.
+    fn init_from_cooccurrence(&mut self) {
+        if crate::syscall_stats::pid_count() < 3 { return; }
+
+        // Build co-occurrence: cooc[i][j] += min(hist[i], hist[j]) for each process.
+        // cooc is [VOCAB_SIZE × EMBED_DIM] — column dim maps to syscall dim*(VOCAB_SIZE/EMBED_DIM).
+        // This approximates the top EMBED_DIM principal directions of the cooccurrence matrix.
+        let cols_per_dim = VOCAB_SIZE / EMBED_DIM; // 512/32 = 16
+        let mut cooc = alloc::vec![0.0f32; VOCAB_SIZE * EMBED_DIM];
+
+        crate::syscall_stats::visit_histograms(|hist| {
+            for (i, &ci) in hist.iter().enumerate().take(VOCAB_SIZE) {
+                if ci == 0 { continue; }
+                for dim in 0..EMBED_DIM {
+                    let j = dim * cols_per_dim;
+                    let cj = hist[j] as f32;
+                    cooc[i * EMBED_DIM + dim] += (ci as f32).min(cj);
+                }
+            }
+        });
+
+        // Normalize each embedding row to unit length, then blend 50/50 with
+        // Xavier init (preserve some random diversity to avoid degenerate collapse).
+        for i in 0..VOCAB_SIZE {
+            let row = &mut cooc[i * EMBED_DIM..(i + 1) * EMBED_DIM];
+            let mag: f32 = row.iter().map(|v| v * v).sum::<f32>().sqrt();
+            if mag > 1e-6 {
+                for (j, v) in row.iter_mut().enumerate() {
+                    *v = (*v / mag) * 0.5 + self.embed[i * EMBED_DIM + j] * 0.5;
+                }
+                self.embed[i * EMBED_DIM..(i + 1) * EMBED_DIM].copy_from_slice(row);
+            }
+        }
+    }
+}
+
+// ── Math helpers ──────────────────────────────────────────────────────────────
+
+fn dense_forward(w: &[f32], b: &[f32], x: &[f32], out_size: usize) -> Vec<f32> {
+    let in_size = x.len();
+    let mut out = alloc::vec![0.0f32; out_size];
+    for i in 0..out_size {
+        let mut s = b[i];
+        for j in 0..in_size { s += w[i * in_size + j] * x[j]; }
+        out[i] = s;
+    }
+    out
+}
+
+fn relu_inplace(v: &mut Vec<f32>) {
+    for x in v.iter_mut() { if *x < 0.0 { *x = 0.0; } }
 }
 
 #[inline]
 fn fast_exp(x: f32) -> f32 {
-    // Schraudolph approximation — same as ai_subsystem/src/inference.rs.
     let i = (x.to_bits() as i64)
         .wrapping_add(((127.0_f32 / core::f32::consts::LN_2) as i64) << 23) as u32;
     f32::from_bits(i)
@@ -302,8 +426,6 @@ fn fast_exp(x: f32) -> f32 {
 
 // ── Per-task syscall context ring ─────────────────────────────────────────────
 
-/// Per-task circular buffer of the last CONTEXT_LEN syscall numbers.
-/// Stored separately from the histogram (which is unordered frequency counts).
 pub struct SyscallContext {
     ring: [u16; CONTEXT_LEN],
     pos:  usize,
@@ -315,54 +437,60 @@ impl SyscallContext {
         Self { ring: [0u16; CONTEXT_LEN], pos: 0, full: false }
     }
 
-    /// Push the most recent syscall number into the ring.
     pub fn push(&mut self, nr: u64) {
         self.ring[self.pos] = nr.min(VOCAB_SIZE as u64 - 1) as u16;
         self.pos = (self.pos + 1) % CONTEXT_LEN;
         if self.pos == 0 { self.full = true; }
     }
 
-    /// Snapshot the ring in chronological order for the transformer.
     pub fn snapshot(&self) -> [u16; CONTEXT_LEN] {
+        let mut out = [0u16; CONTEXT_LEN];
         if !self.full && self.pos < CONTEXT_LEN {
-            // Not yet full — pad head with zeros.
-            let mut out = [0u16; CONTEXT_LEN];
             for i in 0..self.pos {
                 out[CONTEXT_LEN - self.pos + i] = self.ring[i];
             }
-            out
         } else {
-            let mut out = [0u16; CONTEXT_LEN];
             for i in 0..CONTEXT_LEN {
                 out[i] = self.ring[(self.pos + i) % CONTEXT_LEN];
             }
-            out
         }
+        out
     }
+
+    pub fn is_warm(&self) -> bool { self.full || self.pos >= 8 }
 }
 
 // ── Global state ──────────────────────────────────────────────────────────────
 
 static MODEL: Mutex<Option<TransformerSchedModel>> = Mutex::new(None);
 
-// Per-PID syscall context rings — populated by the syscall dispatcher.
 static CONTEXTS: Mutex<alloc::collections::BTreeMap<u64, SyscallContext>>
     = Mutex::new(alloc::collections::BTreeMap::new());
 
-// Previous prediction per PID — needed for SGD feedback.
-static PREV_PRED: Mutex<alloc::collections::BTreeMap<u64, ([u16; CONTEXT_LEN], SchedDecision)>>
+/// Previous context snapshot + last actual wait_us (for SGD feedback).
+struct PendingFeedback {
+    ctx:     [u16; CONTEXT_LEN],
+    wait_us: u64,
+}
+static PENDING: Mutex<alloc::collections::BTreeMap<u64, PendingFeedback>>
     = Mutex::new(alloc::collections::BTreeMap::new());
 
-/// Initialise the transformer scheduler at kernel boot.
+/// How many descheduling events until we trigger co-occurrence init.
+static COOC_INIT_DONE: core::sync::atomic::AtomicBool
+    = core::sync::atomic::AtomicBool::new(false);
+
 pub fn init() {
     *MODEL.lock() = Some(TransformerSchedModel::new());
-    crate::klog!(INFO, "transformer_sched: initialized ({} embed params, {} attn params)",
+    crate::klog!(INFO,
+        "transformer_sched: {} total params (embed={}, attn={}, head={})",
+        VOCAB_SIZE * EMBED_DIM + 3 * ATTN_DIM * EMBED_DIM
+            + HEAD_HIDDEN * ATTN_DIM + N_OUTPUTS * HEAD_HIDDEN,
         VOCAB_SIZE * EMBED_DIM,
-        2 * ATTN_DIM * EMBED_DIM);
+        3 * ATTN_DIM * EMBED_DIM,
+        HEAD_HIDDEN * ATTN_DIM + N_OUTPUTS * HEAD_HIDDEN);
 }
 
-/// Record a syscall number for the current task's context window.
-/// Called from the main syscall dispatcher — zero allocation, O(1).
+/// O(1) syscall recording — called from every syscall dispatch.
 pub fn record_syscall(pid: u64, nr: u64) {
     CONTEXTS.lock()
         .entry(pid)
@@ -370,55 +498,88 @@ pub fn record_syscall(pid: u64, nr: u64) {
         .push(nr);
 }
 
-/// Run the transformer on `pid`'s current context window.
-/// Returns a scheduling decision to blend with fingerprint cluster hints.
-/// The result is cached in PREV_PRED for the SGD feedback step.
-pub fn predict(pid: u64) -> Option<SchedDecision> {
+/// Record the actual wait latency for a task that just started running.
+/// Called from schedule_from_interrupt after computing wait_ms.
+pub fn record_wait(pid: u64, wait_us: u64) {
     let ctx_snapshot = {
-        let mut ctxs = CONTEXTS.lock();
-        let ctx = ctxs.get(&pid)?;
-        ctx.snapshot()
+        let ctxs = CONTEXTS.lock();
+        ctxs.get(&pid).map(|c| c.snapshot())
     };
-    let decision = MODEL.lock().as_ref()?.forward(&ctx_snapshot);
-    PREV_PRED.lock().insert(pid, (ctx_snapshot, decision));
-    Some(decision)
+    if let Some(ctx) = ctx_snapshot {
+        PENDING.lock().insert(pid, PendingFeedback { ctx, wait_us });
+    }
 }
 
-/// Called on task descheduling with the *actual* observed values.
-/// Updates the output head weights via SGD.
+/// Run transformer forward pass. Returns None if context not warm yet.
+pub fn predict(pid: u64) -> Option<SchedDecision> {
+    let ctx_snapshot = {
+        let ctxs = CONTEXTS.lock();
+        let ctx = ctxs.get(&pid)?;
+        if !ctx.is_warm() { return None; }
+        ctx.snapshot()
+    };
+    MODEL.lock().as_ref().map(|m| m.forward(&ctx_snapshot))
+}
+
+/// Called on task descheduling. Runs SGD step using observed actual values.
 pub fn on_deschedule(pid: u64, actual_nice: i8, actual_burst_ticks: u32, actual_pf: u8) {
-    let prev = PREV_PRED.lock().remove(&pid);
-    if let Some((ctx, _pred)) = prev {
+    // Trigger co-occurrence init after 50 tasks have accumulated histograms.
+    if !COOC_INIT_DONE.load(core::sync::atomic::Ordering::Relaxed) {
+        let n = crate::syscall_stats::pid_count();
+        if n >= 50 {
+            if let Some(model) = MODEL.lock().as_mut() {
+                model.init_from_cooccurrence();
+            }
+            COOC_INIT_DONE.store(true, core::sync::atomic::Ordering::Relaxed);
+            crate::klog!(INFO, "transformer_sched: co-occurrence embedding init done ({} pids)", n);
+        }
+    }
+
+    let feedback = PENDING.lock().remove(&pid);
+    if let Some(fb) = feedback {
         let target = [
-            actual_nice      as f32,
+            actual_nice        as f32,
             actual_burst_ticks as f32,
-            actual_pf        as f32,
+            actual_pf          as f32,
+            fb.wait_us         as f32,
         ];
         if let Some(model) = MODEL.lock().as_mut() {
-            model.sgd_step(&ctx, target);
+            model.sgd_step(&fb.ctx, target);
         }
     }
 }
 
-/// Remove per-task state on process exit.
 pub fn remove(pid: u64) {
     CONTEXTS.lock().remove(&pid);
-    PREV_PRED.lock().remove(&pid);
+    PENDING.lock().remove(&pid);
 }
 
-/// Format model stats for /ai/transformer_sched.
 pub fn format_report() -> alloc::vec::Vec<u8> {
     use alloc::string::String;
-    let guard = MODEL.lock();
-    let steps = guard.as_ref().map(|m| m.steps).unwrap_or(0);
-    let ctx_count = CONTEXTS.lock().len();
-    let mut out = String::from("NodeAI Transformer Scheduler\n");
-    out.push_str("==============================\n");
-    out.push_str(&alloc::format!("embed_params : {}\n", VOCAB_SIZE * EMBED_DIM));
-    out.push_str(&alloc::format!("attn_params  : {}\n", 3 * ATTN_DIM * EMBED_DIM));
-    out.push_str(&alloc::format!("head_params  : {}\n", 16 * ATTN_DIM + 3 * 16));
-    out.push_str(&alloc::format!("sgd_steps    : {}\n", steps));
-    out.push_str(&alloc::format!("active_pids  : {}\n", ctx_count));
-    out.push_str(&alloc::format!("context_len  : {}\n", CONTEXT_LEN));
+    let guard  = MODEL.lock();
+    let steps  = guard.as_ref().map(|m| m.steps).unwrap_or(0);
+    let ctx_n  = CONTEXTS.lock().len();
+    let warm_n = CONTEXTS.lock().values().filter(|c| c.is_warm()).count();
+    let cooc   = COOC_INIT_DONE.load(core::sync::atomic::Ordering::Relaxed);
+
+    let total_params = VOCAB_SIZE * EMBED_DIM
+        + 3 * ATTN_DIM * EMBED_DIM
+        + HEAD_HIDDEN * ATTN_DIM + HEAD_HIDDEN
+        + N_OUTPUTS * HEAD_HIDDEN + N_OUTPUTS;
+
+    let mut out = String::from("NodeAI Transformer Scheduler (full backprop)\n");
+    out.push_str("=============================================\n");
+    out.push_str(&alloc::format!("total_params    : {}\n", total_params));
+    out.push_str(&alloc::format!("embed_params    : {} ({}×{})\n",
+        VOCAB_SIZE * EMBED_DIM, VOCAB_SIZE, EMBED_DIM));
+    out.push_str(&alloc::format!("attn_params     : {} (3×{}×{})\n",
+        3 * ATTN_DIM * EMBED_DIM, ATTN_DIM, EMBED_DIM));
+    out.push_str(&alloc::format!("head_params     : {}\n",
+        HEAD_HIDDEN * ATTN_DIM + N_OUTPUTS * HEAD_HIDDEN));
+    out.push_str(&alloc::format!("sgd_steps       : {}\n", steps));
+    out.push_str(&alloc::format!("active_pids     : {} ({} warm)\n", ctx_n, warm_n));
+    out.push_str(&alloc::format!("cooc_init_done  : {}\n", cooc));
+    out.push_str(&alloc::format!("context_len     : {}\n", CONTEXT_LEN));
+    out.push_str(&alloc::format!("outputs         : [nice, burst_ticks, pf_pages, wait_us]\n"));
     out.into_bytes()
 }

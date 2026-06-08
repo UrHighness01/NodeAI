@@ -56,6 +56,20 @@ pub fn all_pids() -> alloc::vec::Vec<u64> {
     STATS.lock().keys().copied().collect()
 }
 
+/// Number of tracked PIDs (used by transformer for co-occurrence warm-start check).
+pub fn pid_count() -> usize {
+    STATS.lock().len()
+}
+
+/// Call `f` with each PID's raw histogram slice. Used by transformer for
+/// co-occurrence-based embedding initialization — read-only, no allocation.
+pub fn visit_histograms<F: FnMut(&[u32; NR_TRACKED])>(mut f: F) {
+    let map = STATS.lock();
+    for counts in map.values() {
+        f(counts);
+    }
+}
+
 /// Generate a text summary for /proc/syscall_stats.
 pub fn format_summary() -> alloc::vec::Vec<u8> {
     use alloc::string::String;

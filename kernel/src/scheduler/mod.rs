@@ -44,10 +44,11 @@ pub fn spawn_kernel_thread(name: &str, entry: fn() -> !) {
         + (STACK_PAGES as u64 * crate::memory::PAGE_SIZE);
 
     let pid = alloc_pid();
-    let task = Task::new_kernel_thread(pid, name, entry as u64, stack_top);
+    let mut task = Task::new_kernel_thread(pid, name, entry as u64, stack_top);
 
     crate::klog!(INFO, "Scheduler: spawning '{}' pid={} entry={:#x}", name, pid, entry as u64);
 
+    task.runnable_at = UPTIME_MS.load(core::sync::atomic::Ordering::Relaxed);
     TASKS.lock().insert(pid, task);
     runqueue::enqueue(pid);
 }
@@ -166,19 +167,25 @@ pub unsafe extern "C" fn schedule_from_interrupt(old_rsp: u64) -> u64 {
         let mut tasks = TASKS.lock();
         match tasks.get_mut(&next_pid) {
             Some(t) => {
+                // Measure scheduling latency: how long did this task wait to run?
+                let wait_ms = uptime_ms.saturating_sub(t.runnable_at);
+                let wait_us = wait_ms * 1000;
+                t.sched_latency_total_us = t.sched_latency_total_us.saturating_add(wait_us);
+                t.sched_count += 1;
+                t.ai_profile.ticks_run += 1;
                 t.state = task::TaskState::Running;
+
                 // Apply transformer scheduling decision (blended with cluster profile).
                 if let Some(td) = transformer_decision {
                     if t.intent == 0 {
-                        // Blend: average transformer nice with fingerprint nice.
                         let blended = ((td.nice_delta as i16 + t.ai_nice_adjust as i16) / 2) as i8;
                         t.ai_nice_adjust = blended;
                     }
-                    // Transformer burst overrides quantum prophecy if it has learned something
-                    // (steps > 100 in the model — we can't easily check here, so always use it
-                    // but start it at a reasonable default that converges quickly).
-                    let _ = td.burst_ticks; // used by next_burst_ticks path above
+                    let _ = td.burst_ticks;
                 }
+
+                // Feed actual scheduling latency back to transformer as 4th target.
+                crate::transformer_sched::record_wait(next_pid, wait_us);
                 crate::gdt::update_rsp0(t.kernel_stack_top);
                 let cr3    = t.cr3;
                 let fs     = t.fs_base;
@@ -215,6 +222,29 @@ pub fn free_mb() -> u64 {
     crate::memory::free_mb()
 }
 
+/// Format scheduling latency stats for /proc/sched_latency.
+pub fn format_sched_latency() -> alloc::vec::Vec<u8> {
+    use alloc::string::String;
+    let tasks = TASKS.lock();
+    let mut out = String::from("PID   NAME             AVG_WAIT_US  TOTAL_WAIT_US  SCHEDULES\n");
+    out.push_str("----  ---------------  -----------  -------------  ---------\n");
+    let mut entries: alloc::vec::Vec<(u64, u64, u64, u64, alloc::string::String)> = tasks.iter()
+        .filter(|(_, t)| t.sched_count > 0)
+        .map(|(pid, t)| {
+            let avg = t.sched_latency_total_us / t.sched_count;
+            (*pid, avg, t.sched_latency_total_us, t.sched_count, t.name.clone())
+        })
+        .collect();
+    // Sort by average wait descending (highest latency first).
+    entries.sort_by(|a, b| b.1.cmp(&a.1));
+    for (pid, avg, total, count, name) in &entries {
+        out.push_str(&alloc::format!(
+            "{:<5} {:<16} {:<12} {:<14} {}\n",
+            pid, &name[..name.len().min(15)], avg, total, count));
+    }
+    out.into_bytes()
+}
+
 /// Apply an AI-proposed scheduler quantum.  0 = reset to default.
 pub fn set_quantum_ms(ms: u64) {
     QUANTUM_MS.store(ms, core::sync::atomic::Ordering::Relaxed);
@@ -244,10 +274,12 @@ pub fn sleep_current() {
 /// Wake a sleeping task — mark Runnable and re-add to run queue.
 /// No-op if the task is not sleeping.
 pub fn wake_pid(pid: Pid) {
+    let now = UPTIME_MS.load(core::sync::atomic::Ordering::Relaxed);
     let mut tasks = TASKS.lock();
     if let Some(t) = tasks.get_mut(&pid) {
         if t.state == crate::scheduler::task::TaskState::Sleeping {
             t.state = crate::scheduler::task::TaskState::Runnable;
+            t.runnable_at = now;
             drop(tasks);
             runqueue::enqueue(pid);
         }
