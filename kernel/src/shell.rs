@@ -3926,6 +3926,7 @@ fn cmd_wget(args: &str) {
             rcv_nxt: 0,
             snd_wnd: 65535,
             rcv_buf: Vec::new(),
+            cwnd: 1460, ssthresh: 65535,
         });
     }
 

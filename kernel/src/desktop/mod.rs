@@ -1872,6 +1872,7 @@ fn br_fetch(url: &str) -> usize {
             rcv_nxt: 0, // updated to server_isn+1 when SYN-ACK arrives
             snd_wnd: 65535,
             rcv_buf: Vec::new(),
+            cwnd: 1460, ssthresh: 65535,
         });
     }
 
@@ -1984,6 +1985,7 @@ pub fn br_fetch_raw(url: &str) -> Vec<u8> {
         state: crate::net::tcp::TcpState::SynSent,
         snd_nxt: isn.wrapping_add(1), snd_una: isn,
         rcv_nxt: 0, snd_wnd: 65535, rcv_buf: Vec::new(),
+        cwnd: 1460, ssthresh: 65535,
     });
 
     let deadline = crate::scheduler::uptime_ms() + 5000;

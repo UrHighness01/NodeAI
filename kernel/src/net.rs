@@ -1323,7 +1323,12 @@ pub mod tcp {
         pub rcv_nxt:   u32,   // next expected receive sequence number
         pub snd_wnd:   u16,   // send window (from remote)
         pub rcv_buf:   Vec<u8>,  // received data waiting for application read
+        // ── TCP Reno congestion control ──────────────────────────────────────
+        pub cwnd:      u32,   // congestion window in bytes (Reno)
+        pub ssthresh:  u32,   // slow-start threshold
     }
+
+    const MSS: u32 = 1460;
 
     impl TcpSocket {
         fn new_syn_received(irs: u32) -> Self {
@@ -1336,6 +1341,8 @@ pub mod tcp {
                 rcv_nxt: irs.wrapping_add(1),
                 snd_wnd: 65535,
                 rcv_buf: Vec::new(),
+                cwnd:    MSS,   // slow start: begin at 1 MSS
+                ssthresh: 65535,
             }
         }
     }
@@ -1498,6 +1505,25 @@ pub mod tcp {
             TcpState::Established => {
                 sock.snd_wnd = tcph.window;
 
+                // TCP Reno CWND update on ACK.
+                if flags & ACK != 0 {
+                    let acked = tcph.ack.wrapping_sub(sock.snd_una);
+                    if acked > 0 && acked <= 65536 {
+                        sock.snd_una = tcph.ack;
+                        // Slow start: cwnd < ssthresh → grow by acked bytes.
+                        // Congestion avoidance: grow by MSS²/cwnd per ACK.
+                        if sock.cwnd < sock.ssthresh {
+                            sock.cwnd = sock.cwnd.saturating_add(acked);
+                        } else {
+                            let inc = MSS.saturating_mul(acked) / sock.cwnd.max(1);
+                            sock.cwnd = sock.cwnd.saturating_add(inc.max(1));
+                        }
+                        // Cap at remote receiver window.
+                        let cap = (sock.snd_wnd as u32).max(MSS);
+                        if sock.cwnd > cap { sock.cwnd = cap; }
+                    }
+                }
+
                 // Accept in-order data (FIN may arrive in the same segment)
                 if !data.is_empty() && tcph.seq == sock.rcv_nxt {
                     sock.rcv_buf.extend_from_slice(data);
@@ -1576,13 +1602,16 @@ pub mod tcp {
             crate::klog!(DEBUG, "TCP: send {} bytes port {}\u{2194}{} seq={} ack={} state={:?}",
                 data.len(), local_port, remote_port, sock.snd_nxt, sock.rcv_nxt, sock.state);
             if sock.state != TcpState::Established && sock.state != TcpState::Accepted { return 0; }
+            // Reno: limit send to min(cwnd, snd_wnd).
+            let allowed = (sock.cwnd as usize).min(sock.snd_wnd as usize).max(MSS as usize);
+            let send_data = &data[..data.len().min(allowed)];
             let seg = TcpHeader::build(
                 local_port, remote_port,
                 sock.snd_nxt, sock.rcv_nxt,
                 PSH | ACK, 65535,
-                our_ip, remote_ip, data,
+                our_ip, remote_ip, send_data,
             );
-            sock.snd_nxt = sock.snd_nxt.wrapping_add(data.len() as u32);
+            sock.snd_nxt = sock.snd_nxt.wrapping_add(send_data.len() as u32);
             let ip_hdr = Ipv4Header::build(IP_PROTO_TCP, our_ip, remote_ip, seg.len());
             let mut pkt = ip_hdr;
             pkt.extend_from_slice(&seg);
@@ -1590,7 +1619,7 @@ pub mod tcp {
             let dst_mac = super::arp_resolve_for_ip(&remote_ip).unwrap_or([0xFF; 6]);
             let frame = super::EthFrame::build(dst_mac, our_mac, super::ETHERTYPE_IPV4, &pkt);
             super::transmit(&frame);
-            return data.len();
+            return send_data.len();
         }
         0
     }
@@ -1717,6 +1746,8 @@ pub mod tcp {
             rcv_nxt: 0,     // filled in when SYN-ACK arrives
             snd_wnd: 65535,
             rcv_buf: Vec::new(),
+            cwnd:    MSS,
+            ssthresh: 65535,
         };
         let key = TcpSocketKey { local_port, remote_ip, remote_port };
         SOCKETS.lock().insert(key, TcpSocket { state: TcpState::SynSent, ..sock });

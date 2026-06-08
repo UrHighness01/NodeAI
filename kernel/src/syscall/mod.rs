@@ -58,6 +58,45 @@ static FD_FLAGS: Mutex<BTreeMap<FdKey, i32>> = Mutex::new(BTreeMap::new());
 
 const O_NONBLOCK: i32 = 0x800;
 
+// ── Timerfd expiry side-table (needed by timerfd_gettime) ────────────────────
+/// (pid, fd) → (expiry_ms_absolute, interval_ms).  Updated by timerfd_settime.
+static TIMERFD_EXPIRY: Mutex<BTreeMap<FdKey, (u64, u64)>> = Mutex::new(BTreeMap::new());
+
+// ── Behavioral syscall confinement ────────────────────────────────────────────
+/// Pids currently confined due to anomalous behavior scores.
+/// While confined, dangerous syscalls (fork, execve, ptrace) are blocked.
+static CONFINED_PIDS: spin::Mutex<alloc::collections::BTreeSet<u64>>
+    = spin::Mutex::new(alloc::collections::BTreeSet::new());
+
+const CONFINEMENT_THRESHOLD: f32 = 0.75;
+const CONFINEMENT_RELEASE:   f32 = 0.25;
+
+/// Syscall numbers blocked for confined processes.
+const CONFINEMENT_BLOCKED: &[u64] = &[
+    nr::FORK, nr::CLONE, 56 /*clone*/, 435 /*clone3*/,
+    nr::EXECVE,
+    101, // ptrace
+];
+
+/// Public check used by /proc/confinement and auto_security.
+pub fn is_confined(pid: u64) -> bool {
+    CONFINED_PIDS.lock().contains(&pid)
+}
+
+/// Format /proc/confinement.
+pub fn format_confinement() -> alloc::vec::Vec<u8> {
+    let confined = CONFINED_PIDS.lock();
+    if confined.is_empty() {
+        return b"no processes confined\n".to_vec();
+    }
+    let mut out = alloc::string::String::from("PID     ANOMALY_SCORE\n");
+    for &pid in confined.iter() {
+        let score = crate::anomaly::score(pid);
+        out.push_str(&alloc::format!("{:<7} {:.3}\n", pid, score));
+    }
+    out.into_bytes()
+}
+
 // ── Virtual Memory Areas ──────────────────────────────────────────────────────
 /// A lazily-mapped anonymous region created by sys_mmap.  Pages are allocated
 /// on first access (#PF not-present) rather than upfront.
@@ -468,6 +507,25 @@ pub unsafe extern "C" fn syscall_dispatch_extern(
         ai_subsystem::event_bus::publish(
             ai_subsystem::event_bus::KernelEvent::SyscallIssued { pid, syscall_nr: nr });
     }
+
+    // ── Behavioral syscall confinement ────────────────────────────────────────
+    // Promote/demote confinement status based on live anomaly score.
+    {
+        let mut confined = CONFINED_PIDS.lock();
+        if score >= CONFINEMENT_THRESHOLD && !confined.contains(&pid) {
+            confined.insert(pid);
+            drop(confined);
+            crate::auto_security::on_confinement(pid, score);
+        } else if score < CONFINEMENT_RELEASE && confined.contains(&pid) {
+            confined.remove(&pid);
+        }
+    }
+    // Block dangerous syscalls for confined processes.
+    if CONFINED_PIDS.lock().contains(&pid) && CONFINEMENT_BLOCKED.contains(&nr) {
+        crate::klog!(WARN, "CONFINEMENT: pid={} blocked nr={}", pid, nr);
+        return EPERM;
+    }
+
     let result = match nr {
         // ── Core syscalls (file I/O, memory, process) ───────────────────────
         nr::READ          => sys_read(arg0, arg1, arg2),
@@ -599,7 +657,7 @@ pub unsafe extern "C" fn syscall_dispatch_extern(
         nr::INOTIFY_INIT1     => sys_inotify_init1(arg0 as i32),
         nr::INOTIFY_ADD_WATCH => sys_inotify_add_watch(arg0, arg1, arg2 as u32),
         nr::INOTIFY_RM_WATCH  => sys_inotify_rm_watch(arg0, arg1 as i32),
-        nr::SIGNALFD4     => { let pid=crate::scheduler::current_pid(); alloc_fd(pid) as i64 }
+        nr::SIGNALFD4     => sys_signalfd4(arg0 as i64, arg1, arg2, arg3 as i32),
         nr::CLONE3        => sys_fork(), // simplified clone3 — just fork
         // ── AI subsystem ─────────────────────────────────────────────────
         nr::RT_SIGRETURN  => sys_rt_sigreturn(),
@@ -3101,10 +3159,20 @@ impl crate::vfs::FileHandle for TimerHandle {
         b[..8].copy_from_slice(&bytes);
         Ok(8)
     }
+    fn bytes_available(&self) -> usize {
+        let now = crate::scheduler::uptime_ms();
+        if self.expirations > 0 { return 8; }
+        if self.expiry_ms > 0 && now >= self.expiry_ms { 8 } else { 0 }
+    }
     fn write(&mut self, _b: &[u8]) -> crate::vfs::VfsResult<usize> { Ok(0) }
     fn seek(&mut self, _: u64) -> crate::vfs::VfsResult<u64> { Ok(0) }
     fn stat(&self) -> crate::vfs::VfsResult<crate::vfs::Stat> {
         Ok(crate::vfs::Stat { ino: 0, size: 0, is_dir: false, nlink: 1, uid: 0, gid: 0, mode: 0o600 })
+    }
+    fn clone_box(&self) -> Option<alloc::boxed::Box<dyn crate::vfs::FileHandle>> {
+        Some(alloc::boxed::Box::new(TimerHandle {
+            expiry_ms: self.expiry_ms, interval_ms: self.interval_ms, expirations: self.expirations,
+        }))
     }
 }
 
@@ -3113,9 +3181,7 @@ unsafe fn sys_timerfd_create(_clockid: u64, _flags: u64) -> i64 {
     let pid = crate::scheduler::current_pid();
     let fd = alloc_fd(pid);
     FD_TABLE.lock().insert((pid, fd), alloc::boxed::Box::new(TimerHandle {
-        expiry_ms: 0,
-        interval_ms: 0,
-        expirations: 0,
+        expiry_ms: 0, interval_ms: 0, expirations: 0,
     }));
     fd as i64
 }
@@ -3132,17 +3198,13 @@ unsafe fn sys_timerfd_settime(fd: u64, _flags: u64, new_value_ptr: u64, _old_ptr
     let interval_ms = (iv_sec as u64) * 1000 + (iv_nsec.max(0) as u64) / 1_000_000;
     let value_ms    = (val_sec as u64) * 1000 + (val_nsec.max(0) as u64) / 1_000_000;
     let pid = crate::scheduler::current_pid();
+    let now = crate::scheduler::uptime_ms();
+    let expiry_ms = if value_ms > 0 { now + value_ms } else { 0 };
+    // Update side table so timerfd_gettime can query without a downcast.
+    TIMERFD_EXPIRY.lock().insert((pid, fd), (expiry_ms, interval_ms));
     let mut table = FD_TABLE.lock();
     if let Some(h) = table.get_mut(&(pid, fd as u64)) {
-        let h_bytes = h as *mut alloc::boxed::Box<dyn crate::vfs::FileHandle> as *mut u8;
-        let _ = h_bytes; // just update via downcast trick: store params in a side table
-        // Simpler: replace the handle entirely
-        let now = crate::scheduler::uptime_ms();
-        *h = alloc::boxed::Box::new(TimerHandle {
-            expiry_ms:   if value_ms > 0 { now + value_ms } else { 0 },
-            interval_ms,
-            expirations: 0,
-        });
+        *h = alloc::boxed::Box::new(TimerHandle { expiry_ms, interval_ms, expirations: 0 });
         return 0;
     }
     EBADF
@@ -3150,10 +3212,17 @@ unsafe fn sys_timerfd_settime(fd: u64, _flags: u64, new_value_ptr: u64, _old_ptr
 
 unsafe fn sys_timerfd_gettime(fd: u64, curr_value_ptr: u64) -> i64 {
     if curr_value_ptr == 0 { return EFAULT; }
-    let _ = fd;
-    // Write zero itimerspec (simplified)
+    let pid = crate::scheduler::current_pid();
+    let (expiry_ms, interval_ms) = TIMERFD_EXPIRY.lock()
+        .get(&(pid, fd)).copied().unwrap_or((0, 0));
+    let now = crate::scheduler::uptime_ms();
+    let remaining_ms = if expiry_ms > now { expiry_ms - now } else { 0 };
     if let Ok(p) = validate_user_ptr_mut(curr_value_ptr, 32) {
-        core::ptr::write_bytes(p, 0, 32);
+        let p = p as *mut i64;
+        *p.add(0) = (interval_ms / 1000) as i64;                      // it_interval.tv_sec
+        *p.add(1) = ((interval_ms % 1000) * 1_000_000) as i64;        // it_interval.tv_nsec
+        *p.add(2) = (remaining_ms / 1000) as i64;                     // it_value.tv_sec
+        *p.add(3) = ((remaining_ms % 1000) * 1_000_000) as i64;       // it_value.tv_nsec
     }
     0
 }
@@ -3417,6 +3486,74 @@ unsafe fn sys_ftruncate(fd: u64, length: u64) -> i64 {
         Ok(())  => 0,
         Err(crate::vfs::VfsError::ReadOnly) => -30, // EROFS
         Err(_)  => EINVAL,
+    }
+}
+
+// ── signalfd ──────────────────────────────────────────────────────────────────
+
+/// An open signalfd handle.  Reading it harvests pending signals matching `mask`
+/// from the task's pending_signals bitmap and formats them as signalfd_siginfo
+/// structs (128 bytes each).  This lets userspace handle signals synchronously
+/// via read()/epoll() without registering async signal handlers.
+struct SignalfdHandle {
+    pid:  u64,
+    mask: u64,
+}
+
+impl crate::vfs::FileHandle for SignalfdHandle {
+    fn bytes_available(&self) -> usize {
+        let pending = crate::scheduler::get_pending_signals(self.pid as crate::scheduler::Pid);
+        if pending & self.mask != 0 { 128 } else { 0 }
+    }
+
+    fn read(&mut self, buf: &mut [u8]) -> crate::vfs::VfsResult<usize> {
+        if buf.len() < 128 { return Err(crate::vfs::VfsError::InvalidArgument); }
+        match crate::scheduler::consume_masked_signal(self.pid as crate::scheduler::Pid, self.mask) {
+            None => Ok(0), // no pending signal matching mask
+            Some(signum) => {
+                // Write a signalfd_siginfo (128 bytes).  Only ssi_signo is populated.
+                unsafe { core::ptr::write_bytes(buf.as_mut_ptr(), 0, 128.min(buf.len())); }
+                let ssi_signo = signum as u32;
+                buf[..4].copy_from_slice(&ssi_signo.to_ne_bytes());
+                Ok(128)
+            }
+        }
+    }
+
+    fn write(&mut self, _: &[u8]) -> crate::vfs::VfsResult<usize> { Ok(0) }
+    fn seek(&mut self, _: u64) -> crate::vfs::VfsResult<u64> { Ok(0) }
+    fn stat(&self) -> crate::vfs::VfsResult<crate::vfs::Stat> {
+        Ok(crate::vfs::Stat { ino: 0, size: 0, is_dir: false, nlink: 1, uid: 0, gid: 0, mode: 0o600 })
+    }
+    fn clone_box(&self) -> Option<alloc::boxed::Box<dyn crate::vfs::FileHandle>> {
+        Some(alloc::boxed::Box::new(SignalfdHandle { pid: self.pid, mask: self.mask }))
+    }
+}
+
+/// sys_signalfd4(fd, sigmask_ptr, sigsetsz, flags)
+/// fd == -1: create new fd; otherwise update mask on existing fd.
+unsafe fn sys_signalfd4(fd: i64, sigmask_ptr: u64, _sigsetsz: u64, _flags: i32) -> i64 {
+    let pid = crate::scheduler::current_pid();
+    let mask: u64 = if sigmask_ptr != 0 {
+        match validate_user_ptr(sigmask_ptr, 8) {
+            Ok(p) => core::ptr::read_unaligned(p as *const u64),
+            Err(e) => return e,
+        }
+    } else { u64::MAX }; // default: listen to all signals
+
+    if fd == -1 {
+        let new_fd = alloc_fd(pid);
+        FD_TABLE.lock().insert((pid, new_fd), alloc::boxed::Box::new(SignalfdHandle { pid, mask }));
+        new_fd as i64
+    } else {
+        // Update mask on existing fd by replacing the handle.
+        let mut tbl = FD_TABLE.lock();
+        if tbl.contains_key(&(pid, fd as u64)) {
+            tbl.insert((pid, fd as u64), alloc::boxed::Box::new(SignalfdHandle { pid, mask }));
+            fd
+        } else {
+            EBADF
+        }
     }
 }
 

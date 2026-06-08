@@ -760,6 +760,23 @@ pub fn take_pending_signal(pid: Pid) -> Option<(u8, u64)> {
     Some((signum, handler))
 }
 
+/// Return the raw pending_signals bitmask for signalfd polling (non-consuming).
+pub fn get_pending_signals(pid: Pid) -> u64 {
+    TASKS.lock().get(&pid).map(|t| t.pending_signals).unwrap_or(0)
+}
+
+/// Consume one pending signal matching `mask` for signalfd::read().
+/// Returns the signal number removed, or None if no match.
+pub fn consume_masked_signal(pid: Pid, mask: u64) -> Option<u8> {
+    let mut tasks = TASKS.lock();
+    let t = tasks.get_mut(&pid)?;
+    let matched = t.pending_signals & mask;
+    if matched == 0 { return None; }
+    let signum = matched.trailing_zeros() as u8;
+    t.pending_signals &= !(1u64 << signum);
+    Some(signum)
+}
+
 /// Set a signal handler for the given signal number.
 pub fn set_signal_handler(pid: Pid, signum: usize, handler: u64) {
     let mut tasks = TASKS.lock();

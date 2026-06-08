@@ -184,6 +184,33 @@ pub fn on_stack_overflow(pid: u64) {
     let _ = crate::vfs::append_file("/var/log/security.log", text.as_bytes());
 }
 
+/// Called when behavioral anomaly score crosses the confinement threshold.
+/// The process's dangerous syscalls are now blocked by the syscall dispatcher.
+pub fn on_confinement(pid: u64, score: f32) {
+    if !ENABLED.load(Ordering::Relaxed) { return; }
+    let now  = crate::scheduler::uptime_ms();
+    let name = crate::scheduler::task_name(pid as crate::scheduler::Pid)
+        .unwrap_or_else(|| "???".to_owned());
+    let ev = ThreatEvent {
+        pid, name, level: ThreatLevel::High,
+        kind:   "behavioral-confinement".to_owned(),
+        action: "syscall-restricted".to_owned(),
+        timestamp: now,
+    };
+    let mut state = SEC.lock();
+    state.log.push(ev.clone());
+    drop(state);
+    EVENTS_CT.fetch_add(1, Ordering::Relaxed);
+    crate::klog!(WARN,
+        "auto_security: pid={} CONFINED score={:.3} — fork/exec/ptrace blocked",
+        pid, score);
+    let text = format!(
+        "{}: pid={} name={} score={:.3} kind=behavioral-confinement action=syscall-restricted\n",
+        now, pid, ev.name, score
+    );
+    let _ = crate::vfs::append_file("/var/log/security.log", text.as_bytes());
+}
+
 // ── Background watchdog ───────────────────────────────────────────────────────
 
 /// Called from the idle loop every tick.

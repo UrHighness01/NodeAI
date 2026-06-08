@@ -25,6 +25,7 @@ pub fn init() {
     write_file("/proc", "epoll",          crate::syscall::format_epoll_table());
     write_file("/proc", "mem_pressure",   crate::mem_pressure::format_status());
     write_file("/proc", "page_cache",     crate::page_cache::format_stats());
+    write_file("/proc", "confinement",    crate::syscall::format_confinement());
 
     // /ai
     write_file("/ai", "status",       ai_status());
@@ -53,6 +54,7 @@ pub fn refresh() {
     write_file("/proc", "epoll",          crate::syscall::format_epoll_table());
     write_file("/proc", "mem_pressure",   crate::mem_pressure::format_status());
     write_file("/proc", "page_cache",     crate::page_cache::format_stats());
+    write_file("/proc", "confinement",    crate::syscall::format_confinement());
     write_file("/ai",   "anomalies",     crate::anomaly::format_report());
     write_file("/ai",   "tunables",      crate::tunables::format_table());
     write_file("/ai",   "status",        ai_status());
