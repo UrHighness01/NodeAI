@@ -1053,19 +1053,28 @@ fn handle_arp(src_mac: [u8; 6], payload: &[u8]) -> Option<Vec<u8>> {
         return None;
     }
     if arp.op != ARP_REQUEST { return None; }
-    let our_ip = unsafe { OUR_IP };
+    let our_ip  = unsafe { OUR_IP };
     let our_mac = unsafe { OUR_MAC };
-    if arp.tpa != our_ip { return None; }
+    let wifi_ip = crate::wifi::get_ip();
+    if arp.tpa != our_ip && arp.tpa != wifi_ip { return None; }
+    // Reply with the MAC that matches the queried IP
+    let reply_mac = if arp.tpa == wifi_ip && wifi_ip != [0,0,0,0] {
+        crate::wifi::wifi_mac()
+    } else {
+        our_mac
+    };
+    let reply_ip  = arp.tpa;
 
-    let reply_payload = ArpPacket::build_reply(our_mac, our_ip, src_mac, arp.spa);
-    Some(EthFrame::build(src_mac, our_mac, ETHERTYPE_ARP, &reply_payload))
+    let reply_payload = ArpPacket::build_reply(reply_mac, reply_ip, src_mac, arp.spa);
+    Some(EthFrame::build(src_mac, reply_mac, ETHERTYPE_ARP, &reply_payload))
 }
 
 fn handle_ipv4(src_mac: [u8; 6], payload: &[u8]) -> Option<Vec<u8>> {
     let iph = Ipv4Header::parse(payload)?;
-    let our_ip = unsafe { OUR_IP };
-    // Accept packets to our IP or broadcast (needed for DHCP)
-    if iph.dst != our_ip && iph.dst != [255, 255, 255, 255] { return None; }
+    let our_ip  = unsafe { OUR_IP };
+    let wifi_ip = crate::wifi::get_ip();
+    // Accept packets to either interface IP, or broadcast (needed for DHCP)
+    if iph.dst != our_ip && iph.dst != wifi_ip && iph.dst != [255, 255, 255, 255] { return None; }
 
     // Cache the sender's MAC from this IP packet
     arp_cache_insert(iph.src, src_mac);

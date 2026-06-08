@@ -269,6 +269,7 @@ fn idle_loop() -> ! {
         // Process hardware input events outside of IRQ context
         crate::desktop::process_input_events();
         net::poll();
+        wifi::poll();
         net::http_server_poll();
         net::ssh_server_poll();
         crate::desktop::browser_fetch_tick();

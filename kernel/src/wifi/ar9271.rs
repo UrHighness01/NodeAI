@@ -533,7 +533,7 @@ fn extract_eapol<'a>(frame: &'a [u8], expected_src: &[u8; 6]) -> Option<&'a [u8]
 }
 
 /// Build an 802.11 data frame with LLC/SNAP header for the given EtherType.
-fn build_data_frame(src: [u8; 6], dst: [u8; 6], ethertype: u16, payload: &[u8]) -> alloc::vec::Vec<u8> {
+pub fn build_data_frame(src: [u8; 6], dst: [u8; 6], ethertype: u16, payload: &[u8]) -> alloc::vec::Vec<u8> {
     let mut f = alloc::vec::Vec::new();
     // 802.11 Data frame header (24 bytes)
     f.extend_from_slice(&[0x08, 0x01]); // FC: Data, ToDS

@@ -6,6 +6,7 @@
 //!   - PBKDF2-HMAC-SHA1 (RFC 2898) — PMK derivation
 //!   - PRF-384 (IEEE 802.11-2020 §12.7.1.2) — PTK derivation
 //!   - AES-128 software (FIPS 197) — for KCK/KEK/MIC
+//!   - CCMP (IEEE 802.11i §8.3.3) — data frame encryption/decryption
 //!   - AES-128-CMAC (RFC 4493) — EAPOL MIC computation
 //!
 //! Not implemented here (Phase 5): CCMP for data frame encryption.
@@ -414,4 +415,154 @@ pub fn aes_cmac(key: &[u8; 16], msg: &[u8]) -> [u8; 16] {
 /// Compute EAPOL MIC using KCK (first 16 bytes of PTK) and AES-128-CMAC.
 pub fn eapol_mic(kck: &[u8; 16], eapol_frame: &[u8]) -> [u8; 16] {
     aes_cmac(kck, eapol_frame)
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// CCMP — IEEE 802.11i §8.3.3
+// AES-128-CTR for encryption + AES-128-CBC-MAC (CCM) for integrity.
+// 8-byte MIC, 8-byte CCMP header, 48-bit Packet Number (PN).
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Build the 13-byte CCM nonce for CCMP.
+/// priority(1) || A2(6) || PN(6)   — A2 = transmitter MAC
+fn ccmp_nonce(a2: &[u8; 6], pn: u64) -> [u8; 13] {
+    let mut n = [0u8; 13];
+    n[0] = 0; // priority = 0 (QoS not implemented)
+    n[1..7].copy_from_slice(a2);
+    n[7]  = ((pn >> 40) & 0xFF) as u8;
+    n[8]  = ((pn >> 32) & 0xFF) as u8;
+    n[9]  = ((pn >> 24) & 0xFF) as u8;
+    n[10] = ((pn >> 16) & 0xFF) as u8;
+    n[11] = ((pn >>  8) & 0xFF) as u8;
+    n[12] = ( pn        & 0xFF) as u8;
+    n
+}
+
+/// Build CCMP AAD from 802.11 MAC header (IEEE 802.11i §8.3.3.3.2).
+/// Clears WEP bit, zeroes Retry+PwrMgmt+MoreData, zeroes sequence number low bits.
+fn ccmp_aad(mac_hdr: &[u8; 24]) -> [u8; 24] {
+    let mut aad = *mac_hdr;
+    aad[1] &= !0x40; // clear WEP/Protected bit
+    aad[1] &= !0x38; // clear Retry, PwrMgmt, MoreData
+    aad[22] &= 0x0F; // clear sequence number bits [15:4], keep fragment bits
+    aad[23] = 0;
+    aad
+}
+
+/// AES-128-CCM MIC computation over AAD and plaintext.
+fn ccmp_cbcmac(tk: &[u8; 16], nonce: &[u8; 13], aad: &[u8; 24], plaintext: &[u8]) -> [u8; 8] {
+    let rk = aes128_key_expand(tk);
+    // Flags: Adata=1, M=(8-2)/2=3, L=len(q)-1=1 → 0x59
+    let mut b0 = [0u8; 16];
+    b0[0] = 0x59;
+    b0[1..14].copy_from_slice(nonce);
+    let plen = plaintext.len() as u16;
+    b0[14] = (plen >> 8) as u8;
+    b0[15] = (plen & 0xFF) as u8;
+
+    // CBC-MAC over B0
+    let mut x = b0;
+    aes128_encrypt(&mut x, &rk);
+
+    // AAD: length(2) || aad(24) → 26 bytes, padded to 32 (two blocks)
+    let mut aad_block = [0u8; 32];
+    aad_block[0] = 0; aad_block[1] = 24; // len = 24
+    aad_block[2..26].copy_from_slice(aad);
+    for block in aad_block.chunks(16) {
+        let b: [u8; 16] = block.try_into().unwrap_or([0;16]);
+        for i in 0..16 { x[i] ^= b[i]; }
+        aes128_encrypt(&mut x, &rk);
+    }
+
+    // Plaintext blocks
+    let padded_len = (plaintext.len() + 15) & !15;
+    let mut i = 0;
+    while i < padded_len {
+        let mut b = [0u8; 16];
+        let end = (i + 16).min(plaintext.len());
+        b[..end - i].copy_from_slice(&plaintext[i..end]);
+        for j in 0..16 { x[j] ^= b[j]; }
+        aes128_encrypt(&mut x, &rk);
+        i += 16;
+    }
+
+    // Encrypt T (CBC-MAC output) with S_0 (counter=0)
+    let mut s0 = [0u8; 16];
+    s0[0] = 0x01; // L-1 = 1
+    s0[1..14].copy_from_slice(nonce);
+    s0[14] = 0; s0[15] = 0; // counter = 0
+    aes128_encrypt(&mut s0, &rk);
+
+    let mut mic = [0u8; 8];
+    for i in 0..8 { mic[i] = x[i] ^ s0[i]; }
+    mic
+}
+
+/// AES-128-CTR keystream starting at counter=2 (counter=1 is used for MIC).
+fn ccmp_ctr(tk: &[u8; 16], nonce: &[u8; 13], data: &mut [u8]) {
+    let rk = aes128_key_expand(tk);
+    let mut counter: u16 = 1;
+    let mut i = 0;
+    while i < data.len() {
+        counter += 1;
+        let mut ctr_blk = [0u8; 16];
+        ctr_blk[0] = 0x01;
+        ctr_blk[1..14].copy_from_slice(nonce);
+        ctr_blk[14] = (counter >> 8) as u8;
+        ctr_blk[15] = (counter & 0xFF) as u8;
+        aes128_encrypt(&mut ctr_blk, &rk);
+        let end = data.len().min(i + 16);
+        for j in i..end { data[j] ^= ctr_blk[j - i]; }
+        i += 16;
+    }
+}
+
+/// CCMP encrypt: takes plaintext payload, returns ciphertext || MIC(8).
+/// `mac_hdr`: 24-byte 802.11 MAC header. `a2`: transmitter MAC. `pn`: packet number.
+pub fn ccmp_encrypt(tk: &[u8; 16], mac_hdr: &[u8; 24], a2: &[u8; 6],
+                    pn: u64, plaintext: &[u8]) -> alloc::vec::Vec<u8> {
+    let nonce = ccmp_nonce(a2, pn);
+    let aad   = ccmp_aad(mac_hdr);
+    let mic   = ccmp_cbcmac(tk, &nonce, &aad, plaintext);
+    let mut ct = plaintext.to_vec();
+    ccmp_ctr(tk, &nonce, &mut ct);
+    ct.extend_from_slice(&mic);
+    ct
+}
+
+/// CCMP decrypt and verify: strips CCMP header, decrypts, checks 8-byte MIC.
+/// Returns Some(plaintext) on success, None on MIC failure or malformed input.
+/// `frame`: full 802.11 data frame starting from FC. Must be ≥ 32+8=40 bytes.
+pub fn ccmp_decrypt(tk: &[u8; 16], frame: &[u8]) -> Option<alloc::vec::Vec<u8>> {
+    if frame.len() < 40 { return None; }
+
+    // Extract MAC header (24 bytes) and CCMP header (8 bytes)
+    let mac_hdr: &[u8; 24] = frame[0..24].try_into().ok()?;
+    let ccmp_hdr = &frame[24..32];
+
+    // Reconstruct PN from CCMP header (IEEE 802.11i §8.3.3.2 Figure 46):
+    // PN0=hdr[0], PN1=hdr[1], hdr[2]=0, hdr[3]=KeyID(bit5)|ExtIV(bit5),
+    // PN2=hdr[4], PN3=hdr[5], PN4=hdr[6], PN5=hdr[7]
+    let pn = (ccmp_hdr[7] as u64) << 40 | (ccmp_hdr[6] as u64) << 32
+           | (ccmp_hdr[5] as u64) << 24 | (ccmp_hdr[4] as u64) << 16
+           | (ccmp_hdr[1] as u64) <<  8 | (ccmp_hdr[0] as u64);
+
+    // Ciphertext = frame[32..len-8], MIC = frame[len-8..len]
+    if frame.len() < 40 { return None; }
+    let ct_end = frame.len() - 8;
+    let ciphertext = &frame[32..ct_end];
+    let rx_mic = &frame[ct_end..];
+
+    // Decrypt with CTR
+    let mut plaintext = ciphertext.to_vec();
+    let nonce = ccmp_nonce(&mac_hdr[10..16].try_into().ok()?, pn); // A2 = Addr2
+    ccmp_ctr(tk, &nonce, &mut plaintext);
+
+    // Verify MIC
+    let aad       = ccmp_aad(mac_hdr);
+    let nonce_arr = ccmp_nonce(&mac_hdr[10..16].try_into().ok()?, pn);
+    let expected  = ccmp_cbcmac(tk, &nonce_arr, &aad, &plaintext);
+    if expected != rx_mic { return None; }
+
+    Some(plaintext)
 }
