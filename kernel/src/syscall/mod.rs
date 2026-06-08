@@ -52,6 +52,20 @@ static FD_PATH_TABLE: Mutex<BTreeMap<FdKey, alloc::string::String>> = Mutex::new
 /// Bound port for socket fds — separate from FD_TABLE to avoid trait-object downcast.
 static SOCKET_PORTS: Mutex<BTreeMap<FdKey, u16>> = Mutex::new(BTreeMap::new());
 
+// ── Virtual Memory Areas ──────────────────────────────────────────────────────
+/// A lazily-mapped anonymous region created by sys_mmap.  Pages are allocated
+/// on first access (#PF not-present) rather than upfront.
+#[derive(Clone, Copy)]
+struct Vma {
+    end:        u64,   // exclusive — region covers [start, end)
+    writable:   bool,
+    executable: bool,
+}
+
+/// (pid, vma_start) → Vma.  The BTreeMap key includes the start address so we
+/// can do an O(log n) range lookup: find the largest start ≤ fault_addr.
+static VMA_TABLE: Mutex<BTreeMap<(u64, u64), Vma>> = Mutex::new(BTreeMap::new());
+
 // ── epoll interest-list tables ────────────────────────────────────────────────
 /// Per-interest-list entry: the events mask, opaque user data, and ET state.
 #[derive(Clone, Copy)]
@@ -1040,8 +1054,9 @@ unsafe fn sys_lseek(fd: u64, offset: u64, _whence: u64) -> i64 {
 
 // ── sys_mmap ─────────────────────────────────────────────────────────────────
 //
-// Anonymous mmap only (fd == -1 or ignored).  Allocates zeroed pages in user VA.
-// Returns the mapped virtual address on success, or a negative errno.
+// Anonymous mmap (fd == -1).  Pages are lazily allocated on first access (#PF).
+// The VMA is registered here; the page fault handler calls demand_page_vma().
+// MAP_FIXED maps at the exact requested address.
 
 const MMAP_PROT_WRITE: u64 = 0x2;
 const MMAP_PROT_EXEC:  u64 = 0x4;
@@ -1051,46 +1066,74 @@ static MMAP_NEXT_ADDR: AtomicU64 = AtomicU64::new(0x0000_1000_0000_0000u64);
 
 unsafe fn sys_mmap(addr: u64, len: u64, prot: u64, flags: u64, _fd: i64, _offset: u64) -> i64 {
     if len == 0 { return EINVAL; }
-    // Round len up to page size
     let page_size: u64 = 4096;
     let len_aligned = (len + page_size - 1) & !(page_size - 1);
 
     let writable   = prot & MMAP_PROT_WRITE != 0;
     let executable = prot & MMAP_PROT_EXEC  != 0;
 
-    // MAP_FIXED: map at exact address requested
     const MAP_FIXED: u64 = 0x10;
     let vaddr = if flags & MAP_FIXED != 0 && addr != 0 {
         addr
     } else {
-        // Choose a free address (ignore addr hint for simplicity)
         MMAP_NEXT_ADDR.fetch_add(len_aligned + page_size, Ordering::Relaxed)
     };
 
-    match crate::memory::map_user_range(vaddr, len_aligned, writable, executable) {
-        Ok(()) => {
-            // Predictive prefault: use the caller's fingerprint cluster to
-            // determine how many extra pages to pre-fault beyond the requested
-            // range. This eliminates page-fault latency on first access for
-            // I/O-heavy and batch workloads.
-            let pid = crate::scheduler::current_pid();
-            if let Some((_, profile, _)) = crate::fingerprint::classify_task(pid) {
-                let extra = profile.prefault_pages as u64;
-                if extra > 0 {
-                    let prefault_base  = vaddr + len_aligned;
-                    let prefault_bytes = extra * page_size;
-                    // Extend the mapping — ignore errors (best-effort).
-                    let _ = crate::memory::map_user_range(
-                        prefault_base, prefault_bytes, writable, false);
-                    crate::klog!(TRACE,
-                        "mmap prefault: pid={} base={:#x} +{}p cluster",
-                        pid, prefault_base, extra);
-                }
+    let pid = crate::scheduler::current_pid();
+
+    // Register the VMA — no pages allocated yet (lazy demand-zero).
+    VMA_TABLE.lock().insert(
+        (pid, vaddr),
+        Vma { end: vaddr + len_aligned, writable, executable },
+    );
+
+    crate::klog!(DEBUG, "mmap: pid={} va={:#x} len={} lazy", pid, vaddr, len_aligned);
+    vaddr as i64
+}
+
+/// Demand-allocate a single page for `vaddr` if it falls within a registered VMA.
+/// Called from the page-fault handler for not-present user-mode faults.
+/// Returns true if the fault was handled (mapping created), false otherwise.
+pub fn demand_page_vma(pid: u64, vaddr: u64) -> bool {
+    let page_aligned = vaddr & !4095u64;
+
+    // Find the VMA that contains `page_aligned`: the largest start ≤ page_aligned
+    // whose end > page_aligned.
+    let vma = {
+        let table = VMA_TABLE.lock();
+        // Range query: all entries with start key ≤ (pid, page_aligned).
+        table.range(..=(pid, page_aligned))
+            .rev()
+            .find(|(&(p, _start), _)| p == pid)
+            .and_then(|(&(_p, _start), v)| {
+                if page_aligned < v.end { Some(*v) } else { None }
+            })
+    };
+
+    if let Some(v) = vma {
+        match crate::memory::map_user_range(page_aligned, 4096, v.writable, v.executable) {
+            Ok(()) => {
+                crate::klog!(DEBUG, "mmap demand-zero: pid={} va={:#x}", pid, page_aligned);
+                true
             }
-            vaddr as i64
+            Err(e) => {
+                crate::klog!(ERROR, "mmap demand-zero failed: pid={} va={:#x} err={}", pid, page_aligned, e);
+                false
+            }
         }
-        Err(_) => EINVAL,
+    } else {
+        false
     }
+}
+
+/// Remove all VMAs for `pid` (called on process exit).
+pub fn cleanup_pid_vmas(pid: u64) {
+    let mut table = VMA_TABLE.lock();
+    let keys: alloc::vec::Vec<(u64, u64)> = table.keys()
+        .filter(|&&(p, _)| p == pid)
+        .cloned()
+        .collect();
+    for k in keys { table.remove(&k); }
 }
 
 // ── sys_munmap ───────────────────────────────────────────────────────────────
@@ -2529,9 +2572,47 @@ unsafe fn sys_socket(domain: u64, sock_type: u64, _proto: u64) -> i64 {
     ENOSYS
 }
 
-unsafe fn sys_connect(_sockfd: u64, addr_ptr: u64, _alen: u64) -> i64 {
+unsafe fn sys_connect(sockfd: u64, addr_ptr: u64, alen: u64) -> i64 {
     if addr_ptr == 0 { return EFAULT; }
-    0 // stub: outbound connect not yet implemented
+    // sockaddr_in layout: u16 family, u16 port (BE), u32 addr (BE), [8] padding
+    if alen < 8 { return EINVAL; }
+    let p = match validate_user_ptr(addr_ptr, 8) {
+        Ok(p)  => p,
+        Err(e) => return e,
+    };
+    let family   = core::ptr::read_unaligned(p as *const u16);
+    let port_be  = core::ptr::read_unaligned(p.add(2) as *const u16);
+    let addr_be  = core::ptr::read_unaligned(p.add(4) as *const u32);
+
+    const AF_INET: u16 = 2;
+    if family != AF_INET { return ENOSYS; } // only IPv4 for now
+
+    let remote_port = u16::from_be(port_be);
+    let remote_ip   = addr_be.to_be_bytes(); // network order → [a, b, c, d]
+
+    // Verify sockfd exists and is an unconnected socket.
+    let pid = crate::scheduler::current_pid();
+    if !FD_TABLE.lock().contains_key(&(pid, sockfd)) { return EBADF; }
+
+    // Active TCP open — blocks (yields CPU) until SYN-ACK or timeout.
+    match crate::net::tcp::connect(remote_ip, remote_port, 5000) {
+        Ok(local_port) => {
+            // Replace the generic SocketHandle with a ConnectedSocketHandle.
+            FD_TABLE.lock().insert(
+                (pid, sockfd),
+                alloc::boxed::Box::new(ConnectedSocketHandle { local_port, remote_ip, remote_port }),
+            );
+            // Record the port mapping so getpeername/getsockname can retrieve it.
+            SOCKET_PORTS.lock().insert((pid, sockfd), local_port);
+            crate::klog!(INFO, "TCP: connect pid={} fd={} → {}:{} ok (local:{})",
+                pid, sockfd, remote_ip[0], remote_port, local_port);
+            0
+        }
+        Err(e) => {
+            crate::klog!(WARN, "TCP: connect pid={} fd={} failed: {}", pid, sockfd, e);
+            -110 // ETIMEDOUT
+        }
+    }
 }
 
 /// Parse port from sockaddr_in: family(u16) + port(u16 big-endian) at offset 2.

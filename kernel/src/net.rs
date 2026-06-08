@@ -1678,6 +1678,81 @@ pub mod tcp {
             .map(|(k, _)| k.clone())
             .collect()
     }
+
+    /// Active open (client-side connect).
+    ///
+    /// Picks an ephemeral local port, sends a SYN, then spins on net::poll()
+    /// until the connection reaches Established or the timeout elapses.
+    ///
+    /// Returns `Ok(local_port)` on success, `Err` on timeout or ARP failure.
+    pub fn connect(remote_ip: [u8; 4], remote_port: u16, timeout_ms: u64) -> Result<u16, &'static str> {
+        static NEXT_EPH: spin::Mutex<u16> = spin::Mutex::new(49152);
+
+        // Pick a free ephemeral port.
+        let local_port = {
+            let mut eph = NEXT_EPH.lock();
+            let port = *eph;
+            *eph = if port >= 65534 { 49152 } else { port + 1 };
+            port
+        };
+
+        let our_ip  = unsafe { OUR_IP };
+        let our_mac = unsafe { OUR_MAC };
+
+        // Resolve remote MAC before inserting the socket (we need to send SYN).
+        let dst_mac = super::arp_resolve_for_ip(&remote_ip)
+            .ok_or("TCP connect: ARP failed — no MAC for destination")?;
+
+        // Ephemeral ISN — use uptime tick for variety.
+        let iss: u32 = crate::scheduler::uptime_ms() as u32 ^ 0x1357_2468;
+
+        // Create the socket in SYN_SENT state.
+        let sock = TcpSocket {
+            state:   TcpState::SynSent,
+            snd_nxt: iss.wrapping_add(1), // post-SYN, next byte to send
+            snd_una: iss,
+            rcv_nxt: 0,     // filled in when SYN-ACK arrives
+            snd_wnd: 65535,
+            rcv_buf: Vec::new(),
+        };
+        let key = TcpSocketKey { local_port, remote_ip, remote_port };
+        SOCKETS.lock().insert(key, TcpSocket { state: TcpState::SynSent, ..sock });
+
+        // Send SYN.
+        let syn = TcpHeader::build(
+            local_port, remote_port,
+            iss, 0, SYN, 65535,
+            our_ip, remote_ip, &[],
+        );
+        let ip_hdr = Ipv4Header::build(IP_PROTO_TCP, our_ip, remote_ip, syn.len());
+        let mut pkt = ip_hdr;
+        pkt.extend_from_slice(&syn);
+        let frame = super::EthFrame::build(dst_mac, our_mac, super::ETHERTYPE_IPV4, &pkt);
+        super::transmit(&frame);
+        crate::klog!(INFO, "TCP: SYN sent local:{} → {}:{}", local_port, remote_ip[0..4].iter().map(|b| alloc::format!("{}", b)).collect::<Vec<_>>().join("."), remote_port);
+
+        // Poll until Established or timeout.
+        let deadline = crate::scheduler::uptime_ms() + timeout_ms;
+        loop {
+            {
+                let sockets = SOCKETS.lock();
+                let key = TcpSocketKey { local_port, remote_ip, remote_port };
+                if let Some(s) = sockets.get(&key) {
+                    if s.state == TcpState::Established {
+                        return Ok(local_port);
+                    }
+                }
+            }
+            if crate::scheduler::uptime_ms() >= deadline {
+                // Clean up the stale SynSent socket.
+                let key = TcpSocketKey { local_port, remote_ip, remote_port };
+                SOCKETS.lock().remove(&key);
+                return Err("TCP connect: timeout");
+            }
+            super::poll();
+            crate::scheduler::yield_cpu();
+        }
+    }
 }
 
 // ── Built-in HTTP server ─────────────────────────────────────────────────────

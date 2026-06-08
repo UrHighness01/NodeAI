@@ -108,6 +108,12 @@ extern "x86-interrupt" fn page_fault_handler(
                 }
             }
         }
+
+        // Lazy mmap: check if the fault address is in a registered anonymous VMA.
+        if crate::syscall::demand_page_vma(pid, cr2) {
+            return; // handled
+        }
+
         // Address is out of valid range — send SIGSEGV; task will die at next syscall return.
         crate::klog!(ERROR, "#PF SIGSEGV pid={} addr={:#x} ip={:#x}", pid, cr2, ip);
         crate::scheduler::send_signal(pid, 11); // SIGSEGV
