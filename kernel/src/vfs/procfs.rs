@@ -201,14 +201,20 @@ fn write_file(dir_path: &str, name: &str, content: Vec<u8>) {
             return;
         }
     };
-    let file_node = match dir.create_file(name) {
-        Ok(f)  => f,
-        Err(e) => {
-            crate::klog!(WARN, "procfs: create {}/{} failed: {:?}", dir_path, name, e);
-            return;
+    // Get existing node or create it — either way truncate and overwrite.
+    let file_node = match dir.lookup(name) {
+        Ok(n)  => n,
+        Err(_) => match dir.create_file(name) {
+            Ok(f)  => f,
+            Err(e) => {
+                crate::klog!(WARN, "procfs: create {}/{} failed: {:?}", dir_path, name, e);
+                return;
+            }
         }
     };
     if let Ok(mut h) = file_node.open() {
+        h.truncate(0).ok();
+        h.seek(0).ok();
         h.write(&content).ok();
         h.flush().ok();
     }

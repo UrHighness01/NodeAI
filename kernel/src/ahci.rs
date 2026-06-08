@@ -135,14 +135,17 @@ struct RecvFis { data: [u8; 256] }
 // ── Port state ─────────────────────────────────────────────────────────────────
 
 struct AhciPort {
-    regs_base: u64,        // VA of HBA MMIO
-    port_idx:  usize,
-    phys_off:  u64,        // physical-to-virtual offset
-    cmd_list:  Box<[CommandHeader; 32]>,
-    recv_fis:  Box<RecvFis>,
-    cmd_table: Box<CommandTable>,
-    sectors:   u64,
-    model:     [u8; 40],
+    regs_base:    u64,        // VA of HBA MMIO
+    port_idx:     usize,
+    phys_off:     u64,        // physical-to-virtual offset
+    cmd_list:     Box<[CommandHeader; 32]>,
+    cmd_list_pa:  u64,        // physical address of cmd_list
+    recv_fis:     Box<RecvFis>,
+    recv_fis_pa:  u64,        // physical address of recv_fis
+    cmd_table:    Box<CommandTable>,
+    cmd_table_pa: u64,        // physical address of cmd_table
+    sectors:      u64,
+    model:        [u8; 40],
 }
 
 impl AhciPort {
@@ -171,14 +174,10 @@ impl AhciPort {
 
     /// Set command list and FIS base addresses, start engine.
     unsafe fn start(&mut self) {
-        // Box allocations are in the kernel heap VA range, not the physical-offset
-        // window. Use the VMM page-table walk to get the true physical address.
-        let cl_phys = va_to_pa(self.cmd_list.as_ptr() as u64, self.phys_off);
-        let fb_phys = va_to_pa(&*self.recv_fis as *const RecvFis as u64, self.phys_off);
-        self.pw32(P_CLB,  cl_phys as u32);
-        self.pw32(P_CLBU, (cl_phys >> 32) as u32);
-        self.pw32(P_FB,   fb_phys as u32);
-        self.pw32(P_FBU,  (fb_phys >> 32) as u32);
+        self.pw32(P_CLB,  self.cmd_list_pa as u32);
+        self.pw32(P_CLBU, (self.cmd_list_pa >> 32) as u32);
+        self.pw32(P_FB,   self.recv_fis_pa as u32);
+        self.pw32(P_FBU,  (self.recv_fis_pa >> 32) as u32);
         // Clear errors
         self.pw32(P_SERR, 0xFFFF_FFFF);
         self.pw32(P_IS,   0xFFFF_FFFF);
@@ -387,13 +386,29 @@ pub fn init(phys_offset: u64) {
                 // 0x00000101 = ATA drive, 0xEB140101 = ATAPI
                 if sig != 0x0000_0101 { continue; }
 
+                let cmd_list_box: Box<[CommandHeader; 32]> = Box::new(unsafe { core::mem::zeroed() });
+                let recv_fis_box: Box<RecvFis> = Box::new(RecvFis { data: [0; 256] });
+                let cmd_table_box: Box<CommandTable> = Box::new(unsafe { core::mem::zeroed() });
+                let cl_pa  = va_to_pa(cmd_list_box.as_ptr()  as u64, phys_offset);
+                let rf_pa  = va_to_pa(&*recv_fis_box          as *const RecvFis as u64, phys_offset);
+                let ct_pa  = va_to_pa(&*cmd_table_box         as *const CommandTable as u64, phys_offset);
+                let cmd_list = Box::new(unsafe { core::mem::zeroed() });
+                let recv_fis = Box::new(RecvFis { data: [0; 256] });
+                let cmd_table = Box::new(unsafe { core::mem::zeroed() });
+                let cmd_list_pa = va_to_pa(cmd_list.as_ptr() as u64, phys_offset);
+                let recv_fis_pa = va_to_pa(&*recv_fis as *const RecvFis as u64, phys_offset);
+                let cmd_table_pa = va_to_pa(cmd_table.as_ptr() as u64, phys_offset);
+
                 let mut port = AhciPort {
-                    regs_base: hba_va,
+                    regs_base:    hba_va,
                     port_idx,
-                    phys_off:  phys_offset,
-                    cmd_list: Box::new(unsafe { core::mem::zeroed() }),
-                    recv_fis: Box::new(RecvFis { data: [0; 256] }),
-                    cmd_table: Box::new(unsafe { core::mem::zeroed() }),
+                    phys_off:     phys_offset,
+                    cmd_list,
+                    cmd_list_pa,
+                    recv_fis,
+                    recv_fis_pa,
+                    cmd_table,
+                    cmd_table_pa,
                     sectors:   0,
                     model:     [b' '; 40],
                 };
