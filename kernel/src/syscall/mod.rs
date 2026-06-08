@@ -52,9 +52,46 @@ static FD_PATH_TABLE: Mutex<BTreeMap<FdKey, alloc::string::String>> = Mutex::new
 /// Bound port for socket fds — separate from FD_TABLE to avoid trait-object downcast.
 static SOCKET_PORTS: Mutex<BTreeMap<FdKey, u16>> = Mutex::new(BTreeMap::new());
 
+// ── epoll interest-list tables ────────────────────────────────────────────────
+/// Per-interest-list entry: the events mask and the opaque user data word.
+#[derive(Clone, Copy)]
+struct EpollInterest { events: u32, data: u64 }
+
+/// One epoll instance: maps watched-fd → interest.
+struct EpollInstance { interests: alloc::collections::BTreeMap<i32, EpollInterest> }
+
+impl EpollInstance {
+    fn new() -> Self { Self { interests: alloc::collections::BTreeMap::new() } }
+}
+
+/// (pid, epfd) → EpollInstance
+static EPOLL_TABLE: Mutex<alloc::collections::BTreeMap<FdKey, EpollInstance>>
+    = Mutex::new(alloc::collections::BTreeMap::new());
+
+const EPOLL_CTL_ADD: i32 = 1;
+const EPOLL_CTL_DEL: i32 = 2;
+const EPOLL_CTL_MOD: i32 = 3;
+const EPOLLIN:  u32 = 0x0001;
+const EPOLLOUT: u32 = 0x0004;
+const EPOLLERR: u32 = 0x0008;
+const EPOLLHUP: u32 = 0x0010;
+// Edge-triggered flag — we implement level-triggered; ET flag is accepted but ignored.
+const EPOLLET: u32 = 1 << 31;
+
 /// VfsNode for directory fds — used by getdents64 to call readdir().
 static DIR_NODES: spin::Mutex<BTreeMap<FdKey, alloc::sync::Arc<dyn crate::vfs::VfsNode>>>
     = spin::Mutex::new(BTreeMap::new());
+
+/// Called by exit_current to free all per-pid fd state.
+pub fn cleanup_pid_fds(pid: u64) {
+    FD_TABLE.lock().retain(|&(p, _), _| p != pid);
+    FD_PATH_TABLE.lock().retain(|&(p, _), _| p != pid);
+    EPOLL_TABLE.lock().retain(|&(p, _), _| p != pid);
+    NEXT_FD.lock().remove(&pid);
+    // DIR_NODES and SOCKET_PORTS share the same key layout.
+    DIR_NODES.lock().retain(|&(p, _), _| p != pid);
+    SOCKET_PORTS.lock().retain(|&(p, _), _| p != pid);
+}
 
 /// Allocate the next available fd for a given pid (first-fit above 2).
 fn alloc_fd(pid: u64) -> u64 {
@@ -914,6 +951,7 @@ unsafe fn sys_close(fd: u64) -> i64 {
     let pid = crate::scheduler::current_pid();
     DIR_NODES.lock().remove(&(pid, fd));
     FD_PATH_TABLE.lock().remove(&(pid, fd));
+    EPOLL_TABLE.lock().remove(&(pid, fd)); // no-op if not an epoll fd
     if FD_TABLE.lock().remove(&(pid, fd)).is_some() { 0 } else { EBADF }
 }
 
@@ -2176,20 +2214,137 @@ unsafe fn sys_futex(uaddr: u64, op: i32, val: u32, _timeout: u64) -> i64 {
 }
 
 // ── sys_epoll ────────────────────────────────────────────────────────────────
+//
+// Level-triggered epoll. Edge-triggered (EPOLLET) is accepted without error but
+// falls back to level-triggered behaviour — correct for all well-written callers
+// that drain the fd before re-arming.
+//
+// struct epoll_event layout (Linux x86_64, __packed__):
+//   offset 0: events u32
+//   offset 4: data   u64  (union — we treat as raw u64)
+//   total: 12 bytes
 unsafe fn sys_epoll_create1(_flags: u64) -> i64 {
     let pid = crate::scheduler::current_pid();
-    alloc_fd(pid) as i64
+    let epfd = alloc_fd(pid);
+    EPOLL_TABLE.lock().insert((pid, epfd), EpollInstance::new());
+    epfd as i64
 }
-unsafe fn sys_epoll_ctl(_epfd: u64, _op: i32, _fd: i32, _event: u64) -> i64 { 0 }
-unsafe fn sys_epoll_wait(_epfd: u64, _events: u64, _max: i32, timeout_ms: i32) -> i64 {
-    if timeout_ms > 0 {
-        let start = crate::scheduler::uptime_ms();
-        let wait = (timeout_ms as u64).min(10);
-        while crate::scheduler::uptime_ms().wrapping_sub(start) < wait {
-            core::hint::spin_loop();
+
+unsafe fn sys_epoll_ctl(epfd: u64, op: i32, watched_fd: i32, event_ptr: u64) -> i64 {
+    let pid = crate::scheduler::current_pid();
+    // CTL_DEL does not require a valid event pointer.
+    let interest = if op != EPOLL_CTL_DEL && event_ptr != 0 {
+        match validate_user_ptr(event_ptr, 12) {
+            Ok(p) => {
+                let events = core::ptr::read_unaligned(p as *const u32);
+                let data   = core::ptr::read_unaligned(p.add(4) as *const u64);
+                EpollInterest { events: events & !EPOLLET, data }
+            }
+            Err(e) => return e,
+        }
+    } else {
+        EpollInterest { events: 0, data: 0 }
+    };
+
+    let mut table = EPOLL_TABLE.lock();
+    let inst = match table.get_mut(&(pid, epfd)) {
+        Some(i) => i,
+        None    => return EBADF,
+    };
+    match op {
+        EPOLL_CTL_ADD | EPOLL_CTL_MOD => { inst.interests.insert(watched_fd, interest); 0 }
+        EPOLL_CTL_DEL                 => { inst.interests.remove(&watched_fd); 0 }
+        _                             => EINVAL,
+    }
+}
+
+unsafe fn sys_epoll_wait(epfd: u64, events_out: u64, maxevents: i32, timeout_ms: i32) -> i64 {
+    if maxevents <= 0 { return EINVAL; }
+    let max = maxevents as usize;
+    // Validate the output buffer (12 bytes per epoll_event).
+    let out_buf_len = (max as u64).saturating_mul(12);
+    let out_ptr = match validate_user_ptr_mut(events_out, out_buf_len) {
+        Ok(p)  => p,
+        Err(e) => return e,
+    };
+    let pid = crate::scheduler::current_pid();
+    let deadline = if timeout_ms < 0 {
+        u64::MAX
+    } else {
+        crate::scheduler::uptime_ms() + timeout_ms as u64
+    };
+
+    loop {
+        // Snapshot interest list (drop EPOLL_TABLE lock before touching FD_TABLE).
+        let interests: alloc::vec::Vec<(i32, EpollInterest)> = {
+            let table = EPOLL_TABLE.lock();
+            match table.get(&(pid, epfd)) {
+                Some(inst) => inst.interests.iter().map(|(&fd, &ev)| (fd, ev)).collect(),
+                None       => return EBADF,
+            }
+        };
+
+        let mut n_ready: usize = 0;
+        for (watched_fd, interest) in &interests {
+            if n_ready >= max { break; }
+            let wfd = *watched_fd as u64;
+
+            // Determine readiness — same logic as sys_poll.
+            let mut revents: u32 = 0;
+            if wfd == 1 || wfd == 2 {
+                // stdout/stderr: always writable.
+                if interest.events & EPOLLOUT != 0 { revents |= EPOLLOUT; }
+            } else {
+                let available = {
+                    let mut fd_tbl = FD_TABLE.lock();
+                    fd_tbl.get_mut(&(pid, wfd)).map(|h| h.bytes_available()).unwrap_or(0)
+                };
+                if interest.events & EPOLLIN  != 0 && available > 0 { revents |= EPOLLIN; }
+                if interest.events & EPOLLOUT != 0                    { revents |= EPOLLOUT; }
+                // If the fd is gone entirely, signal HUP.
+                if available == 0 {
+                    let exists = FD_TABLE.lock().contains_key(&(pid, wfd));
+                    if !exists { revents |= EPOLLHUP | EPOLLERR; }
+                }
+            }
+
+            if revents != 0 {
+                // Write epoll_event { events, data } at slot n_ready (12-byte packed).
+                let slot = out_ptr.add(n_ready * 12);
+                core::ptr::write_unaligned(slot as *mut u32, revents);
+                core::ptr::write_unaligned(slot.add(4) as *mut u64, interest.data);
+                n_ready += 1;
+            }
+        }
+
+        if n_ready > 0 || crate::scheduler::uptime_ms() >= deadline {
+            return n_ready as i64;
+        }
+        crate::scheduler::yield_cpu();
+    }
+}
+
+/// Format /proc/epoll — all active epoll instances, their interest lists, and readiness state.
+pub fn format_epoll_table() -> alloc::vec::Vec<u8> {
+    use alloc::string::String;
+    let table = EPOLL_TABLE.lock();
+    if table.is_empty() {
+        return b"no active epoll instances\n".to_vec();
+    }
+    let mut out = String::from("PID   EPFD  WATCHED_FD  EVENTS\n");
+    out.push_str("----  ----  ----------  ------\n");
+    for (&(pid, epfd), inst) in table.iter() {
+        for (&fd, &ev) in inst.interests.iter() {
+            let mut flags = String::new();
+            if ev.events & EPOLLIN  != 0 { flags.push_str("IN "); }
+            if ev.events & EPOLLOUT != 0 { flags.push_str("OUT "); }
+            if ev.events & EPOLLERR != 0 { flags.push_str("ERR "); }
+            if ev.events & EPOLLHUP != 0 { flags.push_str("HUP "); }
+            out.push_str(&alloc::format!("{:<6}{:<6}{:<12}{}\n",
+                pid, epfd, fd, flags.trim_end()));
         }
     }
-    0
+    out.into_bytes()
 }
 
 // ── sys_eventfd2 ─────────────────────────────────────────────────────────────

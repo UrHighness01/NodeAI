@@ -343,6 +343,9 @@ pub fn exit_current_direct(pid: Pid, code: i32) -> ! {
         runqueue::remove(pid);
         ppid
     };
+    crate::syscall_stats::remove(pid);
+    crate::transformer_sched::remove(pid);
+    crate::syscall::cleanup_pid_fds(pid);
     if parent_pid != 0 {
         wake_pid(parent_pid);
         send_signal(parent_pid, 17); // SIGCHLD
@@ -354,7 +357,8 @@ pub fn exit_current_direct(pid: Pid, code: i32) -> ! {
 /// Called from `sys_exit`; never returns.
 pub fn exit_current(code: i32) -> ! {
     crate::klog!(INFO, "Scheduler: exit_current(code={})", code);
-    let parent_pid = if let Some(pid) = runqueue::current_pid() {
+    let pid = runqueue::current_pid().unwrap_or(0);
+    let parent_pid = if pid != 0 {
         let mut tasks = TASKS.lock();
         let ppid = tasks.get(&pid).map(|t| t.parent_pid).unwrap_or(0);
         if let Some(task) = tasks.get_mut(&pid) {
@@ -372,13 +376,12 @@ pub fn exit_current(code: i32) -> ! {
     crate::syscall_stats::remove(pid);
     crate::anomaly::remove(pid);
     crate::transformer_sched::remove(pid);
+    crate::syscall::cleanup_pid_fds(pid);
 
     // Wake the parent and send SIGCHLD.
     if parent_pid != 0 {
         // Record causal edge: dying child → parent wakeup.
-        if let Some(self_pid) = runqueue::current_pid() {
-            crate::causal::record_wakeup(self_pid, parent_pid);
-        }
+        if pid != 0 { crate::causal::record_wakeup(pid, parent_pid); }
         wake_pid(parent_pid);
         send_signal(parent_pid, 17); // SIGCHLD
     }

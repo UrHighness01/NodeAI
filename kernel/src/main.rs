@@ -28,7 +28,7 @@ mod net;
 mod scheduler;
 mod security;
 mod shell;
-mod syscall;
+pub mod syscall;
 mod telemetry;
 pub mod users;
 pub mod vfs;
