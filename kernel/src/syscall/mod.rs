@@ -570,8 +570,8 @@ pub unsafe extern "C" fn syscall_dispatch_extern(
         nr::UNLINKAT      => sys_unlink(arg1, arg2),       // dirfd ignored
         nr::RENAME        => sys_rename(arg0, arg1, arg2, arg3),
         nr::RENAMEAT | nr::RENAMEAT2 => sys_rename(arg1, arg2, arg3, arg4),
-        nr::LINK          => 0, // stub — hard links not fully supported
-        nr::SYMLINK       => 0, // stub
+        nr::LINK          => sys_link(arg0, arg1, arg2),
+        nr::SYMLINK       => sys_symlink(arg0, arg1, arg2),
         nr::SYMLINKAT     => 0,
         nr::READLINK      => sys_readlink(arg0, arg1, arg2),
         nr::READLINKAT    => sys_readlink(arg1, arg2, arg3), // dirfd ignored
@@ -1082,7 +1082,7 @@ const MMAP_PROT_EXEC:  u64 = 0x4;
 // Next anonymous mmap base address (below 128 TiB, well under kernel space).
 static MMAP_NEXT_ADDR: AtomicU64 = AtomicU64::new(0x0000_1000_0000_0000u64);
 
-unsafe fn sys_mmap(addr: u64, len: u64, prot: u64, flags: u64, _fd: i64, _offset: u64) -> i64 {
+unsafe fn sys_mmap(addr: u64, len: u64, prot: u64, flags: u64, fd: i64, offset: u64) -> i64 {
     if len == 0 { return EINVAL; }
     let page_size: u64 = 4096;
     let len_aligned = (len + page_size - 1) & !(page_size - 1);
@@ -1090,7 +1090,7 @@ unsafe fn sys_mmap(addr: u64, len: u64, prot: u64, flags: u64, _fd: i64, _offset
     let writable   = prot & MMAP_PROT_WRITE != 0;
     let executable = prot & MMAP_PROT_EXEC  != 0;
 
-    const MAP_FIXED: u64 = 0x10;
+    const MAP_FIXED:     u64 = 0x10;
     let vaddr = if flags & MAP_FIXED != 0 && addr != 0 {
         addr
     } else {
@@ -1099,13 +1099,41 @@ unsafe fn sys_mmap(addr: u64, len: u64, prot: u64, flags: u64, _fd: i64, _offset
 
     let pid = crate::scheduler::current_pid();
 
-    // Register the VMA — no pages allocated yet (lazy demand-zero).
+    // File-backed mmap: fd != -1 means the caller wants to map a file.
+    // Eagerly allocate pages and populate them from the VFS node.
+    if fd >= 0 {
+        let path = FD_PATH_TABLE.lock().get(&(pid, fd as u64)).cloned();
+        if let Some(p) = path {
+            // Read file data, then map pages and copy bytes in.
+            let file_data = crate::vfs::read_file(&p).unwrap_or_default();
+            let src_start = offset as usize;
+            let src_end   = (offset as usize + len_aligned as usize).min(file_data.len());
+
+            match crate::memory::map_user_range(vaddr, len_aligned, writable, executable) {
+                Ok(()) => {
+                    // Copy file content into the mapped pages via phys-offset window.
+                    if src_start < src_end {
+                        let copy_len = (src_end - src_start).min(len_aligned as usize);
+                        let dst = vaddr as *mut u8;
+                        core::ptr::copy_nonoverlapping(
+                            file_data[src_start..].as_ptr(), dst, copy_len);
+                    }
+                    crate::klog!(DEBUG, "mmap file: pid={} va={:#x} len={} off={} path={}",
+                        pid, vaddr, len_aligned, offset, p);
+                }
+                Err(_) => return EINVAL,
+            }
+            return vaddr as i64;
+        }
+        // fd given but no path (e.g. memfd) — fall through to anonymous.
+    }
+
+    // Anonymous mmap — register lazy VMA (demand-zero on first access).
     VMA_TABLE.lock().insert(
         (pid, vaddr),
         Vma { end: vaddr + len_aligned, writable, executable },
     );
-
-    crate::klog!(DEBUG, "mmap: pid={} va={:#x} len={} lazy", pid, vaddr, len_aligned);
+    crate::klog!(DEBUG, "mmap anon: pid={} va={:#x} len={} lazy", pid, vaddr, len_aligned);
     vaddr as i64
 }
 
@@ -2931,19 +2959,96 @@ unsafe fn sys_timerfd_gettime(fd: u64, curr_value_ptr: u64) -> i64 {
 // ── readlink / access / ftruncate ────────────────────────────────────────────
 
 unsafe fn sys_readlink(path_ptr: u64, buf_ptr: u64, buf_len: u64) -> i64 {
-    // Most symlinks in our kernel are proc/self pseudo-links
     let path = match read_user_cstr(path_ptr, 4096) { Some(p) => p, None => return EFAULT };
-    let target: &[u8] = match path.as_str() {
-        "/proc/self/exe" | "/proc/self/cwd" => b"/",
-        "/proc/self/fd"  => b"/proc/self/fd",
-        _ => return -22, // EINVAL — not a symlink
+
+    // Pseudo-symlinks for /proc/self.
+    let pseudo: Option<&[u8]> = match path.as_str() {
+        "/proc/self/exe" | "/proc/self/cwd" => Some(b"/"),
+        "/proc/self/fd"  => Some(b"/proc/self/fd"),
+        _ => None,
     };
-    let copy = target.len().min(buf_len as usize);
-    if copy == 0 { return EINVAL; }
-    if let Ok(p) = validate_user_ptr_mut(buf_ptr, buf_len) {
-        core::ptr::copy_nonoverlapping(target.as_ptr(), p, copy);
+    if let Some(target) = pseudo {
+        let copy = target.len().min(buf_len as usize);
+        if copy == 0 { return EINVAL; }
+        if let Ok(p) = validate_user_ptr_mut(buf_ptr, buf_len) {
+            core::ptr::copy_nonoverlapping(target.as_ptr(), p, copy);
+        }
+        return copy as i64;
     }
-    copy as i64
+
+    // Real VFS symlink.
+    match crate::vfs::lookup(&path) {
+        Ok(node) => {
+            match node.readlink() {
+                Some(target) => {
+                    let bytes = target.as_bytes();
+                    let copy  = bytes.len().min(buf_len as usize);
+                    if let Ok(p) = validate_user_ptr_mut(buf_ptr, buf_len) {
+                        core::ptr::copy_nonoverlapping(bytes.as_ptr(), p, copy);
+                    }
+                    copy as i64
+                }
+                None => -22, // EINVAL — not a symlink
+            }
+        }
+        Err(_) => ENOENT,
+    }
+}
+
+unsafe fn sys_symlink(target_ptr: u64, linkpath_ptr: u64, _unused: u64) -> i64 {
+    let target   = match read_user_cstr(target_ptr,   4096) { Some(s) => s, None => return EFAULT };
+    let linkpath = match read_user_cstr(linkpath_ptr, 4096) { Some(s) => s, None => return EFAULT };
+
+    // Split linkpath into parent dir + link name.
+    let (parent_path, link_name) = split_path(&linkpath);
+    if link_name.is_empty() { return EINVAL; }
+
+    match crate::vfs::lookup(parent_path) {
+        Ok(dir) => {
+            match dir.create_symlink(link_name, &target) {
+                Ok(_)  => 0,
+                Err(crate::vfs::VfsError::Exists) => -17, // EEXIST
+                Err(_) => EINVAL,
+            }
+        }
+        Err(_) => ENOENT,
+    }
+}
+
+unsafe fn sys_link(oldpath_ptr: u64, newpath_ptr: u64, _unused: u64) -> i64 {
+    let oldpath = match read_user_cstr(oldpath_ptr, 4096) { Some(s) => s, None => return EFAULT };
+    let newpath = match read_user_cstr(newpath_ptr, 4096) { Some(s) => s, None => return EFAULT };
+
+    // Resolve the target node.
+    let target_node = match crate::vfs::lookup(&oldpath) {
+        Ok(n)  => n,
+        Err(_) => return ENOENT,
+    };
+    // Symlinks cannot be hard-linked (EPERM).
+    if target_node.readlink().is_some() { return -1; }
+
+    let (parent_path, new_name) = split_path(&newpath);
+    if new_name.is_empty() { return EINVAL; }
+
+    match crate::vfs::lookup(parent_path) {
+        Ok(_) => {
+            match crate::vfs::link_node(parent_path, new_name, target_node) {
+                Ok(())  => 0,
+                Err(crate::vfs::VfsError::Exists) => -17,
+                Err(_)  => EINVAL,
+            }
+        }
+        Err(_) => ENOENT,
+    }
+}
+
+/// Split a path into (parent_dir, filename).  E.g. "/a/b/c" → ("/a/b", "c").
+fn split_path(path: &str) -> (&str, &str) {
+    match path.rfind('/') {
+        Some(0) => ("/", &path[1..]),
+        Some(i) => (&path[..i], &path[i+1..]),
+        None    => (".", path),
+    }
 }
 
 unsafe fn sys_access(path_ptr: u64, _mode: u64) -> i64 {

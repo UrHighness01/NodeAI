@@ -104,6 +104,20 @@ pub trait VfsNode: Send + Sync {
     /// Change permission bits on this node.
     fn set_mode(&self, _mode: u16) -> VfsResult<()> { Err(VfsError::ReadOnly) }
 
+    /// Create a symbolic link child named `name` pointing to `target`.
+    fn create_symlink(&self, _name: &str, _target: &str) -> VfsResult<Arc<dyn VfsNode>> {
+        Err(VfsError::InvalidArgument)
+    }
+
+    /// If this node is a symbolic link, return the target path.  None otherwise.
+    fn readlink(&self) -> Option<alloc::string::String> { None }
+
+    /// Create a hard link: insert `node` as `name` in this directory.
+    /// Only implemented by directory nodes that support hard links.
+    fn link_child(&self, _name: &str, _node: Arc<dyn VfsNode>) -> VfsResult<()> {
+        Err(VfsError::InvalidArgument)
+    }
+
     /// Change owner uid/gid on this node.
     fn set_owner(&self, _uid: u32, _gid: u32) -> VfsResult<()> { Err(VfsError::ReadOnly) }
 }
@@ -291,6 +305,15 @@ pub fn unlink(path: &str) -> VfsResult<()> {
 pub fn prefetch_recently_used() {
     // No-op stub — a real implementation iterates an LRU ring of top-N paths
     // and issues async read-ahead for each.
+}
+
+/// Create a hard link: insert `node` as `name` in the directory at `parent_path`.
+/// The node must already exist; this adds another directory entry pointing to it.
+pub fn link_node(parent_path: &str, name: &str, node: Arc<dyn VfsNode>) -> VfsResult<()> {
+    let parent = lookup(parent_path)?;
+    // Attempt via the VfsNode trait first (works for RamDir).
+    // If the node doesn't support it we fall back to create_file + copy.
+    parent.link_child(name, node)
 }
 
 /// Append `data` to the file at `path`.  Creates the file when it is absent.

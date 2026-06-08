@@ -11,6 +11,36 @@ use super::{
 };
 use core::sync::atomic::{AtomicU16, AtomicU32, Ordering};
 
+// ── SymlinkNode ───────────────────────────────────────────────────────────────
+
+/// An in-memory symbolic link node.  Stores the target path as a String.
+pub struct SymlinkNode {
+    ino:    u64,
+    target: String,
+}
+
+impl SymlinkNode {
+    pub fn new(target: &str) -> Arc<Self> {
+        Arc::new(Self { ino: alloc_ino(), target: String::from(target) })
+    }
+}
+
+impl VfsNode for SymlinkNode {
+    fn stat(&self) -> VfsResult<Stat> {
+        Ok(Stat {
+            ino: self.ino, size: self.target.len() as u64,
+            is_dir: false, nlink: 1, uid: 0, gid: 0, mode: 0o120777,
+        })
+    }
+    fn open(&self) -> VfsResult<Box<dyn FileHandle>> { Err(VfsError::InvalidArgument) }
+    fn readdir(&self) -> VfsResult<Vec<DirEntry>>    { Err(VfsError::NotADirectory) }
+    fn lookup(&self, _: &str) -> VfsResult<Arc<dyn VfsNode>> { Err(VfsError::NotADirectory) }
+    fn create_file(&self, _: &str) -> VfsResult<Arc<dyn VfsNode>> { Err(VfsError::NotADirectory) }
+    fn mkdir(&self, _: &str) -> VfsResult<Arc<dyn VfsNode>> { Err(VfsError::NotADirectory) }
+    fn unlink(&self, _: &str) -> VfsResult<()> { Err(VfsError::NotADirectory) }
+    fn readlink(&self) -> Option<String> { Some(self.target.clone()) }
+}
+
 // ── RamFile ───────────────────────────────────────────────────────────────────
 
 #[derive(Debug)]
@@ -242,6 +272,24 @@ impl VfsNode for RamDir {
     fn set_owner(&self, uid: u32, gid: u32) -> VfsResult<()> {
         self.uid.store(uid, Ordering::Relaxed);
         self.gid.store(gid, Ordering::Relaxed);
+        Ok(())
+    }
+
+    fn create_symlink(&self, name: &str, target: &str) -> VfsResult<Arc<dyn VfsNode>> {
+        let mut ch = self.children.lock();
+        if ch.contains_key(name) { return Err(VfsError::Exists); }
+        let sym = SymlinkNode::new(target) as Arc<dyn VfsNode>;
+        ch.insert(String::from(name), sym.clone());
+        Ok(sym)
+    }
+}
+
+impl RamDir {
+    /// Insert an existing node under a new name (hard link — shares the same Arc).
+    pub fn link_child(&self, name: &str, node: Arc<dyn VfsNode>) -> VfsResult<()> {
+        let mut ch = self.children.lock();
+        if ch.contains_key(name) { return Err(VfsError::Exists); }
+        ch.insert(String::from(name), node);
         Ok(())
     }
 }
