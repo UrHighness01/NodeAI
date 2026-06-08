@@ -139,6 +139,23 @@ pub fn predict_successors(waker_pid: u64) -> alloc::vec::Vec<u64> {
     candidates.into_iter().map(|(pid, _)| pid).collect()
 }
 
+/// Return up to `limit` causal edges involving `pid` (as waker or wakee), newest first.
+/// Used by /proc/<pid>/causal_graph.
+pub fn edges_for_pid(pid: u64, limit: usize) -> alloc::vec::Vec<(u64, u64, u64)> {
+    let graph = GRAPH.lock();
+    let len = graph.count.min(N_EDGES);
+    let mut result = alloc::vec::Vec::new();
+    for i in 0..len {
+        let idx = (graph.head + N_EDGES - 1 - i) % N_EDGES;
+        let e = &graph.edges[idx];
+        if e.waker == pid || e.wakee == pid {
+            result.push((e.waker, e.wakee, e.uptime_ms));
+            if result.len() >= limit { break; }
+        }
+    }
+    result
+}
+
 /// Format for /ai/causal_graph.
 pub fn format_report() -> alloc::vec::Vec<u8> {
     use alloc::string::String;

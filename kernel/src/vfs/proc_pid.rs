@@ -160,6 +160,41 @@ impl ProcPidDir {
         }
         out.into_bytes()
     }
+
+    /// /proc/<pid>/causal_graph — edges in the causal wakeup graph involving this pid.
+    /// Shows both edges where this pid was the waker and where it was the wakee.
+    /// Novel: no other kernel exposes a live per-process causal dependency graph via /proc.
+    fn causal_graph(&self) -> Vec<u8> {
+        let pid = self.pid;
+        let anomaly_score = crate::anomaly::score(pid);
+        let last_waker = crate::causal::last_waker(pid);
+        let (predicted_next, prob) = crate::causal::predict_next_wake(pid)
+            .unwrap_or((0, 0.0));
+
+        let mut out = alloc::format!(
+            "# causal graph for pid {}\n\
+             anomaly_score  : {:.3}\n\
+             last_waker     : {}\n\
+             predicted_next : {} (prob={:.2})\n\n\
+             EDGE_TYPE  WAKER  WAKEE  AGE_MS\n\
+             ---------  -----  -----  ------\n",
+            pid, anomaly_score,
+            last_waker.map(|w| alloc::format!("{}", w)).unwrap_or_else(|| "-".into()),
+            if predicted_next > 0 { alloc::format!("{}", predicted_next) } else { "-".into() },
+            prob,
+        );
+
+        // Walk the global causal graph and collect edges involving this pid.
+        let edges = crate::causal::edges_for_pid(pid, 32);
+        let now = crate::scheduler::uptime_ms();
+        for (waker, wakee, ts) in &edges {
+            let kind = if *waker == pid { "outgoing" } else { "incoming" };
+            let age = now.saturating_sub(*ts);
+            out.push_str(&alloc::format!("{:<9}  {:<5}  {:<5}  {}\n", kind, waker, wakee, age));
+        }
+        out.push_str(&alloc::format!("\nedges_shown: {}\n", edges.len()));
+        out.into_bytes()
+    }
 }
 
 impl VfsNode for ProcPidDir {
@@ -172,20 +207,22 @@ impl VfsNode for ProcPidDir {
 
     fn readdir(&self) -> VfsResult<Vec<DirEntry>> {
         Ok(alloc::vec![
-            DirEntry { name: String::from("status"), is_dir: false, ino: alloc_ino() },
-            DirEntry { name: String::from("maps"),   is_dir: false, ino: alloc_ino() },
-            DirEntry { name: String::from("smaps"),  is_dir: false, ino: alloc_ino() },
-            DirEntry { name: String::from("fd"),     is_dir: true,  ino: alloc_ino() },
+            DirEntry { name: String::from("status"),      is_dir: false, ino: alloc_ino() },
+            DirEntry { name: String::from("maps"),        is_dir: false, ino: alloc_ino() },
+            DirEntry { name: String::from("smaps"),       is_dir: false, ino: alloc_ino() },
+            DirEntry { name: String::from("causal_graph"),is_dir: false, ino: alloc_ino() },
+            DirEntry { name: String::from("fd"),          is_dir: true,  ino: alloc_ino() },
         ])
     }
 
     fn lookup(&self, name: &str) -> VfsResult<Arc<dyn VfsNode>> {
         match name {
-            "status" => Ok(Arc::new(ProcPidFile { ino: alloc_ino(), content: self.status() })),
-            "maps"   => Ok(Arc::new(ProcPidFile { ino: alloc_ino(), content: self.maps()   })),
-            "smaps"  => Ok(Arc::new(ProcPidFile { ino: alloc_ino(), content: self.smaps()  })),
-            "fd"     => Ok(Arc::new(ProcPidFdDir { pid: self.pid })),
-            _        => Err(VfsError::NotFound),
+            "status"       => Ok(Arc::new(ProcPidFile { ino: alloc_ino(), content: self.status() })),
+            "maps"         => Ok(Arc::new(ProcPidFile { ino: alloc_ino(), content: self.maps()   })),
+            "smaps"        => Ok(Arc::new(ProcPidFile { ino: alloc_ino(), content: self.smaps()  })),
+            "causal_graph" => Ok(Arc::new(ProcPidFile { ino: alloc_ino(), content: self.causal_graph() })),
+            "fd"           => Ok(Arc::new(ProcPidFdDir { pid: self.pid })),
+            _              => Err(VfsError::NotFound),
         }
     }
 

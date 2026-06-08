@@ -81,6 +81,20 @@ impl Framebuffer {
         self.write_pixel_raw(off, r, g, b);
     }
 
+    /// Read back a pixel from the linear framebuffer.
+    pub fn get_pixel(&self, x: usize, y: usize) -> (u8, u8, u8) {
+        if x >= self.width || y >= self.height { return (0, 0, 0); }
+        let off = (y * self.stride + x) * self.bytes_per_pixel;
+        unsafe {
+            let p = self.ptr.add(off);
+            match self.format {
+                PixelFormat::Rgb => (*p, *p.add(1), *p.add(2)),
+                PixelFormat::Bgr => (*p.add(2), *p.add(1), *p),
+                PixelFormat::Bgrx | PixelFormat::Unknown => (*p.add(2), *p.add(1), *p),
+            }
+        }
+    }
+
     pub fn fill_rect(&mut self, x: usize, y: usize, w: usize, h: usize, r: u8, g: u8, b: u8) {
         let x_end = (x + w).min(self.width);
         let y_end = (y + h).min(self.height);

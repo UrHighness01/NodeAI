@@ -60,12 +60,16 @@ pub struct KeyEvent {
     pub pressed:  bool,
     pub ascii:    Option<char>,
     pub special:  Option<SpecialKey>,
+    /// True when Left Ctrl is held at the time this key was decoded.
+    pub ctrl:     bool,
 }
 
 // Track whether we're in an 0xE0 extended sequence
 static EXTENDED: spin::Mutex<bool> = spin::Mutex::new(false);
 // Track Shift key state (left or right shift held)
 static SHIFT: AtomicBool = AtomicBool::new(false);
+// Track Left/Right Ctrl state
+static CTRL: AtomicBool = AtomicBool::new(false);
 
 // ── PS/2 Mouse state ─────────────────────────────────────────────────────────
 static MOUSE_QUEUE: Mutex<VecDeque<MouseEvent>> = Mutex::new(VecDeque::new());
@@ -280,6 +284,10 @@ fn decode_scancode_set1(sc: u8) -> KeyEvent {
     if base == 0x2A || base == 0x36 {
         SHIFT.store(!released, Ordering::Relaxed);
     }
+    // Update Ctrl state: 0x1D = Left Ctrl
+    if base == 0x1D {
+        CTRL.store(!released, Ordering::Relaxed);
+    }
 
     let special = match base {
         0x3B => Some(SpecialKey::F1),
@@ -298,18 +306,14 @@ fn decode_scancode_set1(sc: u8) -> KeyEvent {
     };
 
     let shift = SHIFT.load(Ordering::Relaxed);
+    let ctrl  = CTRL.load(Ordering::Relaxed);
     let ascii = if shift {
         SCANCODE_TABLE_SHIFT.get(base as usize).copied().flatten()
     } else {
         SCANCODE_TABLE.get(base as usize).copied().flatten()
     };
 
-    KeyEvent {
-        scancode: sc,
-        pressed:  !released,
-        ascii,
-        special,
-    }
+    KeyEvent { scancode: sc, pressed: !released, ascii, special, ctrl }
 }
 
 /// Decode an extended (0xE0-prefixed) scancode.
@@ -329,12 +333,8 @@ fn decode_extended(sc: u8) -> KeyEvent {
         0x52 => Some(SpecialKey::Insert),
         _ => None,
     };
-    KeyEvent {
-        scancode: sc,
-        pressed: !released,
-        ascii: None,
-        special,
-    }
+    KeyEvent { scancode: sc, pressed: !released, ascii: None, special,
+               ctrl: CTRL.load(Ordering::Relaxed) }
 }
 
 // Basic US QWERTY layout, scancode set 1 (indices 0x00–0x58), unshifted.

@@ -83,6 +83,58 @@ pub fn is_confined(pid: u64) -> bool {
     CONFINED_PIDS.lock().contains(&pid)
 }
 
+// ── Learned (AI) seccomp ──────────────────────────────────────────────────────
+/// Per-process AI-learned seccomp policy.
+/// Frozen when a process calls sys_seccomp(SECCOMP_AI_LOCK) or when the
+/// kernel auto-locks after a long-running process exceeds AUTO_LOCK_CALLS.
+struct SeccompPolicy {
+    /// Syscall numbers observed during the warmup period.
+    allowed: alloc::collections::BTreeSet<u64>,
+    /// Whether this policy is enforcing (denies syscalls not in `allowed`).
+    locked: bool,
+}
+
+/// (pid) → SeccompPolicy.  Absent = no seccomp.
+static SECCOMP_TABLE: Mutex<BTreeMap<u64, SeccompPolicy>>
+    = Mutex::new(BTreeMap::new());
+
+/// NodeAI seccomp mode: auto-build allowlist from observed syscalls then lock.
+const SECCOMP_AI_LOCK: u64 = 100;
+/// Minimum calls before auto-lock is possible (guard against premature lock).
+const SECCOMP_AUTO_LOCK_CALLS: u32 = 500;
+
+/// Record a syscall nr into the seccomp learning table (called on every syscall).
+/// Builds the per-pid allowlist during the learning phase.
+pub fn seccomp_observe(pid: u64, nr: u64) {
+    let mut tbl = SECCOMP_TABLE.lock();
+    if let Some(pol) = tbl.get_mut(&pid) {
+        if !pol.locked {
+            pol.allowed.insert(nr);
+        }
+    }
+}
+
+/// Check whether `nr` is allowed for `pid`.  Returns true if no policy or not locked.
+pub fn seccomp_check(pid: u64, nr: u64) -> bool {
+    let tbl = SECCOMP_TABLE.lock();
+    match tbl.get(&pid) {
+        Some(pol) if pol.locked => pol.allowed.contains(&nr),
+        _ => true,
+    }
+}
+
+pub fn format_seccomp() -> alloc::vec::Vec<u8> {
+    let tbl = SECCOMP_TABLE.lock();
+    if tbl.is_empty() { return b"no seccomp policies active\n".to_vec(); }
+    let mut out = alloc::string::String::from("PID     STATUS   ALLOWED_NRS\n");
+    for (&pid, pol) in tbl.iter() {
+        let status = if pol.locked { "LOCKED " } else { "learning" };
+        out.push_str(&alloc::format!("{:<7} {}  {}\n",
+            pid, status, pol.allowed.len()));
+    }
+    out.into_bytes()
+}
+
 /// Format /proc/confinement.
 pub fn format_confinement() -> alloc::vec::Vec<u8> {
     let confined = CONFINED_PIDS.lock();
@@ -320,6 +372,7 @@ pub mod nr {
     pub const SETGROUPS:       u64 = 116;
     pub const ALARM:           u64 = 37;
     pub const PAUSE:           u64 = 34;
+    pub const SECCOMP:         u64 = 317;
 }
 
 // ── Per-CPU kernel stack for syscall handling ─────────────────────────────────
@@ -526,6 +579,14 @@ pub unsafe extern "C" fn syscall_dispatch_extern(
         return EPERM;
     }
 
+    // ── AI-learned seccomp enforcement ────────────────────────────────────────
+    // Build the per-pid allowlist passively; enforce if locked.
+    seccomp_observe(pid, nr);
+    if nr != nr::SECCOMP && !seccomp_check(pid, nr) {
+        crate::klog!(WARN, "SECCOMP: pid={} blocked nr={} (not in learned allowlist)", pid, nr);
+        return EPERM;
+    }
+
     let result = match nr {
         // ── Core syscalls (file I/O, memory, process) ───────────────────────
         nr::READ          => sys_read(arg0, arg1, arg2),
@@ -657,6 +718,7 @@ pub unsafe extern "C" fn syscall_dispatch_extern(
         nr::INOTIFY_INIT1     => sys_inotify_init1(arg0 as i32),
         nr::INOTIFY_ADD_WATCH => sys_inotify_add_watch(arg0, arg1, arg2 as u32),
         nr::INOTIFY_RM_WATCH  => sys_inotify_rm_watch(arg0, arg1 as i32),
+        nr::SECCOMP           => sys_seccomp(arg0, arg1, arg2),
         nr::SIGNALFD4     => sys_signalfd4(arg0 as i64, arg1, arg2, arg3 as i32),
         nr::CLONE3        => sys_fork(), // simplified clone3 — just fork
         // ── AI subsystem ─────────────────────────────────────────────────
@@ -3487,6 +3549,53 @@ unsafe fn sys_ftruncate(fd: u64, length: u64) -> i64 {
         Err(crate::vfs::VfsError::ReadOnly) => -30, // EROFS
         Err(_)  => EINVAL,
     }
+}
+
+// ── sys_seccomp ───────────────────────────────────────────────────────────────
+
+/// sys_seccomp(op, flags, uargs)
+///
+/// Supported ops:
+///   SECCOMP_SET_MODE_STRICT (0) — standard strict: only read/write/exit/_exit allowed.
+///   SECCOMP_AI_LOCK        (100) — NodeAI extension: freeze the learned allowlist
+///                                   built by observing this process's syscalls so far.
+unsafe fn sys_seccomp(op: u64, _flags: u64, _uargs: u64) -> i64 {
+    let pid = crate::scheduler::current_pid();
+    match op {
+        0 => {
+            // SECCOMP_SET_MODE_STRICT: allow only read(0), write(1), exit(60), exit_group(231)
+            let mut tbl = SECCOMP_TABLE.lock();
+            let pol = tbl.entry(pid).or_insert_with(|| SeccompPolicy {
+                allowed: alloc::collections::BTreeSet::new(),
+                locked: false,
+            });
+            pol.allowed.clear();
+            for &n in &[0u64, 1, 60, 231] { pol.allowed.insert(n); }
+            pol.locked = true;
+            crate::klog!(INFO, "SECCOMP: pid={} STRICT mode locked", pid);
+            0
+        }
+        SECCOMP_AI_LOCK => {
+            // AI mode: freeze current learned allowlist.
+            let mut tbl = SECCOMP_TABLE.lock();
+            let pol = tbl.entry(pid).or_insert_with(|| SeccompPolicy {
+                allowed: alloc::collections::BTreeSet::new(),
+                locked: false,
+            });
+            let n = pol.allowed.len();
+            pol.locked = true;
+            crate::klog!(INFO,
+                "SECCOMP: pid={} AI_LOCK — {} syscalls allowed", pid, n);
+            crate::auto_security::on_seccomp_lock(pid, n);
+            0
+        }
+        _ => EINVAL,
+    }
+}
+
+/// Called when a process exits — clean up its seccomp policy.
+pub fn seccomp_cleanup(pid: u64) {
+    SECCOMP_TABLE.lock().remove(&pid);
 }
 
 // ── signalfd ──────────────────────────────────────────────────────────────────

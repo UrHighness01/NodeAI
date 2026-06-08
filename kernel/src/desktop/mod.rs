@@ -126,6 +126,13 @@ static mut CURSOR_Y:     usize = 400;
 static mut CURSOR_DRAWN: bool  = false;
 /// Previous left-button state — used to detect rising edge (click).
 static mut PREV_LEFT:    bool  = false;
+/// Save area for pixels under the cursor sprite (+1 shadow = 9×13 pixels max).
+const CURSOR_SAVE_W: usize = CURSOR_W + 1;
+const CURSOR_SAVE_H: usize = CURSOR_H + 1;
+static mut CURSOR_SAVE: [(u8, u8, u8); CURSOR_SAVE_W * CURSOR_SAVE_H]
+    = [(0, 0, 0); CURSOR_SAVE_W * CURSOR_SAVE_H];
+static mut CURSOR_SAVE_X: usize = 0;
+static mut CURSOR_SAVE_Y: usize = 0;
 
 // ── App launcher ──────────────────────────────────────────────────────────────
 struct AppDesc { icon: &'static str, name: &'static str, cmd: &'static str }
@@ -408,10 +415,19 @@ fn check_click(x: usize, y: usize) {
 
     // ── Top panel (0 .. TOP_H) ────────────────────────────────────────────────
     if iy < TOP_H as i32 {
-        // "NodeAI" pill button (x ≈ 4 .. 76)
-        // NodeAI pill toggles the launcher
+        // "NodeAI" pill button (x ≈ 4 .. 76) → toggle launcher
         if ix >= 4 && ix < 76 {
             launcher_toggle();
+            return;
+        }
+        // "Terminal" label (x ≈ 86 .. 86 + 8*8 = 150) → return to terminal.
+        // Closes the launcher if open, or closes any active app window.
+        if ix >= 80 && ix < 160 {
+            if unsafe { LAUNCHER_OPEN } {
+                launcher_toggle(); // close launcher
+            } else if unsafe { ACTIVE_APP != ActiveApp::Terminal } {
+                close_app_window();
+            }
         }
         return;
     }
@@ -493,11 +509,22 @@ unsafe fn erase_cursor() {
     }
 
     if ACTIVE_APP != ActiveApp::Terminal {
-        // Active app window covers everything below the top panel.
-        if cy_bot > TOP_H {
-            fb::with(|f| draw_win_titlebar(f));
-            fb::with(|f| unsafe { draw_active_app_overlay(f) });
-        }
+        // Restore the pixels saved before the cursor was drawn.
+        // This avoids repainting the entire app window on every mouse move.
+        fb::with(|f| {
+            let w = f.width();
+            let h = f.height();
+            for sy in 0..CURSOR_SAVE_H {
+                for sx in 0..CURSOR_SAVE_W {
+                    let px = CURSOR_SAVE_X + sx;
+                    let py = CURSOR_SAVE_Y + sy;
+                    if px < w && py < h {
+                        let (r, g, b) = CURSOR_SAVE[sy * CURSOR_SAVE_W + sx];
+                        f.put_pixel(px, py, r, g, b);
+                    }
+                }
+            }
+        });
         return;
     }
 
@@ -525,26 +552,37 @@ unsafe fn erase_cursor() {
 }
 
 /// Paint the cursor sprite at (CURSOR_X, CURSOR_Y).
+/// Saves the pixels it will overwrite so erase_cursor can restore them exactly,
+/// eliminating the need to repaint the entire app window on each mouse move.
 /// Must be called inside an `unsafe` block.
 unsafe fn draw_cursor() {
+    let x0 = CURSOR_X;
+    let y0 = CURSOR_Y;
+    CURSOR_SAVE_X = x0;
+    CURSOR_SAVE_Y = y0;
     fb::with(|f| {
-        let x0 = CURSOR_X;
-        let y0 = CURSOR_Y;
-        let w  = f.width();
-        let h  = f.height();
+        let w = f.width();
+        let h = f.height();
+        // Save the bounding rectangle (CURSOR_W+1) × (CURSOR_H+1) pixels.
+        for sy in 0..CURSOR_SAVE_H {
+            for sx in 0..CURSOR_SAVE_W {
+                let px = x0 + sx;
+                let py = y0 + sy;
+                CURSOR_SAVE[sy * CURSOR_SAVE_W + sx] =
+                    if px < w && py < h { f.get_pixel(px, py) } else { (0, 0, 0) };
+            }
+        }
+        // Draw cursor sprite.
         for row in 0..CURSOR_H {
             let bits = CURSOR_BITS[row];
             for col in 0..CURSOR_W {
-                // Black shadow at offset (+1,+1) for visibility on light backgrounds
                 if (bits >> (7 - col)) & 1 != 0 {
                     let px = x0 + col;
                     let py = y0 + row;
                     if px < w && py < h {
-                        // 1-px black border: draw shadow pixel first…
                         if px + 1 < w && py + 1 < h {
                             f.put_pixel(px + 1, py + 1, 0x00, 0x00, 0x00);
                         }
-                        // …then bright white foreground on top
                         f.put_pixel(px, py, 0xFF, 0xFF, 0xFF);
                     }
                 }
@@ -1866,13 +1904,14 @@ fn br_fetch(url: &str) -> usize {
     {
         let mut sockets = crate::net::tcp::SOCKETS.lock();
         sockets.insert(key.clone(), crate::net::tcp::TcpSocket {
-            state:   crate::net::tcp::TcpState::SynSent, // client: SYN sent, rcv_nxt set on SYN-ACK
+            state:   crate::net::tcp::TcpState::SynSent,
             snd_nxt: isn.wrapping_add(1),
             snd_una: isn,
-            rcv_nxt: 0, // updated to server_isn+1 when SYN-ACK arrives
+            rcv_nxt: 0,
             snd_wnd: 65535,
             rcv_buf: Vec::new(),
             cwnd: 1460, ssthresh: 65535,
+            last_send_ms: 0, rto_ms: 1000, retransmit_buf: Vec::new(),
         });
     }
 
@@ -1986,6 +2025,7 @@ pub fn br_fetch_raw(url: &str) -> Vec<u8> {
         snd_nxt: isn.wrapping_add(1), snd_una: isn,
         rcv_nxt: 0, snd_wnd: 65535, rcv_buf: Vec::new(),
         cwnd: 1460, ssthresh: 65535,
+        last_send_ms: 0, rto_ms: 1000, retransmit_buf: Vec::new(),
     });
 
     let deadline = crate::scheduler::uptime_ms() + 5000;
@@ -2437,7 +2477,16 @@ pub fn process_input_events() {
                 }
             } else {
                 // Normal shell routing
-                if let Some(special) = ev.special {
+                if ev.ctrl {
+                    // Ctrl+key: generate control code (0x01..0x1A for a..z)
+                    if let Some(ch) = ev.ascii {
+                        let b = ch as u8;
+                        let ctrl_byte = if b >= b'a' && b <= b'z' { b - b'a' + 1 }
+                                        else if b >= b'A' && b <= b'Z' { b - b'A' + 1 }
+                                        else { 0 };
+                        if ctrl_byte > 0 { crate::shell::on_char(ctrl_byte); }
+                    }
+                } else if let Some(special) = ev.special {
                     crate::shell::on_special_key(special);
                 } else {
                     match ev.scancode {

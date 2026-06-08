@@ -59,6 +59,8 @@ pub fn poll() {
     for reply in replies {
         unsafe { let _ = nic.transmit(&reply); }
     }
+    // Check TCP retransmit timers on every poll cycle.
+    tcp::poll_retransmit();
 }
 
 /// Initialize the NIC with a VirtioNet device. Updates OUR_MAC from the device.
@@ -1324,11 +1326,17 @@ pub mod tcp {
         pub snd_wnd:   u16,   // send window (from remote)
         pub rcv_buf:   Vec<u8>,  // received data waiting for application read
         // ── TCP Reno congestion control ──────────────────────────────────────
-        pub cwnd:      u32,   // congestion window in bytes (Reno)
-        pub ssthresh:  u32,   // slow-start threshold
+        pub cwnd:        u32,   // congestion window in bytes (Reno)
+        pub ssthresh:    u32,   // slow-start threshold
+        // ── Retransmit timer ─────────────────────────────────────────────────
+        pub last_send_ms: u64,  // uptime_ms when last segment was sent
+        pub rto_ms:       u64,  // retransmit timeout (starts at 1s, backs off)
+        pub retransmit_buf: Vec<u8>, // copy of last unacked segment data
     }
 
     const MSS: u32 = 1460;
+    const RTO_INITIAL_MS: u64 = 1000;
+    const RTO_MAX_MS:     u64 = 60_000;
 
     impl TcpSocket {
         fn new_syn_received(irs: u32) -> Self {
@@ -1341,8 +1349,11 @@ pub mod tcp {
                 rcv_nxt: irs.wrapping_add(1),
                 snd_wnd: 65535,
                 rcv_buf: Vec::new(),
-                cwnd:    MSS,   // slow start: begin at 1 MSS
+                cwnd:    MSS,
                 ssthresh: 65535,
+                last_send_ms: 0,
+                rto_ms: RTO_INITIAL_MS,
+                retransmit_buf: Vec::new(),
             }
         }
     }
@@ -1619,9 +1630,62 @@ pub mod tcp {
             let dst_mac = super::arp_resolve_for_ip(&remote_ip).unwrap_or([0xFF; 6]);
             let frame = super::EthFrame::build(dst_mac, our_mac, super::ETHERTYPE_IPV4, &pkt);
             super::transmit(&frame);
+            // Save for possible retransmit.
+            sock.retransmit_buf.clear();
+            sock.retransmit_buf.extend_from_slice(send_data);
+            sock.last_send_ms = crate::scheduler::uptime_ms();
             return send_data.len();
         }
         0
+    }
+
+    /// Check all Established sockets for RTO expiry and retransmit if needed.
+    /// Called from net::poll() in the idle loop.
+    pub fn poll_retransmit() {
+        let now = crate::scheduler::uptime_ms();
+        let our_ip  = unsafe { OUR_IP };
+        let our_mac = unsafe { OUR_MAC };
+        let mut sockets = SOCKETS.lock();
+        let mut to_retransmit: alloc::vec::Vec<(TcpSocketKey, alloc::vec::Vec<u8>)> = alloc::vec::Vec::new();
+
+        for (key, sock) in sockets.iter_mut() {
+            if sock.state != TcpState::Established && sock.state != TcpState::Accepted { continue; }
+            if sock.retransmit_buf.is_empty() { continue; }
+            if sock.snd_una == sock.snd_nxt.wrapping_sub(sock.retransmit_buf.len() as u32) { continue; } // fully acked
+            if sock.last_send_ms == 0 { continue; }
+            if now.saturating_sub(sock.last_send_ms) >= sock.rto_ms {
+                // RTO expired: exponential back-off + Reno CWND reduction
+                sock.ssthresh = (sock.cwnd / 2).max(MSS);
+                sock.cwnd     = MSS; // reset to 1 MSS (slow start)
+                sock.rto_ms   = (sock.rto_ms * 2).min(RTO_MAX_MS);
+                sock.last_send_ms = now;
+                to_retransmit.push((key.clone(), sock.retransmit_buf.clone()));
+                crate::klog!(DEBUG, "TCP: RTO expired port {}→{} rto={}ms retransmitting {} bytes",
+                    key.local_port, key.remote_port, sock.rto_ms / 2, sock.retransmit_buf.len());
+            }
+        }
+        drop(sockets);
+
+        for (key, data) in to_retransmit {
+            // Re-read the socket to get current snd_una/rcv_nxt for ACK numbers.
+            let (snd_nxt_at_send, rcv_nxt) = {
+                let sockets = SOCKETS.lock();
+                let sock = match sockets.get(&key) { Some(s) => s, None => continue };
+                (sock.snd_una, sock.rcv_nxt)
+            };
+            let seg = TcpHeader::build(
+                key.local_port, key.remote_port,
+                snd_nxt_at_send, rcv_nxt,
+                PSH | ACK, 65535,
+                our_ip, key.remote_ip, &data,
+            );
+            let ip_hdr = Ipv4Header::build(IP_PROTO_TCP, our_ip, key.remote_ip, seg.len());
+            let mut pkt = ip_hdr;
+            pkt.extend_from_slice(&seg);
+            let dst_mac = super::arp_resolve_for_ip(&key.remote_ip).unwrap_or([0xFF; 6]);
+            let frame = super::EthFrame::build(dst_mac, our_mac, super::ETHERTYPE_IPV4, &pkt);
+            super::transmit(&frame);
+        }
     }
 
     /// Dequeue the next established connection from the backlog for `port`.
@@ -1746,8 +1810,8 @@ pub mod tcp {
             rcv_nxt: 0,     // filled in when SYN-ACK arrives
             snd_wnd: 65535,
             rcv_buf: Vec::new(),
-            cwnd:    MSS,
-            ssthresh: 65535,
+            cwnd:    MSS, ssthresh: 65535,
+            last_send_ms: 0, rto_ms: RTO_INITIAL_MS, retransmit_buf: Vec::new(),
         };
         let key = TcpSocketKey { local_port, remote_ip, remote_port };
         SOCKETS.lock().insert(key, TcpSocket { state: TcpState::SynSent, ..sock });

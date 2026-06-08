@@ -159,6 +159,29 @@ pub fn on_privesc_attempt(pid: u64, syscall_nr: u64) {
     respond(&ev);
 }
 
+/// Called when a process locks its AI-learned seccomp profile.
+pub fn on_seccomp_lock(pid: u64, allowed_count: usize) {
+    if !ENABLED.load(Ordering::Relaxed) { return; }
+    let now  = crate::scheduler::uptime_ms();
+    let name = crate::scheduler::task_name(pid as crate::scheduler::Pid)
+        .unwrap_or_else(|| "???".to_owned());
+    let ev = ThreatEvent {
+        pid, name: name.clone(), level: ThreatLevel::Low,
+        kind:   "seccomp-ai-lock".to_owned(),
+        action: alloc::format!("allowed={}", allowed_count),
+        timestamp: now,
+    };
+    let mut state = SEC.lock();
+    state.log.push(ev);
+    drop(state);
+    EVENTS_CT.fetch_add(1, Ordering::Relaxed);
+    let text = format!(
+        "{}: pid={} name={} kind=seccomp-ai-lock allowed_syscalls={}\n",
+        now, pid, name, allowed_count
+    );
+    let _ = crate::vfs::append_file("/var/log/security.log", text.as_bytes());
+}
+
 /// Called when a stack canary mismatch is detected during context switch.
 /// The task has already been killed by the scheduler; this records the forensic event.
 pub fn on_stack_overflow(pid: u64) {

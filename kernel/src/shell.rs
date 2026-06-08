@@ -3920,13 +3920,14 @@ fn cmd_wget(args: &str) {
     {
         let mut sockets = crate::net::tcp::SOCKETS.lock();
         sockets.insert(key.clone(), crate::net::tcp::TcpSocket {
-            state: crate::net::tcp::TcpState::SynSent, // client: SYN sent, rcv_nxt set on SYN-ACK
+            state: crate::net::tcp::TcpState::SynSent,
             snd_nxt: isn.wrapping_add(1),
             snd_una: isn,
             rcv_nxt: 0,
             snd_wnd: 65535,
             rcv_buf: Vec::new(),
             cwnd: 1460, ssthresh: 65535,
+            last_send_ms: 0, rto_ms: 1000, retransmit_buf: Vec::new(),
         });
     }
 
