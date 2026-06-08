@@ -14,6 +14,16 @@ use alloc::{vec, vec::Vec, boxed::Box};
 use spin::{Mutex, Once};
 use core::sync::atomic::{AtomicBool, Ordering};
 
+/// Translate a kernel virtual address to physical. Tries the VMM page-table
+/// walk first; falls back to the phys_offset subtraction for identity-mapped
+/// addresses (MMIO window, early boot structs).
+#[inline]
+fn va_to_pa(va: u64, phys_off: u64) -> u64 {
+    crate::memory::translate(x86_64::VirtAddr::new(va))
+        .map(|p| p.as_u64())
+        .unwrap_or_else(|| va.saturating_sub(phys_off))
+}
+
 // ── PCI IDs ────────────────────────────────────────────────────────────────────
 const AHCI_CLASS:    u8 = 0x01;
 const AHCI_SUBCLASS: u8 = 0x06;
@@ -161,10 +171,10 @@ impl AhciPort {
 
     /// Set command list and FIS base addresses, start engine.
     unsafe fn start(&mut self) {
-        let cl_phys = self.cmd_list.as_ptr() as u64
-            - self.phys_off;       // VA→PA
-        let fb_phys = (&*self.recv_fis as *const RecvFis) as u64
-            - self.phys_off;
+        // Box allocations are in the kernel heap VA range, not the physical-offset
+        // window. Use the VMM page-table walk to get the true physical address.
+        let cl_phys = va_to_pa(self.cmd_list.as_ptr() as u64, self.phys_off);
+        let fb_phys = va_to_pa(&*self.recv_fis as *const RecvFis as u64, self.phys_off);
         self.pw32(P_CLB,  cl_phys as u32);
         self.pw32(P_CLBU, (cl_phys >> 32) as u32);
         self.pw32(P_FB,   fb_phys as u32);
@@ -208,7 +218,7 @@ impl AhciPort {
         fis.device    = 0;
 
         // PRDT: 512 bytes from buf
-        let buf_phys = buf.as_ptr() as u64 - self.phys_off;
+        let buf_phys = va_to_pa(buf.as_ptr() as u64, self.phys_off);
         ct.prdt[0] = PrdtEntry {
             dba:  buf_phys as u32,
             dbau: (buf_phys >> 32) as u32,
@@ -217,7 +227,7 @@ impl AhciPort {
         };
 
         // Command header slot 0
-        let ct_phys = ct as *const _ as u64 - self.phys_off;
+        let ct_phys = va_to_pa(ct as *const _ as u64, self.phys_off);
         self.cmd_list[0] = CommandHeader {
             flags:  (core::mem::size_of::<FisRegH2D>() / 4) as u16,
             prdtl:  1,
@@ -266,7 +276,7 @@ impl AhciPort {
         fis.count_lo  = count as u8;
         fis.count_hi  = (count >> 8) as u8;
 
-        let buf_phys = buf.as_ptr() as u64 - self.phys_off;
+        let buf_phys = va_to_pa(buf.as_ptr() as u64, self.phys_off);
         let bytes = count as u32 * SECTOR_SIZE as u32;
         ct.prdt[0] = PrdtEntry {
             dba:  buf_phys as u32,
@@ -275,7 +285,7 @@ impl AhciPort {
             dbc:  (bytes - 1) | (1 << 31),
         };
 
-        let ct_phys = ct as *const _ as u64 - self.phys_off;
+        let ct_phys = va_to_pa(ct as *const _ as u64, self.phys_off);
         self.cmd_list[0] = CommandHeader {
             flags:  (core::mem::size_of::<FisRegH2D>() / 4) as u16 | (1 << 6), // write=0
             prdtl:  1,
@@ -306,7 +316,7 @@ impl AhciPort {
         fis.count_lo  = count as u8;
         fis.count_hi  = (count >> 8) as u8;
 
-        let buf_phys = buf.as_ptr() as u64 - self.phys_off;
+        let buf_phys = va_to_pa(buf.as_ptr() as u64, self.phys_off);
         let bytes = count as u32 * SECTOR_SIZE as u32;
         ct.prdt[0] = PrdtEntry {
             dba:  buf_phys as u32,
@@ -315,7 +325,7 @@ impl AhciPort {
             dbc:  (bytes - 1) | (1 << 31),
         };
 
-        let ct_phys = ct as *const _ as u64 - self.phys_off;
+        let ct_phys = va_to_pa(ct as *const _ as u64, self.phys_off);
         self.cmd_list[0] = CommandHeader {
             flags:  (core::mem::size_of::<FisRegH2D>() / 4) as u16 | (1 << 6), // write=1
             prdtl:  1,

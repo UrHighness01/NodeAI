@@ -105,9 +105,9 @@ pub unsafe fn parse(madt_phys: u64, phys_offset: u64) -> MadtData {
         match rec_type {
             // Type 0 — Processor Local APIC
             0 if rec_len >= 8 => {
-                let acpi_id = *((offset + 2) as *const u8);
-                let apic_id = *((offset + 3) as *const u8);
-                let flags   = *((offset + 4) as *const u32);
+                let acpi_id = core::ptr::read_unaligned((offset + 2) as *const u8);
+                let apic_id = core::ptr::read_unaligned((offset + 3) as *const u8);
+                let flags   = core::ptr::read_unaligned((offset + 4) as *const u32);
                 if data.cpu_count < MAX_CPUS {
                     data.cpus[data.cpu_count] = CpuInfo {
                         acpi_id,
@@ -120,14 +120,14 @@ pub unsafe fn parse(madt_phys: u64, phys_offset: u64) -> MadtData {
 
             // Type 1 — I/O APIC
             1 if rec_len >= 12 => {
-                let id        = *((offset + 2) as *const u8);
-                let base_addr = *((offset + 4) as *const u32);
-                let gsi_base  = *((offset + 8) as *const u32);
+                let id        = core::ptr::read_unaligned((offset + 2) as *const u8);
+                let base_addr = core::ptr::read_unaligned((offset + 4) as *const u32);
+                let gsi_base  = core::ptr::read_unaligned((offset + 8) as *const u32);
                 if data.io_count < MAX_IO_APICS {
                     data.io_apics[data.io_count] = IoApicInfo {
                         id,
-                        base_addr: { base_addr },
-                        gsi_base:  { gsi_base },
+                        base_addr,
+                        gsi_base,
                     };
                     data.io_count += 1;
                 }
@@ -135,8 +135,8 @@ pub unsafe fn parse(madt_phys: u64, phys_offset: u64) -> MadtData {
 
             // Type 5 — Local APIC Address Override (64-bit LAPIC address)
             5 if rec_len >= 12 => {
-                let addr = *((offset + 4) as *const u64);
-                data.lapic_addr = { addr };
+                let addr = core::ptr::read_unaligned((offset + 4) as *const u64);
+                data.lapic_addr = addr;
             }
 
             _ => {} // type 2 (overrides), 3, 4, etc. — skip for now
@@ -168,10 +168,11 @@ pub unsafe fn find_table(xsdt_phys: u64, sig: &[u8; 4], phys_offset: u64) -> Opt
 
     while pos + entry_size <= entries_end {
         // Entry in the table is a physical address of the child table.
+        // ACPI tables are byte-packed — entries are not guaranteed aligned.
         let child_phys: u64 = if entry_size == 8 {
-            *(pos as *const u64)
+            core::ptr::read_unaligned(pos as *const u64)
         } else {
-            *(pos as *const u32) as u64
+            core::ptr::read_unaligned(pos as *const u32) as u64
         };
 
         if child_phys != 0 {

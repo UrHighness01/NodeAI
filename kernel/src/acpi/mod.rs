@@ -61,7 +61,7 @@ pub fn init(rsdp_addr: u64, phys_offset: u64) {
         if let Some(hpet_phys) = madt::find_table(sdt_root, b"HPET", phys_offset) {
             // HPET base address is at offset 44 in the table (after the standard
             // ACPI header). hpet_phys is physical → add phys_offset for the virtual ptr.
-            let base = *((phys_offset + hpet_phys + 44) as *const u64);
+            let base = core::ptr::read_unaligned((phys_offset + hpet_phys + 44) as *const u64);
             crate::klog!(INFO, "ACPI: HPET @ {:#x}", base);
             Some(base)
         } else {
