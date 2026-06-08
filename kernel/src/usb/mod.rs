@@ -1,17 +1,18 @@
-//! USB xHCI host controller driver + device enumeration (stub — port detection only).
+//! USB xHCI host controller driver — control + bulk transfer ring implementation.
 //!
 //! Architecture:
 //!   - Scans PCI for xHCI controllers (class 0x0C / sub 0x03 / progif 0x30)
-//!   - Sets up xHCI Scratch Pad, Device Context Base Address Array (DCBAA),
-//!     Event / Command / Transfer rings
-//!   - Enumerates ports: detects speed, issues Set Address, Get Descriptor
+//!   - Sets up DCBAA, Command ring, Event ring, per-device Transfer rings
+//!   - Enumerates ports: Set Address, Get Descriptor (real control transfers)
 //!   - Dispatches to sub-drivers:
-//!       Class 03h (HID)  → usb::hid
-//!       Class E0h (BT)   → usb::bt
-//!       Class 08h (MSC)  → usb::msc
+//!       Class 03h (HID)    → usb::hid
+//!       Class E0h (BT)     → usb::bt
+//!       Class 08h (MSC)    → usb::msc
+//!       Vendor 0CF3/9271   → wifi (AR9271)
 //!
-//! Full xHCI compliance (streams, isoc, etc.) is not implemented;
-//! only control + bulk + interrupt endpoints are supported.
+//! Transfer ring: per-slot ring with enqueue pointer + cycle bit toggling.
+//! Control: Setup TRB → Data TRB → Status TRB → doorbell → poll event ring.
+//! Bulk:    Normal TRB → doorbell → poll event ring.
 
 pub mod hid;
 pub mod msc;
@@ -91,6 +92,55 @@ impl Trb {
     const ZERO: Self = Self { param: 0, status: 0, control: 0 };
 }
 
+// ── Transfer ring (per device slot) ──────────────────────────────────────────
+// One 64-entry ring per slot. Cycle bit toggles on each full wrap (xHCI §4.9.2).
+
+const XFER_RING_LEN: usize = 64;
+
+struct TransferRing {
+    trbs:  Box<[Trb; XFER_RING_LEN]>,
+    enq:   usize,
+    cycle: u32,
+    phys:  u64, // physical base address of trbs[0]
+}
+
+impl TransferRing {
+    fn new(phys_off: u64) -> Self {
+        let trbs = Box::new([Trb::ZERO; XFER_RING_LEN]);
+        let phys = crate::memory::translate(
+            x86_64::VirtAddr::new(trbs.as_ptr() as u64))
+            .map(|p| p.as_u64())
+            .unwrap_or(trbs.as_ptr() as u64 - phys_off);
+        let mut ring = Self { trbs, enq: 0, cycle: 1, phys };
+        // Last TRB = Link TRB back to start, toggle-cycle on wrap
+        let last = XFER_RING_LEN - 1;
+        ring.trbs[last] = Trb {
+            param:   ring.phys,
+            status:  0,
+            control: (TRB_LINK << 10) | 1 | (1 << 1), // TC=1
+        };
+        ring
+    }
+
+    /// Enqueue one TRB, handle Link TRB wrap automatically.
+    unsafe fn enqueue(&mut self, mut trb: Trb) {
+        // Set cycle bit on this TRB
+        trb.control = (trb.control & !1) | self.cycle;
+        self.trbs[self.enq] = trb;
+        self.enq += 1;
+        if self.enq == XFER_RING_LEN - 1 {
+            // Hit the link TRB — update its cycle bit and wrap
+            let cycle = self.cycle;
+            self.trbs[XFER_RING_LEN - 1].control =
+                (self.trbs[XFER_RING_LEN - 1].control & !1) | cycle;
+            self.cycle ^= 1;
+            self.enq = 0;
+        }
+    }
+
+    fn phys_base(&self) -> u64 { self.phys }
+}
+
 // ── Port enumeration result ───────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -124,7 +174,10 @@ struct XhciCtrl {
     cmd_enq:      usize,
     evt_deq:      usize,
     cycle:        u32,
+    evt_cycle:    u32,   // expected cycle bit for event ring consumer
     devices:      Vec<UsbDevice>,
+    xfer_rings:   alloc::collections::BTreeMap<u8, TransferRing>, // slot→ring
+    phys_off:     u64,
 }
 
 impl XhciCtrl {
@@ -148,6 +201,138 @@ impl XhciCtrl {
     }
     unsafe fn port_sc_w(&self, port: u32, v: u32) {
         self.op_w32(OP_PORT_SC0 + (port as u64 - 1) * 0x10, v);
+    }
+
+    /// Ring doorbell for slot (0=command ring, slot>0=endpoint 1 of that slot).
+    unsafe fn ring_doorbell(&self, slot: u8, endpoint: u8) {
+        let db_addr = (self.db_base + (slot as u64) * 4) as *mut u32;
+        core::ptr::write_volatile(db_addr, endpoint as u32);
+    }
+
+    /// Poll the event ring for a completion TRB matching the expected type.
+    /// Returns the completion code (0=success, 1=short packet, etc.).
+    unsafe fn poll_event(&mut self, expected_type: u32, timeout_ms: u64) -> u32 {
+        let deadline = crate::scheduler::uptime_ms() + timeout_ms;
+        loop {
+            if crate::scheduler::uptime_ms() >= deadline { return 0xFF; } // timeout
+            let evt = &self.evt_ring[self.evt_deq];
+            let cycle = evt.control & 1;
+            if cycle != self.evt_cycle {
+                core::hint::spin_loop();
+                continue;
+            }
+            let trb_type = (evt.control >> 10) & 0x3F;
+            self.evt_deq += 1;
+            if self.evt_deq >= RING_LEN {
+                self.evt_deq = 0;
+                self.evt_cycle ^= 1;
+            }
+            // Update ERDP
+            let er_phys = self.evt_ring.as_ptr() as u64 - self.phys_off;
+            let erdp = er_phys + self.evt_deq as u64 * 16;
+            let ir0 = self.rt_base + 0x20;
+            core::ptr::write_volatile((ir0 + 0x10) as *mut u64, erdp | (1 << 3));
+
+            if trb_type == expected_type {
+                return (evt.status >> 24) & 0xFF; // completion code
+            }
+        }
+    }
+
+    /// Execute a USB control transfer (Setup → [Data] → Status).
+    /// `setup`: 8-byte SETUP packet. `data`: IN buffer (may be empty for no-data).
+    /// Returns bytes transferred, or 0 on error.
+    unsafe fn control_transfer(&mut self, slot: u8, setup: [u8; 8], data: &mut [u8]) -> usize {
+        let dir_in = (setup[0] & 0x80) != 0;
+        let data_len = data.len();
+
+        // Ensure transfer ring exists for this slot
+        if !self.xfer_rings.contains_key(&slot) {
+            self.xfer_rings.insert(slot, TransferRing::new(self.phys_off));
+        }
+        let ring = self.xfer_rings.get_mut(&slot).unwrap();
+
+        // Setup TRB (xHCI §6.4.1.2.1)
+        let setup_trb = Trb {
+            param:   u64::from_le_bytes(setup),
+            status:  8, // TRB transfer length = 8
+            control: (TRB_SETUP_STAGE << 10)
+                | (1 << 6)  // IDT — immediate data
+                | if data_len > 0 { if dir_in { 3 << 16 } else { 2 << 16 } } else { 0 },
+        };
+        ring.enqueue(setup_trb);
+
+        // Data TRB (if any)
+        if data_len > 0 {
+            let data_phys = crate::memory::translate(
+                x86_64::VirtAddr::new(data.as_ptr() as u64))
+                .map(|p| p.as_u64())
+                .unwrap_or(data.as_ptr() as u64 - self.phys_off);
+            let data_trb = Trb {
+                param:   data_phys,
+                status:  data_len as u32,
+                control: (TRB_DATA_STAGE << 10) | if dir_in { 1 << 16 } else { 0 },
+            };
+            ring.enqueue(data_trb);
+        }
+
+        // Status TRB — direction opposite to data (or IN if no data)
+        let status_dir = if data_len == 0 || dir_in { 0 } else { 1u32 << 16 };
+        let status_trb = Trb {
+            param:   0,
+            status:  0,
+            control: (TRB_STATUS_STAGE << 10) | status_dir | (1 << 5), // IOC
+        };
+        ring.enqueue(status_trb);
+
+        self.ring_doorbell(slot, 1); // endpoint 1 = control EP0
+
+        let cc = self.poll_event(TRB_TRANSFER_EVT, 2000);
+        if cc == 0 || cc == 13 { data_len } else { 0 } // 13=short packet OK
+    }
+
+    /// Execute a USB bulk OUT transfer.
+    /// Returns bytes sent, or 0 on error.
+    unsafe fn bulk_out(&mut self, slot: u8, ep_out: u8, data: &[u8]) -> usize {
+        if !self.xfer_rings.contains_key(&slot) {
+            self.xfer_rings.insert(slot, TransferRing::new(self.phys_off));
+        }
+        let data_phys = crate::memory::translate(
+            x86_64::VirtAddr::new(data.as_ptr() as u64))
+            .map(|p| p.as_u64())
+            .unwrap_or(data.as_ptr() as u64 - self.phys_off);
+        let ring = self.xfer_rings.get_mut(&slot).unwrap();
+        let trb = Trb {
+            param:   data_phys,
+            status:  data.len() as u32,
+            control: (TRB_NORMAL << 10) | (1 << 5), // IOC
+        };
+        ring.enqueue(trb);
+        self.ring_doorbell(slot, ep_out & 0x0F);
+        let cc = self.poll_event(TRB_TRANSFER_EVT, 2000);
+        if cc == 0 || cc == 13 { data.len() } else { 0 }
+    }
+
+    /// Execute a USB bulk IN transfer.
+    /// Returns bytes received.
+    unsafe fn bulk_in(&mut self, slot: u8, ep_in: u8, buf: &mut [u8]) -> usize {
+        if !self.xfer_rings.contains_key(&slot) {
+            self.xfer_rings.insert(slot, TransferRing::new(self.phys_off));
+        }
+        let buf_phys = crate::memory::translate(
+            x86_64::VirtAddr::new(buf.as_ptr() as u64))
+            .map(|p| p.as_u64())
+            .unwrap_or(buf.as_ptr() as u64 - self.phys_off);
+        let ring = self.xfer_rings.get_mut(&slot).unwrap();
+        let trb = Trb {
+            param:   buf_phys,
+            status:  buf.len() as u32,
+            control: (TRB_NORMAL << 10) | (1 << 5), // IOC
+        };
+        ring.enqueue(trb);
+        self.ring_doorbell(slot, (ep_in & 0x0F) * 2 + 1); // IN endpoint doorbell
+        let cc = self.poll_event(TRB_TRANSFER_EVT, 2000);
+        if cc == 0 || cc == 13 { buf.len() } else { 0 }
     }
 
     /// Wait for controller to become ready after reset.
@@ -247,36 +432,70 @@ impl XhciCtrl {
 
         let sc2 = self.port_sc(port);
         let speed = ((sc2 >> PSC_SPEED_SHIFT) & PSC_SPEED_MASK) as u8;
-        if sc2 & PSC_PED == 0 { return; } // didn't enable
+        if sc2 & PSC_PED == 0 { return; } // port didn't enable after reset
 
-        // For now record as an unknown device — full descriptor parsing
-        // (Get Descriptor / Set Address) requires an xTRB pipeline
-        // which remains a future addition (currently stub-only).
-        crate::klog!(INFO, "USB: port {} connected, speed={}", port, speed);
+        crate::klog!(INFO, "USB: port {} connected speed={}", port, speed);
 
-        // Heuristic: If speed==1 or 2 (Low/Full), likely HID
-        let class = match speed {
-            1 | 2 => UsbClass::Hid,
-            3     => UsbClass::MassStorage, // High Speed → MSC heuristic
-            _     => UsbClass::Unknown(0, 0),
+        let slot = (port as u8).saturating_add(1); // simplified slot assignment
+
+        // GET_DESCRIPTOR (Device, 18 bytes) to read VendorID/ProductID/Class
+        let mut desc = [0u8; 18];
+        let setup: [u8; 8] = [
+            0x80,       // bmRequestType: IN | Standard | Device
+            0x06,       // bRequest: GET_DESCRIPTOR
+            0x00, 0x01, // wValue: Device Descriptor (type=1, index=0)
+            0x00, 0x00, // wIndex: 0
+            0x12, 0x00, // wLength: 18
+        ];
+        let n = self.control_transfer(slot, setup, &mut desc);
+
+        let (vendor, product, class, subclass) = if n >= 8 {
+            let v = u16::from_le_bytes([desc[8], desc[9]]);
+            let p = u16::from_le_bytes([desc[10], desc[11]]);
+            (v, p, desc[4], desc[5])
+        } else {
+            // Fallback heuristic when descriptor read fails
+            let c = match speed { 1 | 2 => (0x03u8, 0x00u8), 3 => (0x08, 0x06), _ => (0, 0) };
+            (0u16, 0u16, c.0, c.1)
         };
 
-        let addr = (port as u8).saturating_add(1);
-        self.devices.push(UsbDevice { addr, class, speed, ep_in: 0x81, ep_out: 0x01 });
+        crate::klog!(INFO, "USB: device {:04x}:{:04x} class={:#x}/{:#x}",
+            vendor, product, class, subclass);
 
-        match class {
+        // AR9271 WiFi dongle
+        if vendor == 0x0CF3 && (product == 0x9271 || product == 0x7010) {
+            crate::klog!(INFO, "USB: AR9271 WiFi dongle detected");
+            self.devices.push(UsbDevice {
+                addr: slot, class: UsbClass::Unknown(0xFF, 0x00),
+                speed, ep_in: 0x81, ep_out: 0x01,
+            });
+            crate::wifi::ar9271_attach(slot);
+            return;
+        }
+
+        let usb_class = match class {
+            0x03 => UsbClass::Hid,
+            0x08 => UsbClass::MassStorage,
+            0xE0 if subclass == 0x01 => UsbClass::Bluetooth,
+            _ => UsbClass::Unknown(class, subclass),
+        };
+
+        self.devices.push(UsbDevice { addr: slot, class: usb_class, speed,
+                                      ep_in: 0x81, ep_out: 0x01 });
+
+        match usb_class {
             UsbClass::Hid => {
                 crate::klog!(INFO, "USB: HID device on port {}", port);
             }
             UsbClass::MassStorage => {
                 msc::register_drive(
-                    msc::BulkEndpoints { dev_addr: addr, ep_in: 0x81, ep_out: 0x01 },
-                    0, // sector count unknown until SCSI READ CAPACITY
+                    msc::BulkEndpoints { dev_addr: slot, ep_in: 0x81, ep_out: 0x01 },
+                    0,
                 );
             }
             UsbClass::Bluetooth => {
                 bt::register_device(bt::BtDevice {
-                    dev_addr: addr, ep_in: 0x81, ep_out: 0x01,
+                    dev_addr: slot, ep_in: 0x81, ep_out: 0x01,
                     bd_addr: [0; 6], hci_ver: 0, lmp_ver: 0,
                 });
             }
@@ -327,7 +546,10 @@ pub fn init(phys_offset: u64) {
                 cmd_enq:  0,
                 evt_deq:  0,
                 cycle:    1,
+                evt_cycle: 1,
                 devices:  Vec::new(),
+                xfer_rings: alloc::collections::BTreeMap::new(),
+                phys_off: phys_offset,
             };
 
             if !ctrl.setup(phys_offset) {
@@ -355,6 +577,33 @@ pub fn init(phys_offset: u64) {
 
 /// Returns true if at least one xHCI controller is operational.
 pub fn is_ready() -> bool { USB_READY.load(Ordering::Relaxed) }
+
+/// USB control transfer — public API for sub-drivers (e.g. AR9271).
+pub fn control_transfer(slot: u8, setup: [u8; 8], data: &mut [u8]) -> usize {
+    let mut ctrls = XHCI_CTRLS.lock();
+    for ctrl in ctrls.iter_mut() {
+        return unsafe { ctrl.control_transfer(slot, setup, data) };
+    }
+    0
+}
+
+/// USB bulk OUT — public API.
+pub fn bulk_out(slot: u8, ep_out: u8, data: &[u8]) -> usize {
+    let mut ctrls = XHCI_CTRLS.lock();
+    for ctrl in ctrls.iter_mut() {
+        return unsafe { ctrl.bulk_out(slot, ep_out, data) };
+    }
+    0
+}
+
+/// USB bulk IN — public API.
+pub fn bulk_in(slot: u8, ep_in: u8, buf: &mut [u8]) -> usize {
+    let mut ctrls = XHCI_CTRLS.lock();
+    for ctrl in ctrls.iter_mut() {
+        return unsafe { ctrl.bulk_in(slot, ep_in, buf) };
+    }
+    0
+}
 
 /// Number of USB devices enumerated.
 pub fn device_count() -> usize {

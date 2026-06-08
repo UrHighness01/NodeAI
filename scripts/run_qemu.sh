@@ -25,6 +25,7 @@ DEBUG=0
 RELEASE=0
 UEFI=0
 GUI=0
+WIFI=0
 
 # ── Parse args ────────────────────────────────────────────────────────────────
 while [[ $# -gt 0 ]]; do
@@ -33,6 +34,7 @@ while [[ $# -gt 0 ]]; do
         --release) RELEASE=1 ;;
         --uefi)    UEFI=1 ;;
         --gui)     GUI=1 ;;
+        --wifi)    WIFI=1 ;;
         --memory)  MEMORY="$2"; shift ;;
         --memory=*)MEMORY="${1#*=}" ;;
         -h|--help)
@@ -135,6 +137,16 @@ fi
 if [[ $UEFI -eq 0 ]]; then
     QEMU_ARGS+=(-drive "format=raw,file=$BIOS_IMG")
     echo "  Boot: BIOS via $BIOS_IMG"
+fi
+
+if [[ $WIFI -eq 1 ]]; then
+    # USB passthrough for AR9271 WiFi dongle (TP-Link TL-WN722N v1 or similar)
+    # Requires the dongle plugged into the host and user in 'plugdev' group:
+    #   sudo usermod -aG plugdev $USER && sudo udevadm trigger
+    QEMU_ARGS+=(-device usb-ehci,id=usb0)
+    QEMU_ARGS+=(-device usb-host,bus=usb0.0,vendorid=0x0cf3,productid=0x9271)
+    echo "  WiFi: AR9271 USB passthrough enabled (vendorid=0x0cf3 productid=0x9271)"
+    echo "  Make sure dongle is plugged in and you are in the plugdev group"
 fi
 
 if [[ $DEBUG -eq 1 ]]; then
