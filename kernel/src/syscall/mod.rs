@@ -305,9 +305,14 @@ pub fn fd_path(pid: u64, fd: u64) -> Option<alloc::string::String> {
 }
 
 /// Allocate the next available fd for a given pid (first-fit above 2).
+/// Enforces RLIMIT_NOFILE — returns u64::MAX if at the limit.
 fn alloc_fd(pid: u64) -> u64 {
+    let rl = crate::rlimit::get(pid, crate::rlimit::RLIMIT_NOFILE);
     let mut map = NEXT_FD.lock();
     let fd = *map.get(&pid).unwrap_or(&3u64);
+    if fd > rl.cur && rl.cur != u64::MAX {
+        return u64::MAX; // EMFILE
+    }
     map.insert(pid, fd + 1);
     fd
 }
@@ -1368,6 +1373,12 @@ unsafe fn sys_mmap(addr: u64, len: u64, prot: u64, flags: u64, fd: i64, offset: 
     };
 
     let pid = crate::scheduler::current_pid();
+
+    // Enforce RLIMIT_AS (address space limit)
+    let rl_as = crate::rlimit::get(pid, crate::rlimit::RLIMIT_AS);
+    if rl_as.cur != u64::MAX && len > rl_as.cur {
+        return -12; // ENOMEM
+    }
     crate::memory::self_model::record_allocation(pid, len_aligned as usize);
 
     // File-backed lazy mmap: fd != -1 maps a file region on demand.
