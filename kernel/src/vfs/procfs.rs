@@ -59,6 +59,7 @@ pub fn init() {
     write_file("/proc", "novelty",         crate::novel_detector::format_report());
     write_file("/proc", "causal_recovery", crate::causal_recovery::format_report());
     write_file("/proc", "cross_modal",     crate::cross_modal::format_report());
+    write_file("/proc", "causal_intervention", crate::causal_intervention::format_report());
     // NOTE: info_bottleneck format_report NOT in refresh — it acquires
     // cross_modal locks that may deadlock in timer ISR context.
     // It is only created at init time (one-shot snapshot).

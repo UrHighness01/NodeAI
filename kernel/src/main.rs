@@ -99,6 +99,7 @@ pub mod cross_modal;       // cross-domain predictive coupling (Project-C)
 pub mod novel_detector;   // temporal novelty detection (Project-C)
 pub mod causal_recovery;  // episodic recovery from past crashes (Project-C/VectorStore)
 pub mod info_bottleneck; // information bottleneck retention analysis (Project-C)
+pub mod causal_intervention; // targeted root-cause namespace escalation (Project-C)
 
 /// Bootloader configuration — tells the bootloader to map all physical memory
 /// at a dynamic virtual offset so we can access physical frames by VA.
@@ -324,6 +325,7 @@ fn idle_loop() -> ! {
         meta_cognitive::tick();
         entropy::tick();
         crate::critic::tick();
+        crate::causal_intervention::tick();
         net::http_server_poll();
         net::ssh_server_poll();
         crate::desktop::browser_fetch_tick();
