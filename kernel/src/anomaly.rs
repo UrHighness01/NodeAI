@@ -18,7 +18,7 @@ use spin::Mutex;
 /// Number of syscall transitions tracked per task.
 const BIGRAM_SIZE: usize = 512 * 512; // indexed as prev*512 + cur — sparse, use BTreeMap
 const WARMUP_CALLS: u32 = 200;  // transitions before scoring starts
-const ANOMALY_THRESHOLD: f32 = 0.001; // frequency below this → anomalous
+
 
 /// Per-task state for the anomaly detector.
 struct TaskAnomaly {
@@ -56,7 +56,7 @@ impl TaskAnomaly {
 
         *self.bigrams.entry(key).or_insert(0) += 1;
 
-        let anomalous = freq < ANOMALY_THRESHOLD && count == 0; // never-seen transition
+        let anomalous = freq < crate::autotune::get_anomaly_threshold() && count == 0; // never-seen transition
         self.score = if anomalous {
             (self.score + 0.1).min(1.0)
         } else {

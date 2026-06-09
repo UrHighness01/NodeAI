@@ -3265,8 +3265,20 @@ unsafe fn sys_connect(sockfd: u64, addr_ptr: u64, alen: u64) -> i64 {
     let remote_port = u16::from_be(port_be);
     let remote_ip   = addr_be.to_be_bytes(); // network order → [a, b, c, d]
 
-    // Verify sockfd exists and is an unconnected socket.
     let pid = crate::scheduler::current_pid();
+
+    // ── Hardened Raw Socket Leak Suppression ─────────────────────────────────
+    let is_isolated = crate::namespaces::level_of(pid) >= crate::namespaces::IsoLevel::Isolated;
+    if is_isolated {
+        // Tor SOCKS5 default port is 9050. We drop connections to anything else.
+        if remote_ip != [127, 0, 0, 1] || remote_port != 9050 {
+            crate::klog!(WARN, "namespaces: ISOLATED pid={} DROPPED raw socket leak to {}.{}.{}.{}:{}", 
+                pid, remote_ip[0], remote_ip[1], remote_ip[2], remote_ip[3], remote_port);
+            return EPERM;
+        }
+    }
+
+    // Verify sockfd exists and is an unconnected socket.
     if !FD_TABLE.lock().contains_key(&(pid, sockfd)) { return EBADF; }
 
     // Active TCP open — blocks (yields CPU) until SYN-ACK or timeout.
