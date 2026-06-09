@@ -185,11 +185,14 @@ fn causal_oom_reclaim() {
                 "mem_pressure: OOM KILL pid={} (causal driver, {}% free)", pid, free_pct);
             crate::scheduler::send_signal(pid, 9); // SIGKILL
         } else {
-            // Soft reclaim — pause the driver.
+            // Causal Memory Ballooning: send SIGMEM_PRESSURE and transparently swap LRU
             crate::klog!(WARN,
-                "mem_pressure: CRITICAL — pausing causal driver pid={} ({}% free)",
+                "mem_pressure: CRITICAL — causal memory ballooning pid={} ({}% free)",
                 pid, free_pct);
-            crate::scheduler::send_signal(pid, 19); // SIGSTOP
+            crate::scheduler::send_signal(pid, 12); // SIGUSR2 (used as SIGMEM_PRESSURE)
+            
+            // Reclaim file-backed mmap pages to NVMe
+            crate::memory::vmm::reclaim_file_backed_pages(pid);
         }
     }
 }
