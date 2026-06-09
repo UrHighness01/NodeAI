@@ -1770,6 +1770,7 @@ fn cmd_exec(args: &str) {
     push64!(argv_strs.len() as u64);  // argc
 
     println!("[exec] launching {} (entry={:#x}, argc={})", abs_path, entry, argv_strs.len());
+    crate::klog!(INFO, "exec: {} → entry={:#x} argc={} sp={:#x}", abs_path, entry, argv_strs.len(), sp);
 
     // Jump to user mode
     unsafe { crate::syscall::ring3_jump(entry, sp); }
