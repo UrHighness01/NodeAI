@@ -194,6 +194,39 @@ pub fn format_report() -> alloc::vec::Vec<u8> {
     out.into_bytes()
 }
 
+/// Walk backwards through the causal graph from `pid` up to `depth` hops,
+/// returning the chain [pid, waker_of_pid, waker_of_waker, ...].
+/// Used by the panic handler to generate a causal blame chain.
+pub fn waker_chain(pid: u64, depth: usize) -> alloc::vec::Vec<u64> {
+    let graph = GRAPH.lock();
+    let mut chain = alloc::vec![pid];
+    let mut cur = pid;
+    for _ in 0..depth {
+        if let Some(w) = graph.last_waker(cur) {
+            if w == 0 || chain.contains(&w) { break; } // stop at root or cycle
+            chain.push(w);
+            cur = w;
+        } else {
+            break;
+        }
+    }
+    chain
+}
+
+/// Return the number of distinct processes that `pid` has woken in recent history.
+/// Used as a causal fanout metric for TCP and OOM priority.
+pub fn causal_fanout(pid: u64) -> usize {
+    let graph = GRAPH.lock();
+    let len = graph.count.min(N_EDGES).min(64);
+    let mut wakees: alloc::collections::BTreeSet<u64> = alloc::collections::BTreeSet::new();
+    for i in 0..len {
+        let idx = (graph.head + N_EDGES - 1 - i) % N_EDGES;
+        let e = &graph.edges[idx];
+        if e.waker == pid && e.wakee != 0 { wakees.insert(e.wakee); }
+    }
+    wakees.len()
+}
+
 // ── I/O error attribution ─────────────────────────────────────────────────────
 
 /// When a page write-back fails for `ino`, find the process most causally

@@ -3928,6 +3928,7 @@ fn cmd_wget(args: &str) {
             rcv_buf: Vec::new(),
             cwnd: 1460, ssthresh: 65535,
             last_send_ms: 0, rto_ms: 1000, retransmit_buf: Vec::new(),
+            owner_pid: crate::scheduler::current_pid(), ai_cwnd_mul: 100,
         });
     }
 

@@ -330,6 +330,15 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
     unsafe { core::arch::asm!("lea {}, [rip]", out(reg) rip, options(nomem, nostack)); }
     crash_dump::record_panic(rip, 0, 0, 0, &msg);
 
+    // Causal panic snapshotting: walk the waker chain up to 8 hops and append
+    // to the crash record.  This tells us which process chain led to this panic.
+    // Novel: no other OS embeds a causal blame chain in kernel crash dumps.
+    let panicking_pid = scheduler::current_pid();
+    if panicking_pid > 0 {
+        let chain = causal::waker_chain(panicking_pid, 8);
+        crash_dump::record_causal_chain(&chain);
+    }
+
     // AI self-diagnosis — only if LLM is loaded (AtomicBool check, no locks).
     // This is genuinely novel: no other OS AI-diagnoses its own panics at runtime.
     if llm::is_ready() {

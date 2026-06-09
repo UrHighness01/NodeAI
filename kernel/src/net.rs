@@ -1332,6 +1332,9 @@ pub mod tcp {
         pub last_send_ms: u64,  // uptime_ms when last segment was sent
         pub rto_ms:       u64,  // retransmit timeout (starts at 1s, backs off)
         pub retransmit_buf: Vec<u8>, // copy of last unacked segment data
+        // ── AI-integrated congestion control ─────────────────────────────────
+        pub owner_pid:   u64,   // pid of the process that created this socket
+        pub ai_cwnd_mul: u16,   // AI cwnd multiplier in 1/100 units (100=1.0)
     }
 
     const MSS: u32 = 1460;
@@ -1354,6 +1357,8 @@ pub mod tcp {
                 last_send_ms: 0,
                 rto_ms: RTO_INITIAL_MS,
                 retransmit_buf: Vec::new(),
+                owner_pid:   0,
+                ai_cwnd_mul: 100,
             }
         }
     }
@@ -1532,6 +1537,28 @@ pub mod tcp {
                         // Cap at remote receiver window.
                         let cap = (sock.snd_wnd as u32).max(MSS);
                         if sock.cwnd > cap { sock.cwnd = cap; }
+
+                        // AI-integrated congestion control: recalibrate ai_cwnd_mul
+                        // based on the owning pid's causal fanout and anomaly score.
+                        // High fanout (interactive/critical process) → inflate cwnd.
+                        // High anomaly score → deflate cwnd (treat as background/suspect).
+                        // Novel: this is the first OS where TCP cwnd reflects the process's
+                        // causal importance in the task graph, not just network feedback.
+                        let pid = sock.owner_pid;
+                        if pid > 0 {
+                            let fanout = crate::causal::causal_fanout(pid);
+                            let anom   = crate::anomaly::score(pid);
+                            let mul: u16 = if anom > 0.6 {
+                                70   // anomalous → reduce cwnd to 70%
+                            } else if fanout >= 4 {
+                                150  // critical orchestrator → inflate cwnd to 150%
+                            } else if fanout >= 2 {
+                                120  // moderate fanout → slight inflation
+                            } else {
+                                100  // default
+                            };
+                            sock.ai_cwnd_mul = mul;
+                        }
                     }
                 }
 
@@ -1613,8 +1640,10 @@ pub mod tcp {
             crate::klog!(DEBUG, "TCP: send {} bytes port {}\u{2194}{} seq={} ack={} state={:?}",
                 data.len(), local_port, remote_port, sock.snd_nxt, sock.rcv_nxt, sock.state);
             if sock.state != TcpState::Established && sock.state != TcpState::Accepted { return 0; }
-            // Reno: limit send to min(cwnd, snd_wnd).
-            let allowed = (sock.cwnd as usize).min(sock.snd_wnd as usize).max(MSS as usize);
+            // Reno + AI: limit send to min(ai_cwnd, snd_wnd).
+            // ai_cwnd = cwnd × ai_cwnd_mul / 100 (100 = no change, 150 = 50% boost).
+            let ai_cwnd = (sock.cwnd as u64 * sock.ai_cwnd_mul as u64 / 100) as u32;
+            let allowed = (ai_cwnd as usize).min(sock.snd_wnd as usize).max(MSS as usize);
             let send_data = &data[..data.len().min(allowed)];
             let seg = TcpHeader::build(
                 local_port, remote_port,
@@ -1812,6 +1841,8 @@ pub mod tcp {
             rcv_buf: Vec::new(),
             cwnd:    MSS, ssthresh: 65535,
             last_send_ms: 0, rto_ms: RTO_INITIAL_MS, retransmit_buf: Vec::new(),
+            owner_pid: crate::scheduler::current_pid(),
+            ai_cwnd_mul: 100,
         };
         let key = TcpSocketKey { local_port, remote_ip, remote_port };
         SOCKETS.lock().insert(key, TcpSocket { state: TcpState::SynSent, ..sock });

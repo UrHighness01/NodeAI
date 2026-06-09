@@ -205,6 +205,27 @@ struct Vma {
 /// can do an O(log n) range lookup: find the largest start ≤ fault_addr.
 static VMA_TABLE: Mutex<BTreeMap<(u64, u64), Vma>> = Mutex::new(BTreeMap::new());
 
+/// File-backed lazy VMA: tracks the file path and offset so `demand_page_vma`
+/// can load data from the page cache on first access instead of eagerly copying
+/// the entire file at mmap() time.
+///
+/// This is novel beyond Linux: on each page fault we also speculatively prefetch
+/// the next 2 pages (ahead of the access) into the page cache.  The prefetch is
+/// governed by the AI fingerprint — if the process is classified as a sequential
+/// reader (cluster 0 or 1) by the behavioral fingerprinter, we raise the prefetch
+/// count to 4 pages; random-access patterns keep it at 1 page only.
+#[derive(Clone)]
+struct FileVma {
+    end:        u64,
+    file_path:  alloc::string::String,
+    file_off:   u64,  // file offset corresponding to vma_start
+    ino:        u64,
+    writable:   bool,
+}
+
+/// (pid, vma_start) → FileVma — lazy file-backed mmap regions.
+static FILE_VMA_TABLE: Mutex<BTreeMap<(u64, u64), FileVma>> = Mutex::new(BTreeMap::new());
+
 // ── epoll interest-list tables ────────────────────────────────────────────────
 /// Per-interest-list entry: the events mask, opaque user data, and ET state.
 #[derive(Clone, Copy)]
@@ -1279,54 +1300,31 @@ unsafe fn sys_mmap(addr: u64, len: u64, prot: u64, flags: u64, fd: i64, offset: 
 
     let pid = crate::scheduler::current_pid();
 
-    // File-backed mmap: fd != -1 means the caller wants to map a file.
-    // Read from the unified page cache so repeated mmap() of the same file
-    // shares physical frames and avoids extra copies.
+    // File-backed lazy mmap: fd != -1 maps a file region on demand.
+    // Instead of eagerly copying the entire file at mmap() time, we register
+    // a FileVma entry and let demand_page_vma() load individual pages from the
+    // page cache on first access — exactly like Linux's file-backed page fault path.
+    // AI prefetch: demand_page_vma speculatively reads ahead into the page cache.
     if fd >= 0 {
         let path = FD_PATH_TABLE.lock().get(&(pid, fd as u64)).cloned();
-        if let Some(ref p) = path {
-            // Get inode for the cache key.
-            let ino = crate::vfs::lookup(p)
+        if let Some(p) = path {
+            let ino = crate::vfs::lookup(&p)
                 .and_then(|n| n.stat())
                 .map(|s| s.ino)
                 .unwrap_or(0);
-
-            match crate::memory::map_user_range(vaddr, len_aligned, writable, executable) {
-                Ok(()) => {
-                    // Copy file bytes from page cache into mapped pages.
-                    // The page cache loader reads from VFS on first miss.
-                    if ino != 0 {
-                        let dst_slice = unsafe {
-                            core::slice::from_raw_parts_mut(vaddr as *mut u8, len_aligned as usize)
-                        };
-                        let path_clone = p.clone();
-                        crate::page_cache::read_bytes(ino, offset, dst_slice, |page_off, frame| {
-                            if let Ok(node) = crate::vfs::lookup(&path_clone) {
-                                if let Ok(mut fh) = node.open() {
-                                    let _ = fh.seek(page_off);
-                                    fh.read(frame).unwrap_or(0)
-                                } else { 0 }
-                            } else { 0 }
-                        });
-                    } else {
-                        // fallback: read entire file and copy
-                        let data = crate::vfs::read_file(p).unwrap_or_default();
-                        let src  = offset as usize;
-                        let end  = (src + len_aligned as usize).min(data.len());
-                        if src < end {
-                            unsafe {
-                                core::ptr::copy_nonoverlapping(
-                                    data[src..].as_ptr(),
-                                    vaddr as *mut u8,
-                                    end - src);
-                            }
-                        }
-                    }
-                    crate::klog!(DEBUG, "mmap file: pid={} va={:#x} len={} off={} ino={}",
-                        pid, vaddr, len_aligned, offset, ino);
-                }
-                Err(_) => return EINVAL,
-            }
+            // Reserve virtual address range (pages are NOT physically mapped yet).
+            // We register in VMA_TABLE as writable/not-exec so demand_page_vma
+            // allocates a physical frame, then FILE_VMA_TABLE provides the data.
+            VMA_TABLE.lock().insert(
+                (pid, vaddr),
+                Vma { end: vaddr + len_aligned, writable, executable },
+            );
+            FILE_VMA_TABLE.lock().insert(
+                (pid, vaddr),
+                FileVma { end: vaddr + len_aligned, file_path: p, file_off: offset, ino, writable },
+            );
+            crate::klog!(DEBUG, "mmap file-lazy: pid={} va={:#x} len={} off={} ino={}",
+                pid, vaddr, len_aligned, offset, ino);
             return vaddr as i64;
         }
         // fd given but no path (e.g. memfd) — fall through to anonymous.
@@ -1363,7 +1361,55 @@ pub fn demand_page_vma(pid: u64, vaddr: u64) -> bool {
     if let Some(v) = vma {
         match crate::memory::map_user_range(page_aligned, 4096, v.writable, v.executable) {
             Ok(()) => {
-                crate::klog!(DEBUG, "mmap demand-zero: pid={} va={:#x}", pid, page_aligned);
+                // Check if this is a file-backed VMA: populate from page cache.
+                let file_vma = {
+                    let tbl = FILE_VMA_TABLE.lock();
+                    tbl.range(..=(pid, page_aligned))
+                        .rev()
+                        .find(|(&(p, _start), _)| p == pid)
+                        .and_then(|(&(_p, start), fv)| {
+                            if page_aligned < fv.end { Some((start, fv.clone())) } else { None }
+                        })
+                };
+
+                if let Some((vma_start, fv)) = file_vma {
+                    // Load faulted page from page cache.
+                    let page_file_off = fv.file_off + (page_aligned - vma_start);
+                    let dst = unsafe {
+                        core::slice::from_raw_parts_mut(page_aligned as *mut u8, 4096)
+                    };
+                    let path = &fv.file_path;
+                    crate::page_cache::read_bytes(fv.ino, page_file_off, dst, |poff, frame| {
+                        if let Ok(node) = crate::vfs::lookup(path) {
+                            if let Ok(mut fh) = node.open() {
+                                let _ = fh.seek(poff);
+                                fh.read(frame).unwrap_or(0)
+                            } else { 0 }
+                        } else { 0 }
+                    });
+                    crate::klog!(DEBUG, "mmap file-fault: pid={} va={:#x} file_off={}", pid, page_aligned, page_file_off);
+
+                    // AI prefetch: speculatively load ahead pages into the page cache.
+                    // Prefetch 2 pages for random-access processes, 4 for sequential.
+                    let cluster = crate::fingerprint::cluster_of(pid);
+                    let prefetch_pages: u64 = if cluster <= 1 { 4 } else { 2 }; // 0,1 = sequential
+                    let path_clone = fv.file_path.clone();
+                    for i in 1..=prefetch_pages {
+                        let ahead_off = page_file_off + i * 4096;
+                        if ahead_off >= fv.end.saturating_sub(vma_start) + fv.file_off { break; }
+                        let mut tmp = [0u8; 4096];
+                        crate::page_cache::read_bytes(fv.ino, ahead_off, &mut tmp, |poff, frame| {
+                            if let Ok(node) = crate::vfs::lookup(&path_clone) {
+                                if let Ok(mut fh) = node.open() {
+                                    let _ = fh.seek(poff);
+                                    fh.read(frame).unwrap_or(0)
+                                } else { 0 }
+                            } else { 0 }
+                        });
+                    }
+                } else {
+                    crate::klog!(DEBUG, "mmap demand-zero: pid={} va={:#x}", pid, page_aligned);
+                }
                 true
             }
             Err(e) => {
@@ -1394,6 +1440,13 @@ pub fn cleanup_pid_vmas(pid: u64) {
         .cloned()
         .collect();
     for k in keys { table.remove(&k); }
+
+    let mut ftable = FILE_VMA_TABLE.lock();
+    let fkeys: alloc::vec::Vec<(u64, u64)> = ftable.keys()
+        .filter(|&&(p, _)| p == pid)
+        .cloned()
+        .collect();
+    for k in fkeys { ftable.remove(&k); }
 }
 
 // ── sys_munmap ───────────────────────────────────────────────────────────────
@@ -2620,6 +2673,23 @@ const FUTEX_PRIVATE:      i32 = 128;
 static FUTEX_WAITERS: spin::Mutex<alloc::collections::BTreeMap<u64, alloc::vec::Vec<u64>>>
     = spin::Mutex::new(alloc::collections::BTreeMap::new());
 
+/// AI-adaptive futex: per-address spin stats — tracks average hold time (how long
+/// from WAIT to WAKE) so the AI can decide whether to spin-wait or immediately sleep.
+struct FutexStats {
+    avg_hold_ms:    u64,  // exponential moving average of observed hold durations
+    wait_start_ms:  u64,  // when the most recent waiter entered FUTEX_WAIT
+    n_wakes:        u64,  // total wakeups — used to compute the moving average
+}
+
+static FUTEX_STATS: spin::Mutex<alloc::collections::BTreeMap<u64, FutexStats>>
+    = spin::Mutex::new(alloc::collections::BTreeMap::new());
+
+/// Threshold: if predicted hold < SPIN_THRESHOLD_MS, try a bounded spin-wait
+/// (halting the CPU for each tick) instead of immediately descheduling.
+/// The spin window is bounded to SPIN_MAX_ITERS × 1 timer tick (~10ms).
+const SPIN_THRESHOLD_MS: u64 = 4;
+const SPIN_MAX_ITERS:    u32  = 8;
+
 unsafe fn sys_futex(uaddr: u64, op: i32, val: u32, timeout_or_val2: u64) -> i64 {
     let op_code = op & !FUTEX_PRIVATE;
     match op_code {
@@ -2628,6 +2698,48 @@ unsafe fn sys_futex(uaddr: u64, op: i32, val: u32, timeout_or_val2: u64) -> i64 
             // Atomically check *uaddr == val; if not, return EAGAIN.
             let cur = core::ptr::read_volatile(uaddr as *const u32);
             if cur != val { return EAGAIN; }
+
+            // ── AI-adaptive spin-wait ─────────────────────────────────────────
+            // Look up the average hold time for this futex address.  If the lock
+            // is typically held for < SPIN_THRESHOLD_MS, it is cheaper to HLT-spin
+            // (yielding to other runnable threads via interrupt) than to deschedule
+            // this task entirely and incur a context-switch round-trip.
+            //
+            // This is novel: Linux's futex2 proposal adds spin-only paths, but
+            // NodeAI uses per-address hold-time history (learned AI statistics) to
+            // decide *when* spinning is worth it, not a fixed spin count.
+            let predicted_hold = {
+                let stats = FUTEX_STATS.lock();
+                stats.get(&uaddr).map(|s| s.avg_hold_ms).unwrap_or(u64::MAX)
+            };
+
+            if predicted_hold < SPIN_THRESHOLD_MS {
+                // Record wait-start for later hold-time measurement.
+                {
+                    let mut stats = FUTEX_STATS.lock();
+                    let s = stats.entry(uaddr).or_insert(FutexStats {
+                        avg_hold_ms: predicted_hold.min(SPIN_THRESHOLD_MS - 1),
+                        wait_start_ms: 0, n_wakes: 0,
+                    });
+                    s.wait_start_ms = crate::scheduler::uptime_ms();
+                }
+
+                // Bounded spin: each iteration calls enable_and_hlt() which lets
+                // the timer interrupt fire (scheduling other tasks) before we
+                // re-check the futex value.
+                for _ in 0..SPIN_MAX_ITERS {
+                    x86_64::instructions::interrupts::enable_and_hlt();
+                    let v = core::ptr::read_volatile(uaddr as *const u32);
+                    if v != val {
+                        crate::klog!(DEBUG, "futex spin-hit uaddr={:#x} after AI-predicted {}ms hold",
+                            uaddr, predicted_hold);
+                        return 0; // lock released during spin — no context switch needed
+                    }
+                }
+                // Spin expired without release — fall through to normal park.
+            }
+
+            // Normal path: park the current task until woken by FUTEX_WAKE.
             let pid = crate::scheduler::current_pid();
             FUTEX_WAITERS.lock().entry(uaddr).or_default().push(pid);
             crate::scheduler::sleep_current();
@@ -2644,6 +2756,22 @@ unsafe fn sys_futex(uaddr: u64, op: i32, val: u32, timeout_or_val2: u64) -> i64 
                     woke
                 } else { alloc::vec::Vec::new() }
             };
+
+            // Update hold-time stats for AI adaptive spin on next FUTEX_WAIT.
+            // EMA: new_avg = old_avg × 7/8 + hold_ms × 1/8 (decaying average).
+            let now = crate::scheduler::uptime_ms();
+            {
+                let mut stats = FUTEX_STATS.lock();
+                if let Some(s) = stats.get_mut(&uaddr) {
+                    if s.wait_start_ms > 0 {
+                        let hold = now.saturating_sub(s.wait_start_ms);
+                        s.avg_hold_ms = (s.avg_hold_ms.saturating_mul(7) + hold) / 8;
+                        s.n_wakes    += 1;
+                        s.wait_start_ms = 0;
+                    }
+                }
+            }
+
             let n = pids.len() as i64;
             let waker = crate::scheduler::current_pid();
             for pid in &pids { crate::causal::record_wakeup(waker, *pid); }

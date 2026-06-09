@@ -1912,6 +1912,7 @@ fn br_fetch(url: &str) -> usize {
             rcv_buf: Vec::new(),
             cwnd: 1460, ssthresh: 65535,
             last_send_ms: 0, rto_ms: 1000, retransmit_buf: Vec::new(),
+            owner_pid: crate::scheduler::current_pid(), ai_cwnd_mul: 100,
         });
     }
 
@@ -2026,6 +2027,7 @@ pub fn br_fetch_raw(url: &str) -> Vec<u8> {
         rcv_nxt: 0, snd_wnd: 65535, rcv_buf: Vec::new(),
         cwnd: 1460, ssthresh: 65535,
         last_send_ms: 0, rto_ms: 1000, retransmit_buf: Vec::new(),
+        owner_pid: crate::scheduler::current_pid(), ai_cwnd_mul: 100,
     });
 
     let deadline = crate::scheduler::uptime_ms() + 5000;

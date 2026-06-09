@@ -88,6 +88,51 @@ pub fn record_panic(rip: u64, rsp: u64, cr2: u64, error_code: u64, msg: &str) {
     let _ = flush_to_vfs(&entry);
 }
 
+/// Append a causal waker chain to the most recent crash record.
+/// Called from the panic handler after `record_panic`, before halting.
+/// The chain is [panicking_pid, waker, waker_of_waker, ...] — shows who caused whom to run.
+pub fn record_causal_chain(chain: &[u64]) {
+    if chain.is_empty() { return; }
+
+    // Build a human-readable chain string.
+    use alloc::string::ToString;
+    let mut s = String::from("\nCausal waker chain (pid → waker → ...):\n  ");
+    for (i, &pid) in chain.iter().enumerate() {
+        if i > 0 { s.push_str(" → "); }
+        s.push_str(&pid.to_string());
+    }
+    s.push('\n');
+
+    // Append to in-memory crash log entry.
+    {
+        let mut log = CRASH_LOG.lock();
+        if let Some(entry) = log.last_mut() {
+            entry.message.push_str(&s);
+        }
+    }
+
+    // Append to MMIO crash record (truncate to fit).
+    if let Some(&poff) = PHYS_OFFSET.get() {
+        unsafe {
+            let rec_va = (poff + CRASH_RECORD_PHYS) as *mut CrashRecord;
+            let rec    = &mut *rec_va;
+            if rec.magic == CRASH_MAGIC {
+                let existing_len = (rec.msg_len as usize).min(3998);
+                let append_bytes = s.as_bytes();
+                let space = 3999usize.saturating_sub(existing_len);
+                let copy  = append_bytes.len().min(space);
+                rec.msg[existing_len..existing_len + copy]
+                    .copy_from_slice(&append_bytes[..copy]);
+                rec.msg_len = (existing_len + copy) as u32;
+            }
+        }
+    }
+
+    // Also write to /var/log/crash_causal.log if VFS is up.
+    let _ = crate::vfs::write_file("/var/log/crash_causal.log", s.as_bytes());
+    crate::klog!(ERROR, "causal chain: {}", s.trim());
+}
+
 /// Check if the previous boot ended in a kernel panic.
 /// Returns `Some(CrashEntry)` if a valid crash record is found in the MMIO region.
 pub fn check_previous_crash() -> Option<CrashEntry> {

@@ -22,7 +22,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 MEMORY=512
 DEBUG=0
-RELEASE=0
+RELEASE=1
 UEFI=0
 GUI=0
 WIFI=0
