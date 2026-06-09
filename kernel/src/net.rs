@@ -1411,6 +1411,11 @@ pub mod tcp {
 
         // ── Active socket path ───────────────────────────────────────────────
         if let Some(sock) = sockets.get_mut(&key) {
+            // Adaptive Causal Deferral: check if this process is chaotic/low-valence
+            if crate::causal_deferral::get_deferral_buffer().should_defer(sock.owner_pid) {
+                crate::causal_deferral::get_deferral_buffer().defer_event(src_mac, iph.clone(), tcp_raw.to_vec());
+                return None;
+            }
             return tcp_state_machine(sock, &tcph, data, our_mac, our_ip, src_mac, &iph.src);
         }
         drop(sockets);

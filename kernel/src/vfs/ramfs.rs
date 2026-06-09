@@ -185,7 +185,7 @@ impl FileHandle for RamFileHandle {
 
 pub struct RamDir {
     ino:      u64,
-    children: Mutex<BTreeMap<String, Arc<dyn VfsNode>>>,
+    children: crate::hot_lock::HotMap<String, Arc<dyn VfsNode>>,
     uid:  AtomicU32,
     gid:  AtomicU32,
     mode: AtomicU16,
@@ -196,7 +196,7 @@ impl RamDir {
     pub fn new_root() -> Self {
         Self {
             ino: alloc_ino(),
-            children: Mutex::new(BTreeMap::new()),
+            children: crate::hot_lock::HotMap::new(),
             uid: AtomicU32::new(0),
             gid: AtomicU32::new(0),
             mode: AtomicU16::new(0o755),
@@ -209,7 +209,7 @@ impl RamDir {
         let umask = crate::users::umask();
         Arc::new(Self {
             ino: alloc_ino(),
-            children: Mutex::new(BTreeMap::new()),
+            children: crate::hot_lock::HotMap::new(),
             uid: AtomicU32::new(cur_uid),
             gid: AtomicU32::new(cur_gid),
             mode: AtomicU16::new(0o755 & !umask),
@@ -232,7 +232,7 @@ impl VfsNode for RamDir {
     }
 
     fn readdir(&self) -> VfsResult<Vec<DirEntry>> {
-        let ch = self.children.lock();
+        let ch = self.children.snapshot();
         Ok(ch.iter().map(|(name, node)| {
             let is_dir = node.stat().map(|s| s.is_dir).unwrap_or(false);
             let ino    = node.stat().map(|s| s.ino).unwrap_or(0);
@@ -241,28 +241,29 @@ impl VfsNode for RamDir {
     }
 
     fn lookup(&self, name: &str) -> VfsResult<Arc<dyn VfsNode>> {
-        self.children.lock().get(name).cloned().ok_or(VfsError::NotFound)
+        let key = String::from(name);
+        self.children.get(&key).ok_or(VfsError::NotFound)
     }
 
     fn create_file(&self, name: &str) -> VfsResult<Arc<dyn VfsNode>> {
-        let mut ch = self.children.lock();
-        if ch.contains_key(name) { return Err(VfsError::Exists); }
+        let key = String::from(name);
+        if self.children.get(&key).is_some() { return Err(VfsError::Exists); }
         let f = RamFile::new() as Arc<dyn VfsNode>;
-        ch.insert(String::from(name), f.clone());
+        self.children.insert(key, f.clone());
         Ok(f)
     }
 
     fn mkdir(&self, name: &str) -> VfsResult<Arc<dyn VfsNode>> {
-        let mut ch = self.children.lock();
-        if ch.contains_key(name) { return Err(VfsError::Exists); }
+        let key = String::from(name);
+        if self.children.get(&key).is_some() { return Err(VfsError::Exists); }
         let d = RamDir::new() as Arc<dyn VfsNode>;
-        ch.insert(String::from(name), d.clone());
+        self.children.insert(key, d.clone());
         Ok(d)
     }
 
     fn unlink(&self, name: &str) -> VfsResult<()> {
-        let mut ch = self.children.lock();
-        ch.remove(name).map(|_| ()).ok_or(VfsError::NotFound)
+        let key = String::from(name);
+        self.children.remove(&key).map(|_| ()).ok_or(VfsError::NotFound)
     }
 
     fn set_mode(&self, mode: u16) -> VfsResult<()> {
@@ -276,10 +277,10 @@ impl VfsNode for RamDir {
     }
 
     fn create_symlink(&self, name: &str, target: &str) -> VfsResult<Arc<dyn VfsNode>> {
-        let mut ch = self.children.lock();
-        if ch.contains_key(name) { return Err(VfsError::Exists); }
+        let key = String::from(name);
+        if self.children.get(&key).is_some() { return Err(VfsError::Exists); }
         let sym = SymlinkNode::new(target) as Arc<dyn VfsNode>;
-        ch.insert(String::from(name), sym.clone());
+        self.children.insert(key, sym.clone());
         Ok(sym)
     }
 }
@@ -287,9 +288,9 @@ impl VfsNode for RamDir {
 impl RamDir {
     /// Insert an existing node under a new name (hard link — shares the same Arc).
     pub fn link_child(&self, name: &str, node: Arc<dyn VfsNode>) -> VfsResult<()> {
-        let mut ch = self.children.lock();
-        if ch.contains_key(name) { return Err(VfsError::Exists); }
-        ch.insert(String::from(name), node);
+        let key = String::from(name);
+        if self.children.get(&key).is_some() { return Err(VfsError::Exists); }
+        self.children.insert(key, node);
         Ok(())
     }
 }

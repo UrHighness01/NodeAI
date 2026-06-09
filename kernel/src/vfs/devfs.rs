@@ -376,14 +376,14 @@ impl VfsNode for PcmNode {
 // ── /dev/snd/ (directory) ─────────────────────────────────────────────────────
 struct SndDir {
     ino:      u64,
-    children: Mutex<BTreeMap<String, Arc<dyn VfsNode>>>,
+    children: crate::hot_lock::HotMap<String, Arc<dyn VfsNode>>,
 }
 
 impl SndDir {
     fn new() -> Self {
-        let mut ch: BTreeMap<String, Arc<dyn VfsNode>> = BTreeMap::new();
+        let ch: crate::hot_lock::HotMap<String, Arc<dyn VfsNode>> = crate::hot_lock::HotMap::new();
         ch.insert(String::from("pcmC0D0p"), Arc::new(PcmNode(alloc_ino())));
-        Self { ino: alloc_ino(), children: Mutex::new(ch) }
+        Self { ino: alloc_ino(), children: ch }
     }
 }
 
@@ -393,7 +393,7 @@ impl VfsNode for SndDir {
     }
     fn open(&self) -> VfsResult<Box<dyn FileHandle>> { Err(VfsError::NotAFile) }
     fn readdir(&self) -> VfsResult<Vec<DirEntry>> {
-        let ch = self.children.lock();
+        let ch = self.children.snapshot();
         Ok(ch.iter().map(|(name, node)| {
             let is_dir = node.stat().map(|s| s.is_dir).unwrap_or(false);
             let ino    = node.stat().map(|s| s.ino).unwrap_or(0);
@@ -401,7 +401,8 @@ impl VfsNode for SndDir {
         }).collect())
     }
     fn lookup(&self, name: &str) -> VfsResult<Arc<dyn VfsNode>> {
-        self.children.lock().get(name).cloned().ok_or(VfsError::NotFound)
+        let key = String::from(name);
+        self.children.get(&key).ok_or(VfsError::NotFound)
     }
     fn create_file(&self, _: &str) -> VfsResult<Arc<dyn VfsNode>> { Err(VfsError::ReadOnly) }
     fn mkdir(&self, _: &str) -> VfsResult<Arc<dyn VfsNode>> { Err(VfsError::ReadOnly) }
@@ -416,19 +417,19 @@ static DEVFS_ROOT: spin::Once<Arc<DevDir>> = spin::Once::new();
 /// Register a device node in /dev at runtime (called by block device init).
 pub fn register_node(name: &str, node: Arc<dyn VfsNode>) {
     if let Some(root) = DEVFS_ROOT.get() {
-        root.children.lock().insert(String::from(name), node);
+        root.children.insert(String::from(name), node);
     }
 }
 
 pub struct DevDir {
     ino:      u64,
-    children: Mutex<BTreeMap<String, Arc<dyn VfsNode>>>,
+    children: crate::hot_lock::HotMap<String, Arc<dyn VfsNode>>,
 }
 
 impl DevDir {
     pub fn new() -> Self {
         let ino = alloc_ino();
-        let mut ch: BTreeMap<String, Arc<dyn VfsNode>> = BTreeMap::new();
+        let ch: crate::hot_lock::HotMap<String, Arc<dyn VfsNode>> = crate::hot_lock::HotMap::new();
         ch.insert(String::from("null"),    Arc::new(NullNode(alloc_ino())));
         ch.insert(String::from("zero"),    Arc::new(ZeroNode(alloc_ino())));
         ch.insert(String::from("kmsg"),    Arc::new(KmsgNode(alloc_ino())));
@@ -439,7 +440,7 @@ impl DevDir {
         ch.insert(String::from("ptmx"),    Arc::new(PtmxNode(alloc_ino())));
         ch.insert(String::from("dsp"),     Arc::new(DspNode(alloc_ino())));
         ch.insert(String::from("snd"),     Arc::new(SndDir::new()));
-        Self { ino, children: Mutex::new(ch) }
+        Self { ino, children: ch }
     }
 
     /// Create the DevDir, store it as the global devfs root, and return an Arc.
@@ -456,7 +457,7 @@ impl VfsNode for DevDir {
     }
     fn open(&self) -> VfsResult<Box<dyn FileHandle>> { Err(VfsError::NotAFile) }
     fn readdir(&self) -> VfsResult<Vec<DirEntry>> {
-        let ch = self.children.lock();
+        let ch = self.children.snapshot();
         Ok(ch.iter().map(|(name, node)| {
             let is_dir = node.stat().map(|s| s.is_dir).unwrap_or(false);
             let ino    = node.stat().map(|s| s.ino).unwrap_or(0);
@@ -464,7 +465,8 @@ impl VfsNode for DevDir {
         }).collect())
     }
     fn lookup(&self, name: &str) -> VfsResult<Arc<dyn VfsNode>> {
-        self.children.lock().get(name).cloned().ok_or(VfsError::NotFound)
+        let key = String::from(name);
+        self.children.get(&key).ok_or(VfsError::NotFound)
     }
     fn create_file(&self, _: &str) -> VfsResult<Arc<dyn VfsNode>> { Err(VfsError::ReadOnly) }
     fn mkdir(&self, _: &str) -> VfsResult<Arc<dyn VfsNode>> { Err(VfsError::ReadOnly) }

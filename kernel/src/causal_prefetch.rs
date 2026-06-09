@@ -139,6 +139,12 @@ pub fn on_fork(child_pid: u64, parent_pid: u64) {
     }
 }
 
+/// Proactively pre-warm memory for a given PID based on its causal ancestors.
+/// Used for Causal Memory Ballooning (Inflation) for high-valence processes.
+pub fn prefetch_for(pid: u64) {
+    on_fork(pid, pid); // Reuse the ancestry-union logic with itself as parent
+}
+
 /// Called on exec — reuse same logic as fork but reset the child's own log.
 pub fn on_exec(pid: u64, parent_pid: u64) {
     on_fork(pid, parent_pid);

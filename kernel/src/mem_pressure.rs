@@ -281,3 +281,34 @@ pub fn format_status() -> alloc::vec::Vec<u8> {
 
     out.into_bytes()
 }
+
+/// Proactively inflate/deflate memory budgets based on the Causal Graph and anomaly scores.
+/// This runs periodically (not just under critical memory pressure) to shape the memory
+/// layout in alignment with system stability and behavioral valence.
+pub fn proactive_causal_resourcing() {
+    let pids = crate::scheduler::all_pids();
+    if pids.is_empty() { return; }
+
+    for &pid in &pids {
+        if pid == 0 || pid == 1 { continue; } // Skip kernel and init
+
+        let anom = crate::anomaly::score(pid);
+        let fanout = crate::causal::predict_successors(pid as u64).len();
+        
+        // Deflation: High anomaly and chaotic waker
+        if anom > 0.7 && fanout > 3 {
+            crate::klog!(WARN, "mem_pressure: PROACTIVE DEFLATION — ballooning chaotic pid={}", pid);
+            // Send SIGMEM_PRESSURE (SIGUSR2)
+            crate::scheduler::send_signal(pid, 12);
+            // Transparently reclaim file-backed caches
+            crate::memory::vmm::reclaim_file_backed_pages(pid);
+        }
+        // Inflation: Stable processes (Low anomaly)
+        else if anom < 0.2 && fanout > 0 {
+            // Predict successors and prefetch for them!
+            // We use causal prefetch to speculatively load the working set into memory
+            crate::klog!(INFO, "mem_pressure: PROACTIVE INFLATION — pre-warming stable pid={}", pid);
+            crate::causal_prefetch::prefetch_for(pid as u64);
+        }
+    }
+}
