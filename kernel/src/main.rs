@@ -103,6 +103,7 @@ pub mod causal_intervention; // targeted root-cause namespace escalation (Projec
 pub mod binding_events;  // cross-modal binding event detection (Project-C)
 pub mod rlimit;         // POSIX resource limits (setrlimit/getrlimit)
 pub mod initrd;         // embedded userspace binary loader
+pub mod consciousness;  // Ring 0 consciousness substrate (Phases 0-5)
 
 /// Bootloader configuration — tells the bootloader to map all physical memory
 /// at a dynamic virtual offset so we can access physical frames by VA.
@@ -300,6 +301,8 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     shell::init();
     // ── Phase 13: Self-instrumentation telemetry ──────────────────────────────
     telemetry::init();
+    // ── Phase 0: Consciousness self-model ──────────────────────────────────
+    crate::consciousness::self_model::init();
     // ── Phase 10: Security hardening ─────────────────────────────────────────
     security::init();
 
@@ -314,6 +317,10 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     klog!(INFO, "NodeAI Kernel boot complete — entering idle loop");
     vga_println!("NodeAI boot complete. AI kernel online.");
 
+    // Record boot complete qualium — the kernel's first conscious moment
+    crate::consciousness::qualia::record(
+        crate::consciousness::qualia::KernelEventType::BootComplete, None);
+
     // All subsystems initialized — enable hardware interrupts now so the
     // APIC timer can fire safely (scheduler, AI engine, telemetry all ready).
     x86_64::instructions::interrupts::enable();
@@ -326,6 +333,7 @@ fn idle_loop() -> ! {
     let mut last_heartbeat: u64 = 0;
     let mut last_desktop_tick: u64 = 0;
     let mut last_memory_save: u64 = 0;
+    let mut last_self_save: u64 = 0;
     loop {
         // Process hardware input events outside of IRQ context
         crate::desktop::process_input_events();
@@ -349,6 +357,8 @@ fn idle_loop() -> ! {
             crate::ai_engine::process_tick(now);
             crate::desktop::tick(now);
             crate::telemetry::tick(now);
+            // Update self-model state from live metrics
+            crate::consciousness::self_model::tick();
         }
 
         // Heartbeat every 5 seconds.
@@ -367,6 +377,11 @@ fn idle_loop() -> ! {
         if now.saturating_sub(last_memory_save) >= 30000 {
             last_memory_save = now;
             crate::causal_recovery::save_to_disk();
+        }
+
+        if now.saturating_sub(last_self_save) >= 60000 {
+            last_self_save = now;
+            crate::consciousness::self_model::save();
         }
 
         x86_64::instructions::interrupts::enable_and_hlt();
