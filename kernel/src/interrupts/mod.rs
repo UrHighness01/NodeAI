@@ -5,6 +5,7 @@ use spin::Once;
 
 pub(crate) mod apic;
 pub(crate) mod io_apic;
+pub(crate) mod coalesce;
 pub use apic::LOCAL_APIC_BASE;
 
 static IDT: Once<InterruptDescriptorTable> = Once::new();
