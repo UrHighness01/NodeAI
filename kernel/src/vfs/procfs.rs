@@ -57,6 +57,8 @@ pub fn init() {
     write_file("/proc", "causal_prefetch", crate::causal_prefetch::format_report());
     write_file("/proc", "collective",      crate::collective_integration::format_report());
     write_file("/proc", "novelty",         crate::novel_detector::format_report());
+    write_file("/proc", "causal_recovery", crate::causal_recovery::format_report());
+    write_file("/proc", "cross_modal",     crate::cross_modal::format_report());
 
     // Mount ProcRootNode over /proc so that /proc/<pid>/ and /proc/self/
     // resolve dynamically without pre-creating ramfs entries.

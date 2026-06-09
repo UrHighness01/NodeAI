@@ -503,6 +503,12 @@ pub fn exit_current_direct(pid: Pid, code: i32) -> ! {
     if task_cr3 != 0 {
         unsafe { crate::memory::release_user_cow_refs(task_cr3); }
     }
+
+    // Record crashes in episodic memory for future recovery
+    if code != 0 {
+        crate::causal_recovery::record_crash(pid, code);
+    }
+
     crate::syscall_stats::remove(pid);
     crate::transformer_sched::remove(pid);
     crate::syscall::cleanup_pid_fds(pid);
@@ -766,6 +772,8 @@ pub fn spawn_user_thread(parent_pid: Pid, new_stack: u64, tls: u64, settls: bool
     child.parent_pid = parent_pid;
     tasks.insert(child_pid, child);
     runqueue::enqueue(child_pid);
+    // Check if parent had a crash pattern — apply proactive constraints if so
+    crate::causal_recovery::on_spawn(child_pid, parent_pid);
     crate::klog!(INFO, "Scheduler: thread tid={} parent={} stack={:#x}", child_pid, parent_pid, new_stack);
     Some(child_pid)
 }
