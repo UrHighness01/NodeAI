@@ -306,6 +306,9 @@ pub fn write_file(path: &str, data: &[u8]) -> VfsResult<()> {
         if n == 0 { return Err(VfsError::Io); }
         off += n;
     }
+    // Invalidate stale page cache entries for this inode so next read()
+    // gets fresh data from the VfsNode rather than the pre-write snapshot.
+    if let Ok(st) = node.stat() { crate::page_cache::invalidate(st.ino); }
     // Notify inotify watchers of the modification.
     crate::syscall::notify_watchers(path, 0x0002 /* IN_MODIFY */);
     Ok(())

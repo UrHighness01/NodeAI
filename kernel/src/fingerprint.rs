@@ -158,6 +158,20 @@ pub fn classify_task(pid: u64) -> Option<(usize, ClusterProfile, f32)> {
     Some((cluster, model.profiles[cluster], cosine_score))
 }
 
+/// Return the cluster id for `pid`, or 0 if classification is unavailable.
+pub fn cluster_of(pid: u64) -> usize {
+    classify_task(pid).map(|(c, _, _)| c).unwrap_or(0)
+}
+
+/// True when a cluster's profile indicates latency-sensitive behaviour
+/// (nice_adjust < 0 = interactive; negative = wants fast response).
+pub fn cluster_is_latency_sensitive(cluster: usize) -> bool {
+    let guard = MODEL.lock();
+    guard.as_ref()
+        .map(|m| m.profiles[cluster.min(m.profiles.len() - 1)].nice_adjust < 0)
+        .unwrap_or(false)
+}
+
 /// Called when a process declares intent — pins its cluster's label.
 pub fn label_from_intent(pid: u64, intent: u8) {
     let hist_raw = match crate::syscall_stats::get_histogram(pid) {

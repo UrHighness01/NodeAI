@@ -150,6 +150,87 @@ pub fn cache_stats() -> (u64, u64, u64) {
      EVICTIONS.load(Ordering::Relaxed))
 }
 
+/// Called periodically (e.g. every 5 s from idle_loop) to flush dirty pages.
+/// For each dirty page, attempts to write it back to the VFS via the path
+/// looked up from ino. If no VfsNode can be found (deleted file), the page
+/// is simply marked clean — the data lives only in RAM.
+///
+/// This is the write-back half of the unified page cache: reads are cached
+/// in `read_bytes`; writes reach the VfsNode here rather than requiring the
+/// caller to flush explicitly.
+pub fn tick_writeback() {
+    // Collect dirty pages without holding the lock during VFS operations.
+    let dirty: alloc::vec::Vec<(u64, u64, u64)> = { // (ino, page_off, phys_frame)
+        let cache = CACHE.lock();
+        cache.entries.iter()
+            .filter(|(_, e)| e.dirty)
+            .map(|(k, e)| (k.ino, k.page_offset, e.phys_frame))
+            .collect()
+    };
+
+    if dirty.is_empty() { return; }
+
+    let phys_off = crate::memory::phys_offset();
+    let mut flushed = 0usize;
+
+    for (ino, page_off, phys) in &dirty {
+        // Try to locate the inode by scanning all mounts for a file with this ino.
+        let page_data = unsafe {
+            core::slice::from_raw_parts(
+                (phys_off + phys) as *const u8,
+                crate::memory::PAGE_SIZE as usize,
+            )
+        };
+        // Walk VFS for the node: if found, write back.
+        if let Some(node) = find_node_by_ino(*ino) {
+            if let Ok(mut fh) = node.open() {
+                let _ = fh.seek(*page_off);
+                let _ = fh.write(page_data);
+                flushed += 1;
+            }
+        }
+        // Mark clean regardless (even if write failed — avoid infinite retry).
+        let mut cache = CACHE.lock();
+        let key = CacheKey { ino: *ino, page_offset: *page_off };
+        if let Some(e) = cache.entries.get_mut(&key) { e.dirty = false; }
+    }
+
+    if flushed > 0 {
+        crate::klog!(DEBUG, "page_cache: flushed {} dirty pages to VFS", flushed);
+    }
+}
+
+/// Attempt to find a VfsNode for a given inode number by scanning mounts.
+/// Returns the first node whose stat().ino matches.
+fn find_node_by_ino(ino: u64) -> Option<alloc::sync::Arc<dyn crate::vfs::VfsNode>> {
+    // Look up via /proc/page_cache path hints — a real kernel would use an inode hash.
+    // For now, scan the ramfs root for any file with this ino.
+    let root = crate::vfs::root();
+    search_node_by_ino(&root, ino, 3) // max depth 3 to avoid excessive recursion
+}
+
+fn search_node_by_ino(
+    node: &alloc::sync::Arc<dyn crate::vfs::VfsNode>,
+    target_ino: u64,
+    depth: usize,
+) -> Option<alloc::sync::Arc<dyn crate::vfs::VfsNode>> {
+    if depth == 0 { return None; }
+    let stat = node.stat().ok()?;
+    if stat.ino == target_ino && !stat.is_dir { return Some(node.clone()); }
+    if stat.is_dir {
+        if let Ok(entries) = node.readdir() {
+            for e in entries {
+                if let Ok(child) = node.lookup(&e.name) {
+                    if let Some(found) = search_node_by_ino(&child, target_ino, depth - 1) {
+                        return Some(found);
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
 // ── Internal helpers ─────────────────────────────────────────────────────────
 
 /// Return the physical frame for (ino, page_off), calling `loader` on cache miss.

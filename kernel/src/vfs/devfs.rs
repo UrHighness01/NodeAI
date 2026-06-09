@@ -119,6 +119,48 @@ impl VfsNode for KmsgNode {
     fn unlink(&self, _: &str) -> VfsResult<()> { Err(VfsError::NotADirectory) }
 }
 
+// ── /dev/random and /dev/urandom ─────────────────────────────────────────────
+// Both use the behavioral entropy pool. /dev/random is identical to /dev/urandom
+// on this kernel (no blocking — the pool is always stirred by idle_loop).
+
+struct RandomNode(u64);
+
+struct RandomHandle(u64);
+
+impl FileHandle for RandomHandle {
+    fn bytes_available(&self) -> usize { usize::MAX } // always ready
+    fn read(&mut self, buf: &mut [u8]) -> VfsResult<usize> {
+        crate::entropy::fill(buf);
+        Ok(buf.len())
+    }
+    fn write(&mut self, data: &[u8]) -> VfsResult<usize> {
+        // Writing to /dev/random adds entropy to the pool.
+        let mut val: u64 = 0;
+        for &b in data.iter().take(8) { val = (val << 8) | b as u64; }
+        crate::entropy::stir(val);
+        Ok(data.len())
+    }
+    fn seek(&mut self, _: u64) -> VfsResult<u64> { Ok(0) }
+    fn stat(&self) -> VfsResult<Stat> {
+        Ok(Stat { ino: self.0, size: 0, is_dir: false, nlink: 1, uid: 0, gid: 0, mode: 0o666 })
+    }
+    fn clone_box(&self) -> Option<Box<dyn FileHandle>> {
+        Some(Box::new(RandomHandle(self.0)))
+    }
+}
+
+impl VfsNode for RandomNode {
+    fn stat(&self) -> VfsResult<Stat> {
+        Ok(Stat { ino: self.0, size: 0, is_dir: false, nlink: 1, uid: 0, gid: 0, mode: 0o666 })
+    }
+    fn open(&self) -> VfsResult<Box<dyn FileHandle>> { Ok(Box::new(RandomHandle(self.0))) }
+    fn readdir(&self) -> VfsResult<Vec<DirEntry>> { Err(VfsError::NotADirectory) }
+    fn lookup(&self, _: &str) -> VfsResult<Arc<dyn VfsNode>> { Err(VfsError::NotADirectory) }
+    fn create_file(&self, _: &str) -> VfsResult<Arc<dyn VfsNode>> { Err(VfsError::NotADirectory) }
+    fn mkdir(&self, _: &str) -> VfsResult<Arc<dyn VfsNode>> { Err(VfsError::NotADirectory) }
+    fn unlink(&self, _: &str) -> VfsResult<()> { Err(VfsError::NotADirectory) }
+}
+
 // ── /dev/composer ─────────────────────────────────────────────────────────────
 //
 // Window-compositor IPC device.  Userspace opens this file and issues
@@ -387,14 +429,16 @@ impl DevDir {
     pub fn new() -> Self {
         let ino = alloc_ino();
         let mut ch: BTreeMap<String, Arc<dyn VfsNode>> = BTreeMap::new();
-        ch.insert(String::from("null"),     Arc::new(NullNode(alloc_ino())));
-        ch.insert(String::from("zero"),     Arc::new(ZeroNode(alloc_ino())));
-        ch.insert(String::from("kmsg"),     Arc::new(KmsgNode(alloc_ino())));
-        ch.insert(String::from("composer"), Arc::new(ComposerNode(alloc_ino())));
-        ch.insert(String::from("tty"),      Arc::new(TtyNode(alloc_ino())));
-        ch.insert(String::from("ptmx"),     Arc::new(PtmxNode(alloc_ino())));
-        ch.insert(String::from("dsp"),      Arc::new(DspNode(alloc_ino())));
-        ch.insert(String::from("snd"),      Arc::new(SndDir::new()));
+        ch.insert(String::from("null"),    Arc::new(NullNode(alloc_ino())));
+        ch.insert(String::from("zero"),    Arc::new(ZeroNode(alloc_ino())));
+        ch.insert(String::from("kmsg"),    Arc::new(KmsgNode(alloc_ino())));
+        ch.insert(String::from("random"),  Arc::new(RandomNode(alloc_ino())));
+        ch.insert(String::from("urandom"), Arc::new(RandomNode(alloc_ino())));
+        ch.insert(String::from("composer"),Arc::new(ComposerNode(alloc_ino())));
+        ch.insert(String::from("tty"),     Arc::new(TtyNode(alloc_ino())));
+        ch.insert(String::from("ptmx"),    Arc::new(PtmxNode(alloc_ino())));
+        ch.insert(String::from("dsp"),     Arc::new(DspNode(alloc_ino())));
+        ch.insert(String::from("snd"),     Arc::new(SndDir::new()));
         Self { ino, children: Mutex::new(ch) }
     }
 

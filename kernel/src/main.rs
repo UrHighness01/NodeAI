@@ -72,6 +72,7 @@ pub mod causal;         // live causal process wakeup DAG
 pub mod transformer_sched; // transformer-based scheduling policy
 pub mod mem_pressure;      // memory pressure monitor + AI-aware reclaim
 pub mod page_cache;        // unified page cache — file data keyed by (inode, page_off)
+pub mod entropy;           // behavioral entropy pool — /dev/random + getrandom()
 
 /// Bootloader configuration — tells the bootloader to map all physical memory
 /// at a dynamic virtual offset so we can access physical frames by VA.
@@ -274,6 +275,7 @@ fn idle_loop() -> ! {
         net::poll();
         wifi::poll();
         mem_pressure::tick();
+        entropy::tick();
         net::http_server_poll();
         net::ssh_server_poll();
         crate::desktop::browser_fetch_tick();
@@ -296,6 +298,7 @@ fn idle_loop() -> ! {
             crate::klog!(INFO, "NodeAI alive — uptime={}s tasks={} free={}MiB",
                 now / 1000, tasks, free);
             crate::vfs::procfs::refresh();
+            crate::page_cache::tick_writeback();
         }
         x86_64::instructions::interrupts::enable_and_hlt();
     }

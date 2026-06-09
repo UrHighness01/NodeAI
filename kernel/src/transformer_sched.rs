@@ -685,6 +685,22 @@ pub fn remove(pid: u64) {
     REWARD_BASELINE.lock().remove(&pid);
 }
 
+/// XOR-fold the first 32 words of h2 weights into a single u64.
+/// Used by the entropy pool as a novel AI-derived entropy source.
+pub fn weight_hash() -> u64 {
+    let model_guard = MODEL.lock();
+    if let Some(model) = model_guard.as_ref() {
+        let mut h: u64 = 0x517c_c1b7_2722_0a94;
+        for (i, &w) in model.h2_w.iter().enumerate().take(32) {
+            h ^= (w.to_bits() as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15u64.wrapping_add(i as u64));
+            h = h.rotate_left(13);
+        }
+        h
+    } else {
+        0xdead_beef_cafe_f00d
+    }
+}
+
 pub fn format_report() -> alloc::vec::Vec<u8> {
     use alloc::string::String;
     let steps  = MODEL.lock().as_ref().map(|m| m.steps).unwrap_or(0);

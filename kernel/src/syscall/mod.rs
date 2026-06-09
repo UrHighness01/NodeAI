@@ -58,6 +58,48 @@ static FD_FLAGS: Mutex<BTreeMap<FdKey, i32>> = Mutex::new(BTreeMap::new());
 
 const O_NONBLOCK: i32 = 0x800;
 
+// ── Socket options table ──────────────────────────────────────────────────────
+/// Per-socket options, keyed by (pid, fd).
+#[derive(Clone, Copy)]
+struct SocketOpts {
+    tcp_nodelay:  bool,  // Nagle disabled (send immediately)
+    rcv_buf:      u32,   // SO_RCVBUF in bytes
+    snd_buf:      u32,   // SO_SNDBUF in bytes
+    reuseaddr:    bool,
+    keepalive:    bool,
+    adaptive:     bool,  // NodeAI: AI dynamically controls tcp_nodelay
+}
+
+impl Default for SocketOpts {
+    fn default() -> Self {
+        Self { tcp_nodelay: false, rcv_buf: 87380, snd_buf: 16384,
+               reuseaddr: false, keepalive: false, adaptive: false }
+    }
+}
+
+static SOCKET_OPTS: Mutex<BTreeMap<FdKey, SocketOpts>> = Mutex::new(BTreeMap::new());
+
+// Standard socket option constants
+const SOL_TCP:      u64 = 6;
+const TCP_NODELAY:  u64 = 1;
+const TCP_CORK:     u64 = 3;
+const TCP_NODELAY_AI: u64 = 200; // NodeAI extension: AI-adaptive Nagle
+
+/// Check whether a socket should use no-delay (skip Nagle's algorithm).
+/// If adaptive mode is on, consults the AI fingerprint cluster for the pid.
+pub fn socket_nodelay(pid: u64, fd: u64) -> bool {
+    let opts = SOCKET_OPTS.lock();
+    match opts.get(&(pid, fd)) {
+        None => false,
+        Some(o) if o.adaptive => {
+            // AI-adaptive: latency-sensitive clusters (nice_adjust < 0) disable Nagle
+            let cluster = crate::fingerprint::cluster_of(pid);
+            crate::fingerprint::cluster_is_latency_sensitive(cluster)
+        }
+        Some(o) => o.tcp_nodelay,
+    }
+}
+
 // ── Timerfd expiry side-table (needed by timerfd_gettime) ────────────────────
 /// (pid, fd) → (expiry_ms_absolute, interval_ms).  Updated by timerfd_settime.
 static TIMERFD_EXPIRY: Mutex<BTreeMap<FdKey, (u64, u64)>> = Mutex::new(BTreeMap::new());
@@ -1884,31 +1926,13 @@ unsafe fn sys_gettimeofday(tv_ptr: u64, _tz: u64) -> i64 {
 
 // ── sys_getrandom ────────────────────────────────────────────────────────────
 unsafe fn sys_getrandom(buf_ptr: u64, len: u64, _flags: u64) -> i64 {
-    let safe_len = len.min(256) as usize;
+    let safe_len = len.min(4096) as usize;
     let p = match validate_user_ptr_mut(buf_ptr, safe_len as u64) {
         Ok(p)  => p,
         Err(e) => return e,
     };
-    for i in (0..safe_len).step_by(8) {
-        let mut rand: u64 = 0;
-        let mut ok: u8    = 0;
-        core::arch::asm!(
-            "rdrand {val}", "setc {ok}",
-            val = out(reg) rand, ok = out(reg_byte) ok,
-            options(nomem, nostack)
-        );
-        let val = if ok != 0 {
-            rand
-        } else {
-            let tsc: u64;
-            core::arch::asm!("rdtsc; shl rdx, 32; or rax, rdx",
-                out("rax") tsc, out("rdx") _, options(nomem, nostack));
-            tsc ^ (i as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15)
-        };
-        let remaining = (safe_len - i).min(8);
-        core::ptr::copy_nonoverlapping(
-            &val as *const u64 as *const u8, p.add(i), remaining);
-    }
+    let buf = core::slice::from_raw_parts_mut(p, safe_len);
+    crate::entropy::fill(buf);
     safe_len as i64
 }
 
@@ -3168,23 +3192,57 @@ const SO_ERROR:     u64 = 4;
 const SO_TYPE:      u64 = 3;
 const SOL_SOCKET:   u64 = 1;
 
-unsafe fn sys_setsockopt(_s: u64, _lvl: u64, _opt: u64, _val: u64, _vlen: u64) -> i64 {
-    0 // accept all socket options silently
+unsafe fn sys_setsockopt(s: u64, level: u64, optname: u64, val_ptr: u64, vlen: u64) -> i64 {
+    let pid = crate::scheduler::current_pid();
+    let int_val: i32 = if val_ptr != 0 && vlen >= 4 {
+        match validate_user_ptr(val_ptr, 4) {
+            Ok(p) => core::ptr::read_unaligned(p as *const i32),
+            Err(_) => 0,
+        }
+    } else { 0 };
+    let bool_val = int_val != 0;
+
+    let mut opts = SOCKET_OPTS.lock();
+    let o = opts.entry((pid, s)).or_insert_with(SocketOpts::default);
+
+    match (level, optname) {
+        (SOL_SOCKET, SO_REUSEADDR) => { o.reuseaddr  = bool_val; }
+        (SOL_SOCKET, SO_KEEPALIVE) => { o.keepalive  = bool_val; }
+        (SOL_SOCKET, SO_RCVBUF)    => { o.rcv_buf    = int_val.max(0) as u32; }
+        (SOL_SOCKET, SO_SNDBUF)    => { o.snd_buf    = int_val.max(0) as u32; }
+        (SOL_TCP,    TCP_NODELAY)   => { o.tcp_nodelay = bool_val; o.adaptive = false; }
+        (SOL_TCP,    TCP_CORK)      => { o.tcp_nodelay = !bool_val; }
+        (SOL_TCP,    TCP_NODELAY_AI)=> { o.adaptive   = bool_val; }
+        _ => {}  // unknown options accepted silently (POSIX allows this)
+    }
+    0
 }
-unsafe fn sys_getsockopt(_s: u64, level: u64, optname: u64, val_ptr: u64, len_ptr: u64) -> i64 {
+
+unsafe fn sys_getsockopt(s: u64, level: u64, optname: u64, val_ptr: u64, len_ptr: u64) -> i64 {
     if val_ptr == 0 { return EINVAL; }
-    let want_len: u32 = if len_ptr != 0 { *(len_ptr as *const u32) } else { 4 };
+    let want_len: u32 = if len_ptr != 0 {
+        core::ptr::read_unaligned(len_ptr as *const u32)
+    } else { 4 };
     if want_len < 4 { return EINVAL; }
-    let out = match (level, optname) {
-        (SOL_SOCKET, SO_TYPE)      => 1i32,   // SOCK_STREAM
-        (SOL_SOCKET, SO_ERROR)     => 0i32,   // no error
-        (SOL_SOCKET, SO_REUSEADDR) => 1i32,
-        (SOL_SOCKET, SO_KEEPALIVE) => 0i32,
-        _                          => 0i32,
+
+    let pid = crate::scheduler::current_pid();
+    let opts = SOCKET_OPTS.lock();
+    let o = opts.get(&(pid, s));
+
+    let out: i32 = match (level, optname) {
+        (SOL_SOCKET, SO_TYPE)      => 1,  // SOCK_STREAM
+        (SOL_SOCKET, SO_ERROR)     => 0,
+        (SOL_SOCKET, SO_REUSEADDR) => o.map(|x| x.reuseaddr as i32).unwrap_or(0),
+        (SOL_SOCKET, SO_KEEPALIVE) => o.map(|x| x.keepalive as i32).unwrap_or(0),
+        (SOL_SOCKET, SO_RCVBUF)    => o.map(|x| x.rcv_buf as i32).unwrap_or(87380),
+        (SOL_SOCKET, SO_SNDBUF)    => o.map(|x| x.snd_buf as i32).unwrap_or(16384),
+        (SOL_TCP,    TCP_NODELAY)  => o.map(|x| x.tcp_nodelay as i32).unwrap_or(0),
+        (SOL_TCP,    TCP_NODELAY_AI) => o.map(|x| x.adaptive as i32).unwrap_or(0),
+        _                          => 0,
     };
     if let Ok(p) = validate_user_ptr_mut(val_ptr, 4) {
-        *(p as *mut i32) = out;
-        if len_ptr != 0 { *(len_ptr as *mut u32) = 4; }
+        core::ptr::write_unaligned(p as *mut i32, out);
+        if len_ptr != 0 { core::ptr::write_unaligned(len_ptr as *mut u32, 4); }
     }
     0
 }

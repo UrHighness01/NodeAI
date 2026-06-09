@@ -28,6 +28,17 @@ pub fn init() {
     write_file("/proc", "confinement",    crate::syscall::format_confinement());
     write_file("/proc", "seccomp",        crate::syscall::format_seccomp());
 
+    // /proc/net/
+    if let Ok(proc_node) = super::lookup("/proc") {
+        if proc_node.mkdir("net").is_ok() || proc_node.lookup("net").is_ok() {
+            write_file("/proc/net", "tcp",      proc_net_tcp());
+            write_file("/proc/net", "tcp6",     b"".to_vec());
+            write_file("/proc/net", "udp",      b"sl  local_address rem_address   st tx_queue rx_queue\n".to_vec());
+            write_file("/proc/net", "dev",      proc_net_dev());
+            write_file("/proc/net", "entropy",  proc_net_entropy());
+        }
+    }
+
     // /ai
     write_file("/ai", "status",       ai_status());
     write_file("/ai", "suggestions",  ai_suggestions());
@@ -57,6 +68,8 @@ pub fn refresh() {
     write_file("/proc", "page_cache",     crate::page_cache::format_stats());
     write_file("/proc", "confinement",    crate::syscall::format_confinement());
     write_file("/proc", "seccomp",        crate::syscall::format_seccomp());
+    write_file("/proc/net", "tcp",        proc_net_tcp());
+    write_file("/proc/net", "entropy",    proc_net_entropy());
     write_file("/ai",   "anomalies",     crate::anomaly::format_report());
     write_file("/ai",   "tunables",      crate::tunables::format_table());
     write_file("/ai",   "status",        ai_status());
@@ -226,4 +239,66 @@ fn write_file(dir_path: &str, name: &str, content: Vec<u8>) {
         h.write(&content).ok();
         h.flush().ok();
     }
+}
+
+// ── /proc/net generators ──────────────────────────────────────────────────────
+
+/// /proc/net/tcp — Linux-compatible socket table.
+/// Format: sl local_address rem_address st tx_queue rx_queue uid inode
+fn proc_net_tcp() -> Vec<u8> {
+    use alloc::string::String;
+    let mut out = String::from(
+        "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n"
+    );
+    let our_ip = crate::net::our_ip();
+    let sockets = crate::net::tcp::SOCKETS.lock();
+    for (i, (key, sock)) in sockets.iter().enumerate() {
+        // Linux format: addr is hex little-endian IPv4:port
+        let local_addr = u32::from_le_bytes(our_ip);
+        let rem_addr   = u32::from_le_bytes(key.remote_ip);
+        let state_code: u8 = match sock.state {
+            crate::net::tcp::TcpState::Established | crate::net::tcp::TcpState::Accepted => 0x01,
+            crate::net::tcp::TcpState::SynSent     => 0x02,
+            crate::net::tcp::TcpState::SynReceived => 0x03,
+            crate::net::tcp::TcpState::FinWait1    => 0x04,
+            crate::net::tcp::TcpState::FinWait2    => 0x05,
+            crate::net::tcp::TcpState::TimeWait    => 0x06,
+            crate::net::tcp::TcpState::CloseWait   => 0x08,
+            crate::net::tcp::TcpState::LastAck     => 0x09,
+            crate::net::tcp::TcpState::Closed      => 0x07,
+            _                                      => 0x0A, // other states
+        };
+        let rx_q = sock.rcv_buf.len();
+        let tx_q = sock.snd_nxt.wrapping_sub(sock.snd_una) as usize;
+        out.push_str(&format!(
+            "{:4}: {:08X}:{:04X} {:08X}:{:04X} {:02X} {:08X}:{:08X} 00:00000000 00000000     0        0 0\n",
+            i, local_addr, key.local_port,
+            rem_addr,  key.remote_port,
+            state_code,
+            tx_q, rx_q,
+        ));
+    }
+    out.into_bytes()
+}
+
+/// /proc/net/dev — network interface statistics.
+fn proc_net_dev() -> Vec<u8> {
+    let our_ip = crate::net::our_ip();
+    alloc::format!(
+        "Inter-|   Receive                                                |  Transmit\n\
+         face |bytes    packets errs drop fifo frame compressed multicast|bytes    packets errs drop fifo colls carrier compressed\n\
+         eth0: 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0\n\
+         lo: 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0\n\
+         # eth0 IP: {}.{}.{}.{}\n",
+        our_ip[0], our_ip[1], our_ip[2], our_ip[3],
+    ).into_bytes()
+}
+
+/// /proc/net/entropy — entropy pool status (NodeAI extension).
+fn proc_net_entropy() -> Vec<u8> {
+    alloc::format!(
+        "entropy_avail    : {}\nbytes_out        : {}\npool_size        : 256\n",
+        crate::entropy::entropy_bits(),
+        crate::entropy::bytes_out(),
+    ).into_bytes()
 }
