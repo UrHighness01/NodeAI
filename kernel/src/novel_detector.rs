@@ -9,7 +9,9 @@
 //! behavioural regime.
 //!
 //! This is a simplified kernel-appropriate version of Project-C's PCA-based
-//! novelty_detector.py — we use incremental mean/variance instead of SVD.
+//! novelty_detector.py — we use Welford's online incremental variance for
+//! numerical stability, avoiding the catastrophic cancellation that occurs
+//! with the naive sum_sq/N - mean^2 formula in f32.
 
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
@@ -27,16 +29,27 @@ const NOVELTY_THRESHOLD: f32 = 2.0;
 /// A single N_DIMS state vector.
 type StateVec = [f32; N_DIMS];
 
-/// Per-process novelty tracker.
+/// Per-process novelty tracker using Welford's online algorithm.
+///
+/// Welford's method maintains:
+///   - n: count
+///   - mean: running mean
+///   - s: sum of squared differences from the current mean (S_k)
+///
+/// Variance = s / n  (population) or s / (n-1)  (sample with Bessel).
+/// This avoids the sum_sq - n*mean^2 subtraction that causes catastrophic
+/// cancellation when the values are large and variance is small.
 struct ProcessNovelty {
-    /// Sliding window of past state vectors.
+    /// Sliding window of past state vectors (needed for un-learning on eviction).
     history: Vec<StateVec>,
     /// Window index for circular buffer.
     cursor: usize,
-    /// Running sum of state vectors (for O(1) mean).
-    sum: StateVec,
-    /// Running sum of squared state vectors (for O(1) variance).
-    sum_sq: StateVec,
+    /// Welford's running mean: M_k = M_{k-1} + (x_k - M_{k-1}) / k
+    welford_mean: StateVec,
+    /// Welford's sum-of-squared-differences: S_k
+    welford_s: StateVec,
+    /// Number of observations currently tracked in the window.
+    count: usize,
     /// Total observations ever (for cold-start handling).
     total_obs: u64,
     /// Number of novel states detected so far.
@@ -50,8 +63,9 @@ impl ProcessNovelty {
         Self {
             history: Vec::with_capacity(WINDOW_SIZE),
             cursor: 0,
-            sum: [0.0; N_DIMS],
-            sum_sq: [0.0; N_DIMS],
+            welford_mean: [0.0; N_DIMS],
+            welford_s: [0.0; N_DIMS],
+            count: 0,
             total_obs: 0,
             novel_count: 0,
             recent_novel: 0,
@@ -59,39 +73,34 @@ impl ProcessNovelty {
     }
 
     /// Record a new observation and return its novelty score.
+    /// Uses Welford's online algorithm for numerically stable variance.
     fn observe(&mut self, state: StateVec) -> f32 {
         self.total_obs += 1;
 
-        // Update running statistics
         if self.history.len() < WINDOW_SIZE {
+            // Adding a new observation (no eviction)
+            self.count += 1;
             self.history.push(state);
+            self.welford_update_add(&state);
         } else {
-            // Remove old value from sums
+            // Evict oldest, add new
             let old = self.history[self.cursor];
-            for i in 0..N_DIMS {
-                self.sum[i] -= old[i];
-                self.sum_sq[i] -= old[i] * old[i];
-            }
             self.history[self.cursor] = state;
+            self.welford_update_remove(&old, &state);
         }
         self.cursor = (self.cursor + 1) % WINDOW_SIZE;
 
-        for i in 0..N_DIMS {
-            self.sum[i] += state[i];
-            self.sum_sq[i] += state[i] * state[i];
+        if self.count < 10 {
+            return 0.0; // cold start
         }
 
-        // Compute novelty score: normalized Euclidean distance from mean
-        let n = self.history.len() as f32;
-        if n < 10.0 {
-            return 0.0; // cold start — not enough data
-        }
-
+        // Mahalanobis-like novelty: sqrt(sum((x - mean)^2 / var))
         let mut dist_sq = 0.0f32;
+        let n = self.count as f32;
         for i in 0..N_DIMS {
-            let mean = self.sum[i] / n;
-            // Variance with Bessel correction
-            let var = (self.sum_sq[i] / n - mean * mean).max(1e-10);
+            let mean = self.welford_mean[i];
+            // Welford's S_k / (n-1) = sample variance (Bessel correction)
+            let var = (self.welford_s[i] / (n - 1.0)).max(1e-10);
             let dev = state[i] - mean;
             dist_sq += (dev * dev) / var;
         }
@@ -103,12 +112,42 @@ impl ProcessNovelty {
             self.recent_novel += 1;
         }
 
-        // Decay recent_novel after WINDOW_SIZE steps
         if self.total_obs % (WINDOW_SIZE as u64) == 0 {
             self.recent_novel = 0;
         }
 
         novelty
+    }
+
+    /// Welford online update when ADDING a new value (no eviction).
+    fn welford_update_add(&mut self, x: &StateVec) {
+        let n = self.count as f32;
+        for i in 0..N_DIMS {
+            let delta = x[i] - self.welford_mean[i];
+            self.welford_mean[i] += delta / n;
+            let delta2 = x[i] - self.welford_mean[i];
+            self.welford_s[i] += delta * delta2;
+        }
+    }
+
+    /// Welford online update when REMOVING old and ADDING new (sliding window).
+    fn welford_update_remove(&mut self, old: &StateVec, new: &StateVec) {
+        let n = self.count as f32;
+        for i in 0..N_DIMS {
+            // Remove old value: reverse Welford
+            // M_{n-1} = (M_n * n - old) / (n - 1)
+            // S_{n-1} = S_n - (old - M_{n-1}) * (old - M_n)
+            let m_n = self.welford_mean[i];
+            let m_n1 = (m_n * n - old[i]) / (n - 1.0);
+            self.welford_s[i] -= (old[i] - m_n1) * (old[i] - m_n);
+            self.welford_mean[i] = m_n1;
+
+            // Add new value: forward Welford (count stays the same)
+            let delta = new[i] - self.welford_mean[i];
+            self.welford_mean[i] += delta / n;
+            let delta2 = new[i] - self.welford_mean[i];
+            self.welford_s[i] += delta * delta2;
+        }
     }
 
     /// Fraction of recent observations that were novel.
