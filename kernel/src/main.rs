@@ -89,6 +89,7 @@ pub mod ptrace;            // causal ptrace + predictive observability
 pub mod job_control;       // cognitive fg/bg with causal subgraph priority elevation
 pub mod namespaces;        // behavioral namespaces — AI-triggered dynamic isolation
 pub mod syscall_proxy;     // adaptive syscall proxy — AI-driven I/O pre-fetch + batching
+pub mod meta_cognitive;    // meta-cognitive reflexive loop
 
 /// Bootloader configuration — tells the bootloader to map all physical memory
 /// at a dynamic virtual offset so we can access physical frames by VA.
@@ -238,6 +239,7 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     intent_config::init();
     auto_security::init();
     mem_pressure::init();
+    meta_cognitive::init();
     intel_storage::init();
     llm::init();
     klog!(INFO, "AI-parity features active (transformer, causal, anomaly)");
@@ -298,6 +300,7 @@ fn idle_loop() -> ! {
         net::poll();
         wifi::poll();
         mem_pressure::tick();
+        meta_cognitive::tick();
         entropy::tick();
         crate::critic::tick();
         net::http_server_poll();
