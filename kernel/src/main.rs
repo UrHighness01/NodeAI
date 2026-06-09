@@ -69,6 +69,7 @@ pub mod anomaly;        // causal anomaly detector
 pub mod coherence;      // coherence-horizon anomaly attribution
 pub mod fuzzer;         // in-kernel syscall parseltongue fuzzer
 pub mod autotune;       // dynamic EMA parameter adaptation
+pub mod critic;         // adversarial critic for scheduler hardening
 pub mod tunables;       // live AI-adjustable kernel parameters
 pub mod fingerprint;    // behavioral cluster classifier
 pub mod causal;         // live causal process wakeup DAG
@@ -289,6 +290,7 @@ fn idle_loop() -> ! {
         wifi::poll();
         mem_pressure::tick();
         entropy::tick();
+        crate::critic::tick();
         net::http_server_poll();
         net::ssh_server_poll();
         crate::desktop::browser_fetch_tick();
