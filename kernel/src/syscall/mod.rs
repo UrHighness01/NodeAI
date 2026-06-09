@@ -623,6 +623,7 @@ pub unsafe extern "C" fn syscall_dispatch_extern(
     crate::transformer_sched::record_syscall(pid, nr);
     crate::mhs_sched::record_syscall(pid, nr as u16);
     crate::coherence::observe(pid, nr as u16);
+    crate::memory::self_model::record_syscall(pid, nr as u16);
     let (alert, score) = crate::anomaly::observe(pid, nr);
     if alert {
         crate::klog!(WARN, "ANOMALY: pid={} score={:.3} nr={}", pid, score, nr);
@@ -1326,6 +1327,7 @@ unsafe fn sys_mmap(addr: u64, len: u64, prot: u64, flags: u64, fd: i64, offset: 
     };
 
     let pid = crate::scheduler::current_pid();
+    crate::memory::self_model::record_allocation(pid, len_aligned as usize);
 
     // File-backed lazy mmap: fd != -1 maps a file region on demand.
     // Instead of eagerly copying the entire file at mmap() time, we register
@@ -1906,7 +1908,10 @@ unsafe fn sys_brk(addr: u64) -> i64 {
     let size = new_aligned - base_brk;
 
     match crate::memory::map_user_range(base_brk, size, true, false) {
-        Ok(())  => { crate::scheduler::set_user_brk(pid, new_aligned); new_aligned as i64 }
+        Ok(())  => {
+            crate::memory::self_model::record_allocation(pid, size as usize);
+            crate::scheduler::set_user_brk(pid, new_aligned); new_aligned as i64
+        }
         Err(_)  => base_brk as i64,
     }
 }
