@@ -98,6 +98,7 @@ pub mod collective_integration; // cross-process coherence coupling (Project-C)
 pub mod cross_modal;       // cross-domain predictive coupling (Project-C)
 pub mod novel_detector;   // temporal novelty detection (Project-C)
 pub mod causal_recovery;  // episodic recovery from past crashes (Project-C/VectorStore)
+pub mod info_bottleneck; // information bottleneck retention analysis (Project-C)
 
 /// Bootloader configuration — tells the bootloader to map all physical memory
 /// at a dynamic virtual offset so we can access physical frames by VA.

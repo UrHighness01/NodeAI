@@ -58,7 +58,7 @@ pub fn record_crash(pid: u64, exit_code: i32) {
     });
 
     // Also store in the global VectorStore for cross-boot persistence
-    let label = LABEL_CRASH | (exit_code as u64 & 0xFFFF);
+    let _label = LABEL_CRASH | (exit_code as u64 & 0xFFFF);
     // VectorStore.insert is behind a Mutex in the AI subsystem.
     // We use the global store from ai_subsystem.
     crate::klog!(INFO, "causal_recovery: recorded crash pid={} exit={} (vector store)", pid, exit_code);
