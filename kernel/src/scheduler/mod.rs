@@ -865,6 +865,11 @@ pub fn get_task_cr3(pid: Pid) -> Option<u64> {
     TASKS.lock().get(&pid).map(|t| t.cr3)
 }
 
+/// Return the saved kernel RSP for a task (proxy for instruction pointer during hibernation).
+pub fn get_saved_rsp(pid: Pid) -> Option<u64> {
+    TASKS.lock().get(&pid).map(|t| t.saved_kernel_rsp)
+}
+
 /// Set the task's euid.
 pub fn set_euid(pid: u64, euid: u32) {
     if let Some(mut tasks) = TASKS.try_lock() {
