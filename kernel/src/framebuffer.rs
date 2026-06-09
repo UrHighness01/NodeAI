@@ -56,9 +56,12 @@ unsafe impl Sync for Framebuffer {}
 
 impl Framebuffer {
     /// Write one pixel, handling the pixel format.
+    /// Hard-guards against writes past the last mapped framebuffer page:
+    /// `height × stride × bpp` bytes is the exclusive upper bound.
     #[inline(always)]
     fn write_pixel_raw(&mut self, offset: usize, r: u8, g: u8, b: u8) {
-        // Safety: caller is responsible for bounds checking
+        let limit = self.height * self.stride * self.bytes_per_pixel;
+        if offset + self.bytes_per_pixel > limit { return; }
         unsafe {
             let p = self.ptr.add(offset);
             match self.format {
