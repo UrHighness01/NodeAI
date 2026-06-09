@@ -213,15 +213,15 @@ impl MhsModel {
         &self.embed[idx * D_MODEL..(idx + 1) * D_MODEL]
     }
 
-    fn gla_fast(&self, syscalls: &[u16; CONTEXT_LEN]) -> (Vec<f32>, f32) {
-        let mut s = alloc::vec![0.0f32; DH0 * DH0]; // state matrix
-        let mut z = alloc::vec![0.0f32; DH0];         // normaliser
-        let mut pool = alloc::vec![0.0f32; DH0];
+    fn gla_fast(&self, syscalls: &[u16; CONTEXT_LEN]) -> ([f32; DH0], f32) {
+        let mut s = [0.0f32; DH0 * DH0]; // state matrix
+        let mut z = [0.0f32; DH0];         // normaliser
+        let mut pool = [0.0f32; DH0];
         let mut gate_sum = 0.0f32;
 
-        let mut qbuf = alloc::vec![0.0f32; DH0];
-        let mut kbuf = alloc::vec![0.0f32; DH0];
-        let mut vbuf = alloc::vec![0.0f32; DH0];
+        let mut qbuf = [0.0f32; DH0];
+        let mut kbuf = [0.0f32; DH0];
+        let mut vbuf = [0.0f32; DH0];
 
         for t in 0..CONTEXT_LEN {
             let x = self.embed_token(syscalls[t]);
@@ -435,7 +435,7 @@ struct MhsContext {
     count:   usize,
     pending: Option<([u16; CONTEXT_LEN], [f32; N_OUTPUTS])>,
     /// Phase 3: FastState buffer cache
-    fast_state_cache: Option<Vec<f32>>,
+    fast_state_cache: Option<[f32; DH0]>,
 }
 
 impl MhsContext {
@@ -488,7 +488,7 @@ pub fn infer(pid: u64) -> Option<MhsDecision> {
         (c.snapshot(), c.fast_state_cache.clone())
     };
     let model = MODEL.lock();
-    model.as_ref().map(|m| m.forward(&snap, fast_cache.as_deref()))
+    model.as_ref().map(|m| m.forward(&snap, fast_cache.as_ref().map(|x| x as &[f32])))
 }
 
 /// Record scheduling outcome for `pid` and run an SGD step.
@@ -519,14 +519,14 @@ pub fn remove(pid: u64) {
 }
 
 /// Phase 3: Snapshot the FastState for a context switch out.
-pub fn snapshot_fast_state(pid: u64) -> Option<alloc::vec::Vec<f32>> {
+pub fn snapshot_fast_state(pid: u64) -> Option<[f32; DH0]> {
     let snap = {
-        let ctx = CONTEXTS.lock();
+        let ctx = CONTEXTS.try_lock()?;
         let c = ctx.get(&pid)?;
         if !c.is_warm() { return None; }
         c.snapshot()
     };
-    let model = MODEL.lock();
+    let model = MODEL.try_lock()?;
     model.as_ref().map(|m| {
         let (fast_pool, _) = m.gla_fast(&snap);
         fast_pool
@@ -534,10 +534,11 @@ pub fn snapshot_fast_state(pid: u64) -> Option<alloc::vec::Vec<f32>> {
 }
 
 /// Phase 3: Restore the FastState for a context switch in.
-pub fn restore_fast_state(pid: u64, state: &[f32]) {
-    let mut ctx = CONTEXTS.lock();
-    if let Some(c) = ctx.get_mut(&pid) {
-        c.fast_state_cache = Some(state.to_vec());
+pub fn restore_fast_state(pid: u64, state: &[f32; DH0]) {
+    if let Some(mut ctx) = CONTEXTS.try_lock() {
+        if let Some(c) = ctx.get_mut(&pid) {
+            c.fast_state_cache = Some(*state);
+        }
     }
 }
 

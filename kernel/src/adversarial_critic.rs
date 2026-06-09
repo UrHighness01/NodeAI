@@ -13,10 +13,10 @@ fn critic_thread_main() -> ! {
         }
 
         // Get all active PIDs
-        let pids: Vec<u64> = {
+        let pids: Vec<u64> = x86_64::instructions::interrupts::without_interrupts(|| {
             let tasks = crate::scheduler::TASKS.lock();
             tasks.keys().copied().collect()
-        };
+        });
 
         for pid in pids {
             let score = crate::anomaly::score(pid);

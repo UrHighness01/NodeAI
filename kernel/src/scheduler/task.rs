@@ -165,8 +165,8 @@ pub struct Task {
     pub stack_canary: u64,
     /// Physical-offset virtual address where the canary lives (bottom of stack).
     pub stack_canary_addr: u64,
-    /// Phase 3: MHS-Based Context Snapshotting — FastState buffer.
-    pub mhs_snapshot: Option<alloc::vec::Vec<f32>>,
+    /// Snapshot of the MHS FastState (Phase 3)
+    pub mhs_snapshot: Option<[f32; 16]>,
 }
 
 impl Task {
