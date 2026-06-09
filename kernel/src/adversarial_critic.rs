@@ -34,19 +34,39 @@ fn run_shadow_sequence(pid: u64, current_score: f32) {
 
     for target in targets {
         let fuzzed = perturb_path(target);
-        if crate::vfs::lookup(&fuzzed).is_ok() {
-            shadow_success = true;
-            break;
+        if let Ok(node) = crate::vfs::lookup(&fuzzed) {
+            if let Ok(stat) = node.stat() {
+                let p_euid = crate::scheduler::get_euid(pid).unwrap_or(0);
+                
+                // If the process is not root, and doesn't own the file, and it's not world readable...
+                let is_root = p_euid == 0;
+                let mode = crate::users::FileMode(stat.mode);
+                let can_read = if is_root {
+                    true
+                } else if p_euid == stat.uid {
+                    mode.owner_read()
+                } else {
+                    mode.other_read()
+                };
+
+                if !can_read {
+                    shadow_success = true;
+                    break;
+                }
+            }
         }
     }
 
     if shadow_success {
         crate::klog!(WARN, "CRITIC: pid={} vulnerable to path perturbation! Bumping namespace confinement.", pid);
-        // Preemptively increase anomaly score by +0.4 to bump namespace containment
-        let new_score = (current_score + 0.4).min(1.0);
-        crate::namespaces::update(pid, new_score);
-
-        // Also simulate a shadow syscall anomaly (e.g. 2 = sys_open, 0 = sys_read)
-        let _ = crate::anomaly::score_sequence(pid, &[2, 0, 2, 0]);
+        
+        // Phase 2: Adversarial VFS Critic - EL Engine Hook
+        // Use hook_error with 13 (EACCES) to allow EL scripts to handle the security breach.
+        if !crate::el_engine::hook_error(pid, 13) {
+            // Default fallback if no EL script handled it
+            let new_score = (current_score + 0.4).min(1.0);
+            crate::namespaces::update(pid, new_score);
+            let _ = crate::anomaly::score_sequence(pid, &[2, 0, 2, 0]);
+        }
     }
 }
