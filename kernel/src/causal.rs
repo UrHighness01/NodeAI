@@ -248,7 +248,11 @@ pub fn attribute_io_error(ino: u64, page_off: u64) {
     }
     drop(graph);
     if best_pid > 0 {
-        crate::scheduler::send_signal(best_pid, 29); // SIGIO / EIO
+        // Phase 4: Run the EL-Scriptable Self-Healing hook
+        // 5 is EIO in Linux
+        if !crate::el_engine::hook_error(best_pid, 5) {
+            crate::scheduler::send_signal(best_pid, 29); // SIGIO / EIO
+        }
         crate::klog!(WARN,
             "causal: I/O error ino={} off={} attributed to pid={} (last waker)",
             ino, page_off, best_pid

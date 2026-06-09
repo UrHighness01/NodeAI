@@ -255,6 +255,7 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     transformer_sched::init();
     mhs_sched::init();
     gla_prefetch::init();
+    el_engine::init();
 
     // ── Phase 12b: Populate /proc and /ai virtual filesystem entries ──────────
     vfs::procfs::init();
