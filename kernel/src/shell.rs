@@ -1646,7 +1646,6 @@ fn cmd_exec(args: &str) {
         return;
     }
     let path = parts[0];
-    // Resolve path relative to cwd if not absolute
     let abs_path = if path.starts_with('/') {
         alloc::string::String::from(path)
     } else {
@@ -1657,7 +1656,6 @@ fn cmd_exec(args: &str) {
             alloc::format!("{}/{}", cwd, path)
         }
     };
-    // Load the ELF from VFS and execve it
     use crate::vfs;
     let node = match vfs::lookup(&abs_path) {
         Ok(n)  => n,
@@ -1667,7 +1665,7 @@ fn cmd_exec(args: &str) {
         Ok(f)  => f,
         Err(_) => { println!("exec: {}: cannot open", abs_path); return; }
     };
-    let mut buf = alloc::vec![0u8; 4 * 1024 * 1024]; // 4 MiB read buffer
+    let mut buf = alloc::vec![0u8; 4 * 1024 * 1024];
     let n = match fh.read(&mut buf) {
         Ok(n)  => n,
         Err(_) => { println!("exec: {}: read error", abs_path); return; }
@@ -1677,10 +1675,104 @@ fn cmd_exec(args: &str) {
         Ok(img) => img,
         Err(e)  => { println!("exec: {}: ELF error {:?}", abs_path, e); return; }
     };
-    unsafe { crate::elf::load_image(&image); }
-    println!("[exec] launching {} (entry={:#x})", abs_path, image.entry);
-    // Build argv on the user stack and jump to ring 3
-    unsafe { crate::syscall::kernel_exec_entry(image.entry, image.entry); }
+
+    // Allocate a fresh address space
+    let new_cr3 = match unsafe { crate::memory::alloc_user_cr3() } {
+        Some(cr3) => cr3,
+        None => { println!("exec: cannot allocate CR3"); return; }
+    };
+    unsafe { core::arch::asm!("mov cr3, {}", in(reg) new_cr3, options(nomem, nostack)); }
+    let pid = crate::scheduler::current_pid();
+    crate::scheduler::set_task_cr3(pid, new_cr3);
+
+    if let Err(e) = unsafe { crate::elf::load_image(&image) } {
+        println!("exec: ELF load error {:?}", e); return;
+    }
+    let entry = image.entry;
+
+    // Map user stack in the new address space
+    const USER_STACK_TOP: u64 = 0x0000_7FFF_FFFF_F000;
+    const USER_STACK_SIZE: u64 = 8 * 1024 * 1024;
+    let stack_base = USER_STACK_TOP - USER_STACK_SIZE;
+    if let Err(_) = crate::memory::map_user_range(stack_base, USER_STACK_SIZE, true, false) {
+        println!("exec: cannot map stack"); return;
+    }
+
+    // Build argv strings from shell args
+    let mut argv_strs: Vec<Vec<u8>> = Vec::new();
+    for arg in &parts {
+        let mut v = Vec::from(arg.as_bytes());
+        v.push(0u8);
+        argv_strs.push(v);
+    }
+
+    // Default envp
+    let envp_defaults = [
+        b"PATH=/bin\0" as &[u8],
+        b"HOME=/root\0",
+        b"TERM=vt100\0",
+    ];
+
+    // Build SysV AMD64 user stack
+    let mut sp = USER_STACK_TOP;
+
+    // Write argv strings (descending)
+    let mut argv_ptrs = Vec::new();
+    for s in &argv_strs {
+        sp -= s.len() as u64;
+        unsafe { core::ptr::copy_nonoverlapping(s.as_ptr(), sp as *mut u8, s.len()); }
+        argv_ptrs.push(sp);
+    }
+
+    // Write envp strings (descending)
+    let mut envp_ptrs = Vec::new();
+    for s in &envp_defaults {
+        sp -= s.len() as u64;
+        unsafe { core::ptr::copy_nonoverlapping(s.as_ptr(), sp as *mut u8, s.len()); }
+        envp_ptrs.push(sp);
+    }
+
+    // AT_RANDOM
+    sp -= 16;
+    sp &= !15u64;
+    let rand_ptr = sp;
+    let tsc: u64;
+    unsafe { core::arch::asm!("rdtsc; shl rdx, 32; or rax, rdx",
+        out("rax") tsc, out("rdx") _, options(nomem, nostack)); }
+    unsafe { *(rand_ptr as *mut u64) = tsc; }
+    unsafe { *((rand_ptr + 8) as *mut u64) = tsc ^ 0xDEAD_BEEF_CAFE_BABEu64; }
+    sp &= !7u64;
+
+    // Align stack to 16 bytes for SysV ABI
+    let n_pointers = 1 + argv_ptrs.len() + 1 + envp_ptrs.len() + 1 + 10;
+    if (sp.wrapping_sub((n_pointers as u64) * 8)) & 0xF != 0 {
+        sp -= 8;
+    }
+
+    macro_rules! push64 {
+        ($v:expr) => {{
+            sp -= 8;
+            unsafe { *(sp as *mut u64) = $v as u64; }
+        }};
+    }
+
+    // auxv
+    push64!(0u64); push64!(0u64);         // AT_NULL
+    push64!(0x1F); push64!(16u64);        // AT_HWCAP
+    push64!(rand_ptr); push64!(25u64);    // AT_RANDOM
+    push64!(entry); push64!(9u64);        // AT_ENTRY
+    push64!(4096u64); push64!(6u64);      // AT_PAGESZ
+
+    push64!(0u64);  // envp null terminator
+    for &ptr in envp_ptrs.iter().rev() { push64!(ptr); }
+    push64!(0u64);  // argv null terminator
+    for &ptr in argv_ptrs.iter().rev() { push64!(ptr); }
+    push64!(argv_strs.len() as u64);  // argc
+
+    println!("[exec] launching {} (entry={:#x}, argc={})", abs_path, entry, argv_strs.len());
+
+    // Jump to user mode
+    unsafe { crate::syscall::ring3_jump(entry, sp); }
 }
 
 fn cmd_wm(args: &str) {

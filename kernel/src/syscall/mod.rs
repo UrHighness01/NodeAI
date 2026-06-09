@@ -1657,7 +1657,7 @@ unsafe fn read_user_cstr(ptr: u64, max: usize) -> Option<alloc::string::String> 
 
 // ── Helper: jump to ring-3 via IRETQ ─────────────────────────────────────────
 /// Transfer execution to user space.  Never returns.
-unsafe fn ring3_jump(entry: u64, user_rsp: u64) -> ! {
+pub(crate) unsafe fn ring3_jump(entry: u64, user_rsp: u64) -> ! {
     // user segment selectors (RPL=3)
     let user_cs: u64 = (crate::gdt::user_cs().0 | 3) as u64;
     let user_ss: u64 = (crate::gdt::user_ds().0 | 3) as u64;
