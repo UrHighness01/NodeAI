@@ -70,6 +70,9 @@ pub mod tunables;       // live AI-adjustable kernel parameters
 pub mod fingerprint;    // behavioral cluster classifier
 pub mod causal;         // live causal process wakeup DAG
 pub mod transformer_sched; // transformer-based scheduling policy
+pub mod mhs_sched;         // MHS O(T) GLA scheduler (cross-project: Project-M)
+pub mod gla_prefetch;      // per-process persistent GLA page-fault advisor (Project-L)
+pub mod causal_prefetch;   // causal-linked fork-time I/O prefetching
 pub mod mem_pressure;      // memory pressure monitor + AI-aware reclaim
 pub mod page_cache;        // unified page cache — file data keyed by (inode, page_off)
 pub mod entropy;           // behavioral entropy pool — /dev/random + getrandom()
@@ -242,6 +245,8 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     ai_engine::init();
     fingerprint::init();
     transformer_sched::init();
+    mhs_sched::init();
+    gla_prefetch::init();
 
     // ── Phase 12b: Populate /proc and /ai virtual filesystem entries ──────────
     vfs::procfs::init();
