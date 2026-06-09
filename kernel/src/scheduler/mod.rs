@@ -513,6 +513,7 @@ pub fn exit_current_direct(pid: Pid, code: i32) -> ! {
     crate::syscall_proxy::cleanup_pid(pid);
     crate::security::cleanup_task_context(pid);
     crate::collective_integration::cleanup(pid);
+    crate::novel_detector::remove(pid);
     if parent_pid != 0 {
         wake_pid(parent_pid);
         send_signal(parent_pid, 17); // SIGCHLD
@@ -560,6 +561,7 @@ pub fn exit_current(code: i32) -> ! {
     crate::syscall_proxy::cleanup_pid(pid);
     crate::security::cleanup_task_context(pid);
     crate::collective_integration::cleanup(pid);
+    crate::novel_detector::remove(pid);
 
     // Wake the parent and send SIGCHLD.
     if parent_pid != 0 {

@@ -650,6 +650,9 @@ pub unsafe extern "C" fn syscall_dispatch_extern(
     crate::coherence::observe(pid, nr as u16);
     crate::memory::self_model::record_syscall(pid, nr as u16);
     let (alert, score) = crate::anomaly::observe(pid, nr);
+    // Feed anomaly + coherence into the novelty detector
+    let coh = crate::coherence::compute_horizon(pid);
+    crate::novel_detector::observe(pid, coh, score);
     if alert {
         crate::klog!(WARN, "ANOMALY: pid={} score={:.3} nr={}", pid, score, nr);
         ai_subsystem::event_bus::publish(
@@ -2431,7 +2434,7 @@ impl crate::vfs::FileHandle for PipeHandle {
         if let Some(arc) = PIPE_TABLE.lock().get(&self.pipe_id).cloned() {
             let mut st = arc.lock();
             if self.is_write { st.writer_count += 1; }
-            else             { st.reader_count += 1; }
+            else              { st.reader_count += 1; }
         }
         Some(alloc::boxed::Box::new(PipeHandle { pipe_id: self.pipe_id, is_write: self.is_write }))
     }
@@ -3153,8 +3156,7 @@ impl crate::vfs::FileHandle for EventFdHandle {
 
     fn seek(&mut self, _: u64) -> crate::vfs::VfsResult<u64> { Ok(0) }
     fn stat(&self) -> crate::vfs::VfsResult<crate::vfs::Stat> {
-        Ok(crate::vfs::Stat { ino: 0, size: 0, is_dir: false,
-                              nlink: 1, uid: 0, gid: 0, mode: 0o600 })
+        Ok(crate::vfs::Stat { ino: 0, size: 0, is_dir: false, nlink: 1, uid: 0, gid: 0, mode: 0o600 })
     }
 
     fn clone_box(&self) -> Option<alloc::boxed::Box<dyn crate::vfs::FileHandle>> {
