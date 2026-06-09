@@ -780,7 +780,7 @@ pub unsafe extern "C" fn syscall_dispatch_extern(
         nr::GETTID        => sys_getpid(),
         nr::SYSINFO       => sys_sysinfo(arg0),
         nr::GETRLIMIT | nr::PRLIMIT64 => sys_getrlimit(arg0, arg1),
-        nr::SETRLIMIT     => 0,
+        nr::SETRLIMIT     => sys_setrlimit(arg0, arg1, arg2),
         nr::MADVISE   => sys_madvise(arg0, arg1, arg2 as i32),
         nr::MINCORE | nr::MSYNC | nr::MLOCK | nr::MUNLOCK => 0, // safe no-ops
         nr::STATFS | nr::FSTATFS => sys_statfs(arg0, arg1),
@@ -2644,11 +2644,23 @@ unsafe fn sys_sysinfo(ptr: u64) -> i64 {
 }
 
 // ── sys_getrlimit ────────────────────────────────────────────────────────────
-unsafe fn sys_getrlimit(_resource: u64, rlim_ptr: u64) -> i64 {
+unsafe fn sys_getrlimit(resource: u64, rlim_ptr: u64) -> i64 {
     if rlim_ptr == 0 { return 0; }
+    let pid = crate::scheduler::current_pid();
+    let rl = crate::rlimit::get(pid, resource as usize);
     let p = rlim_ptr as *mut u64;
-    *p = u64::MAX; *p.add(1) = u64::MAX;
+    *p = rl.cur;
+    *p.add(1) = rl.max;
     0
+}
+
+unsafe fn sys_setrlimit(resource: u64, rlim_ptr: u64, _old_rlim: u64) -> i64 {
+    if rlim_ptr == 0 { return 0; }
+    let pid = crate::scheduler::current_pid();
+    let p = rlim_ptr as *const u64;
+    let new_cur = *p;
+    let new_max = *p.add(1);
+    crate::rlimit::set(pid, resource as usize, new_cur, new_max)
 }
 
 // ── sys_statfs ───────────────────────────────────────────────────────────────

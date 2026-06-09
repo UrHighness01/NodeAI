@@ -60,6 +60,7 @@ pub fn spawn_kernel_thread(name: &str, entry: fn() -> !) {
     task.runnable_at = UPTIME_MS.load(core::sync::atomic::Ordering::Relaxed);
     TASKS.lock().insert(pid, task);
     runqueue::enqueue(pid);
+    crate::rlimit::init_pid(pid, None);
 }
 
 /// Called from the naked APIC timer handler with interrupts disabled.
@@ -513,6 +514,7 @@ pub fn exit_current_direct(pid: Pid, code: i32) -> ! {
     crate::transformer_sched::remove(pid);
     crate::syscall::cleanup_pid_fds(pid);
     crate::syscall::cleanup_pid_vmas(pid);
+    crate::rlimit::remove_pid(pid);
     crate::ptrace::cleanup_pid(pid as u64);
     crate::job_control::cleanup_pid(pid);
     crate::namespaces::cleanup_pid(pid);
@@ -560,6 +562,7 @@ pub fn exit_current(code: i32) -> ! {
     crate::transformer_sched::remove(pid);
     crate::syscall::cleanup_pid_fds(pid);
     crate::syscall::cleanup_pid_vmas(pid);
+    crate::rlimit::remove_pid(pid);
     crate::mem_pressure::remove_pid(pid);
     crate::ptrace::cleanup_pid(pid as u64);
     crate::job_control::cleanup_pid(pid);
@@ -772,6 +775,8 @@ pub fn spawn_user_thread(parent_pid: Pid, new_stack: u64, tls: u64, settls: bool
     child.parent_pid = parent_pid;
     tasks.insert(child_pid, child);
     runqueue::enqueue(child_pid);
+    // Initialize resource limits (inherit from parent or defaults)
+    crate::rlimit::init_pid(child_pid, Some(parent_pid));
     // Check if parent had a crash pattern — apply proactive constraints if so
     crate::causal_recovery::on_spawn(child_pid, parent_pid);
     crate::klog!(INFO, "Scheduler: thread tid={} parent={} stack={:#x}", child_pid, parent_pid, new_stack);
