@@ -162,6 +162,75 @@ fn cosine_similarity(a: &[f32; FP_DIM], b: &[f32; FP_DIM]) -> f32 {
     dot / (libm::sqrtf(na) * libm::sqrtf(nb))
 }
 
+/// Persistent memory path in VFS.
+const MEMORY_PATH: &str = "/var/lib/episodic_memory.bin";
+
+/// Serialise the crash ring buffer to a VFS file.
+/// Call periodically (e.g., every 30s from idle_loop) to persist episodic memory.
+pub fn save_to_disk() {
+    let ring = CRASH_RING.lock();
+    if ring.is_empty() { return; }
+
+    // Serialize: [count:u32] [fingerprint:f32×16] [exit_code:i32] [timestamp_ms:u64] ...
+    let mut buf = Vec::new();
+    buf.extend_from_slice(&(ring.len() as u32).to_le_bytes());
+    for rec in ring.iter() {
+        for v in &rec.fingerprint {
+            buf.extend_from_slice(&v.to_le_bytes());
+        }
+        buf.extend_from_slice(&(rec.exit_code as u32).to_le_bytes());
+        buf.extend_from_slice(&rec.timestamp_ms.to_le_bytes());
+    }
+
+    // Write to VFS — create parent directories, then write file.
+    let _ = crate::vfs::write_file(MEMORY_PATH, &buf);
+    crate::klog!(DEBUG, "causal_recovery: saved {} crash records to {}", ring.len(), MEMORY_PATH);
+}
+
+/// Deserialize the crash ring buffer from a VFS file.
+/// Call once at boot to restore episodic memory from previous sessions.
+pub fn load_from_disk() {
+    let data = match crate::vfs::read_file(MEMORY_PATH) {
+        Ok(d) => d,
+        Err(_) => {
+            crate::klog!(DEBUG, "causal_recovery: no persistent memory at {} — starting fresh", MEMORY_PATH);
+            return;
+        }
+    };
+
+    if data.len() < 4 { return; }
+    let count = u32::from_le_bytes([data[0], data[1], data[2], data[3]]) as usize;
+    let rec_size = 16 * 4 + 4 + 8; // 16 f32 × 4B + exit_code:u32 + timestamp:u64 = 76
+    if data.len() < 4 + count * rec_size { return; }
+
+    let mut ring = CRASH_RING.lock();
+    ring.clear();
+
+    let mut pos = 4;
+    for _ in 0..count {
+        if pos + rec_size > data.len() { break; }
+        let mut fingerprint = [0.0f32; FP_DIM];
+        for v in fingerprint.iter_mut() {
+            let bytes: [u8; 4] = [data[pos], data[pos+1], data[pos+2], data[pos+3]];
+            *v = f32::from_le_bytes(bytes);
+            pos += 4;
+        }
+        let exit_bytes: [u8; 4] = [data[pos], data[pos+1], data[pos+2], data[pos+3]];
+        let exit_code = i32::from_le_bytes(exit_bytes);
+        pos += 4;
+        let ts_bytes: [u8; 8] = [
+            data[pos], data[pos+1], data[pos+2], data[pos+3],
+            data[pos+4], data[pos+5], data[pos+6], data[pos+7],
+        ];
+        let timestamp_ms = u64::from_le_bytes(ts_bytes);
+        pos += 8;
+
+        ring.push(CrashRecord { fingerprint, exit_code, timestamp_ms });
+    }
+
+    crate::klog!(INFO, "causal_recovery: restored {} crash records from {}", ring.len(), MEMORY_PATH);
+}
+
 /// Format /proc report.
 pub fn format_report() -> Vec<u8> {
     use alloc::format;

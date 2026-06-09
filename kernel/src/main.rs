@@ -288,6 +288,9 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     // ── Phase 14: Users & authentication ─────────────────────────────────────
     users::init();
 
+    // Restore persistent episodic memory from disk (if available)
+    crate::causal_recovery::load_from_disk();
+
     // ── Phase 12c: Kernel shell (after users so prompt shows username) ────────
     shell::init();
     // ── Phase 13: Self-instrumentation telemetry ──────────────────────────────
@@ -317,6 +320,7 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
 fn idle_loop() -> ! {
     let mut last_heartbeat: u64 = 0;
     let mut last_desktop_tick: u64 = 0;
+    let mut last_memory_save: u64 = 0;
     loop {
         // Process hardware input events outside of IRQ context
         crate::desktop::process_input_events();
@@ -353,6 +357,13 @@ fn idle_loop() -> ! {
             crate::page_cache::tick_writeback();
             crate::syscall_proxy::tick();
         }
+
+        // Persist episodic memory to disk every 30 seconds
+        if now.saturating_sub(last_memory_save) >= 30000 {
+            last_memory_save = now;
+            crate::causal_recovery::save_to_disk();
+        }
+
         x86_64::instructions::interrupts::enable_and_hlt();
     }
 }
