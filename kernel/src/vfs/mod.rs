@@ -66,6 +66,8 @@ pub trait FileHandle: Send + Sync {
     /// Returns Some(new_handle) if duplication is supported, None otherwise
     /// (caller falls back to reopening via path).
     fn clone_box(&self) -> Option<Box<dyn FileHandle>> { None }
+    /// Indicates whether this handle is a network socket.
+    fn is_network_socket(&self) -> bool { false }
 }
 
 // ── Directory entry ───────────────────────────────────────────────────────────

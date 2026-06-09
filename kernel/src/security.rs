@@ -154,8 +154,68 @@ pub fn kaslr_offset() -> u64 {
 
 // ── Initialise ────────────────────────────────────────────────────────────────
 
+use alloc::collections::BTreeMap;
+use spin::RwLock;
+
+/// Dynamic capabilities and security state for a task.
+#[derive(Debug, Clone)]
+pub struct SecurityContext {
+    pub capabilities: u64,
+}
+
+impl Default for SecurityContext {
+    fn default() -> Self {
+        // By default, a process inherits no special capabilities unless granted.
+        // We will grant KERNEL capabilities to init (PID 0 and 1).
+        Self { capabilities: 0 }
+    }
+}
+
+static SECURITY_CONTEXTS: RwLock<BTreeMap<u64, SecurityContext>> = RwLock::new(BTreeMap::new());
+
+/// Initialize the security context for a new task. Inherits from parent if specified.
+pub fn init_task_context(pid: u64, parent_pid: Option<u64>) {
+    let caps = if pid == 0 || pid == 1 {
+        cap::KERNEL
+    } else if let Some(ppid) = parent_pid {
+        SECURITY_CONTEXTS.read().get(&ppid).map(|c| c.capabilities).unwrap_or(0)
+    } else {
+        0
+    };
+    
+    SECURITY_CONTEXTS.write().insert(pid, SecurityContext { capabilities: caps });
+}
+
+/// Remove a task's security context on exit.
+pub fn cleanup_task_context(pid: u64) {
+    SECURITY_CONTEXTS.write().remove(&pid);
+}
+
+/// Check if a task has a specific capability.
+pub fn has_capability(pid: u64, cap: u64) -> bool {
+    // Treat init (PID 0) or PID 1 as always having full capabilities just in case.
+    if pid == 0 || pid == 1 { return true; }
+    
+    if let Some(ctx) = SECURITY_CONTEXTS.read().get(&pid) {
+        ctx.capabilities & cap == cap
+    } else {
+        false
+    }
+}
+
+/// Revoke a specific capability from a task dynamically.
+pub fn revoke_capability(pid: u64, cap: u64) {
+    if let Some(ctx) = SECURITY_CONTEXTS.write().get_mut(&pid) {
+        ctx.capabilities &= !cap;
+        crate::klog!(WARN, "SECURITY: Revoked capability {:#x} from pid={}", cap, pid);
+    }
+    // Invalidate handles immediately after revocation
+    crate::syscall::invalidate_handles(pid, cap);
+}
+
 /// Perform all Phase 10 security hardening steps.
 pub fn init() {
     enable_smep_smap();
+    init_task_context(0, None);
     crate::klog!(INFO, "Security: capability system active, seccomp filter table ready");
 }

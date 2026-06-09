@@ -140,6 +140,25 @@ struct SeccompPolicy {
 static SECCOMP_TABLE: Mutex<BTreeMap<u64, SeccompPolicy>>
     = Mutex::new(BTreeMap::new());
 
+/// Invalidate open handles for a process when a capability is dynamically revoked.
+/// For example, if NET_RAW is revoked, all active network sockets are forcibly closed.
+pub fn invalidate_handles(pid: u64, capability_revoked: u64) {
+    if capability_revoked == crate::security::cap::NET_RAW {
+        let mut fd_table = FD_TABLE.lock();
+        let mut to_close = alloc::vec::Vec::new();
+        // Identify all network sockets owned by the pid
+        for (&(owner_pid, fd), handle) in fd_table.iter() {
+            if owner_pid == pid && handle.is_network_socket() {
+                to_close.push(fd);
+            }
+        }
+        for fd in to_close {
+            fd_table.remove(&(pid, fd));
+            crate::klog!(WARN, "SECURITY: Invalidated socket fd={} for pid={} due to capability revocation", fd, pid);
+        }
+    }
+}
+
 /// NodeAI seccomp mode: auto-build allowlist from observed syscalls then lock.
 const SECCOMP_AI_LOCK: u64 = 100;
 /// Minimum calls before auto-lock is possible (guard against premature lock).
@@ -443,6 +462,10 @@ pub mod nr {
     pub const PTRACE:          u64 = 101;
     pub const TCGETPGRP:       u64 = 111;
     pub const TCSETPGRP:       u64 = 122;
+    pub const MOUNT:           u64 = 165;
+    pub const UMOUNT2:         u64 = 166;
+    pub const CHROOT:          u64 = 161;
+    pub const UNSHARE:         u64 = 272;
 }
 
 // ── Per-CPU kernel stack for syscall handling ─────────────────────────────────
@@ -641,6 +664,17 @@ pub unsafe extern "C" fn syscall_dispatch_extern(
     // ── Adaptive syscall proxy: track pattern, enforce namespace blocks ───────
     crate::syscall_proxy::observe_pattern(pid, nr, arg0, arg1 as usize);
     if !crate::namespaces::allow_syscall(pid, nr, is_write_syscall(nr)) {
+        return EPERM;
+    }
+
+    // ── Structural Capability Checks ──────────────────────────────────────────
+    // Validate capabilities before core syscall dispatch
+    if nr == nr::SOCKET && !crate::security::has_capability(pid, crate::security::cap::NET_RAW) {
+        crate::klog!(WARN, "SECURITY: pid={} denied SOCKET due to lack of NET_RAW capability", pid);
+        return EPERM;
+    }
+    if (nr == nr::MOUNT || nr == nr::UMOUNT2 || nr == nr::UNSHARE || nr == nr::CHROOT) && !crate::security::has_capability(pid, crate::security::cap::SYS_ADMIN) {
+        crate::klog!(WARN, "SECURITY: pid={} denied SYS_ADMIN operations", pid);
         return EPERM;
     }
 
@@ -1203,8 +1237,8 @@ unsafe fn sys_open(path_ptr: u64, path_len: u64, _flags: u64) -> i64 {
     let pid = crate::scheduler::current_pid();
     
     // Semantic Syscall Sandboxing Phase
-    if !crate::semantic_sandbox::is_semantically_safe(pid, path_str) {
-        crate::klog!(WARN, "semantic_sandbox: Dropped sys_open for anomalous intent: {}", path_str);
+    let decision = crate::semantic_gate::get_gatekeeper().check(pid, 2 /* SYS_OPEN */, path_str);
+    if decision == crate::semantic_gate::Decision::Denied {
         return -13; // EACCES
     }
 
@@ -3221,6 +3255,7 @@ impl crate::vfs::FileHandle for SocketHandle {
     fn clone_box(&self) -> Option<alloc::boxed::Box<dyn crate::vfs::FileHandle>> {
         Some(alloc::boxed::Box::new(SocketHandle))
     }
+    fn is_network_socket(&self) -> bool { true }
 }
 
 /// Connected socket fd — wraps a TcpSocketKey for an Established connection.
@@ -3251,6 +3286,7 @@ impl crate::vfs::FileHandle for ConnectedSocketHandle {
             remote_port: self.remote_port,
         }))
     }
+    fn is_network_socket(&self) -> bool { true }
 }
 
 unsafe fn sys_socket(domain: u64, sock_type: u64, _proto: u64) -> i64 {

@@ -511,6 +511,7 @@ pub fn exit_current_direct(pid: Pid, code: i32) -> ! {
     crate::job_control::cleanup_pid(pid);
     crate::namespaces::cleanup_pid(pid);
     crate::syscall_proxy::cleanup_pid(pid);
+    crate::security::cleanup_task_context(pid);
     if parent_pid != 0 {
         wake_pid(parent_pid);
         send_signal(parent_pid, 17); // SIGCHLD
@@ -556,6 +557,7 @@ pub fn exit_current(code: i32) -> ! {
     crate::job_control::cleanup_pid(pid);
     crate::namespaces::cleanup_pid(pid);
     crate::syscall_proxy::cleanup_pid(pid);
+    crate::security::cleanup_task_context(pid);
 
     // Wake the parent and send SIGCHLD.
     if parent_pid != 0 {
@@ -626,6 +628,7 @@ pub fn fork_task(parent_pid: Pid) -> Option<Pid> {
     child.cr3 = child_cr3;
     tasks.insert(child_pid, child);
     runqueue::enqueue(child_pid);
+    crate::security::init_task_context(child_pid, Some(parent_pid));
     Some(child_pid)
 }
 
