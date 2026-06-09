@@ -306,6 +306,7 @@ fn idle_loop() -> ! {
         net::http_server_poll();
         net::ssh_server_poll();
         crate::desktop::browser_fetch_tick();
+        crate::memory::vmm::reclaim_incremental_tick();
 
         let now = crate::scheduler::uptime_ms();
 
