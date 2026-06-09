@@ -6,8 +6,8 @@ use linked_list_allocator::LockedHeap;
 #[global_allocator]
 pub static KERNEL_HEAP: LockedHeap = LockedHeap::empty();
 
-/// Initial heap size: 32 MiB (was 4 MiB, OOM on long runs with Round 10-13 modules).
-const HEAP_SIZE: usize = 32 * 1024 * 1024;
+/// Initial heap size: 64 MiB (was 4 MiB→16 MiB→32 MiB, OOM with R23-R27 modules).
+const HEAP_SIZE: usize = 64 * 1024 * 1024;
 
 /// Static backing store for the kernel heap.
 /// Must be in BSS (zero-initialized) to avoid inflating the binary.
