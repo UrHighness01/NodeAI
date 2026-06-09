@@ -30,6 +30,8 @@ pub fn init() {
     write_file("/proc", "modules",        crate::modules::format_report());
     write_file("/proc", "ptrace",         crate::ptrace::format_report());
     write_file("/proc", "jobs",           crate::job_control::format_report());
+    write_file("/proc", "namespaces",     crate::namespaces::format_report());
+    write_file("/proc", "syscall_proxy",  crate::syscall_proxy::format_report());
 
     // /proc/net/
     if let Ok(proc_node) = super::lookup("/proc") {
@@ -74,6 +76,8 @@ pub fn refresh() {
     write_file("/proc", "modules",        crate::modules::format_report());
     write_file("/proc", "ptrace",         crate::ptrace::format_report());
     write_file("/proc", "jobs",           crate::job_control::format_report());
+    write_file("/proc", "namespaces",     crate::namespaces::format_report());
+    write_file("/proc", "syscall_proxy",  crate::syscall_proxy::format_report());
     write_file("/proc/net", "tcp",        proc_net_tcp());
     write_file("/proc/net", "entropy",    proc_net_entropy());
     write_file("/ai",   "anomalies",     crate::anomaly::format_report());

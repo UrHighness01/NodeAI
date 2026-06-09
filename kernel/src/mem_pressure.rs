@@ -152,13 +152,72 @@ pub fn tick() {
     }
 
     // Under Critical pressure: identify the most memory-hungry user process
-    // and send it SIGSTOP (pause, not kill) to give the system breathing room.
+    // ── Causal OOM: proactive attribution before reclaim ─────────────────────
+    // Under Critical pressure, use the causal graph to find the process driving
+    // memory growth rather than blindly killing the heaviest task.
     if new_level == MemPressure::Critical {
-        if let Some(victim) = find_heaviest_user_task() {
-            crate::klog!(WARN, "mem_pressure: CRITICAL — pausing pid={} for reclaim", victim);
-            crate::scheduler::send_signal(victim, 19); // SIGSTOP
+        causal_oom_reclaim();
+    } else if new_level == MemPressure::High {
+        // High pressure: warn the likely causal driver with SIGUSR1 so it can
+        // voluntarily release caches before we reach Critical.
+        if let Some(driver) = causal_oom_driver() {
+            crate::klog!(INFO,
+                "mem_pressure: HIGH — causal driver pid={} warned with SIGUSR1", driver);
+            crate::scheduler::send_signal(driver, 10); // SIGUSR1
         }
     }
+}
+
+/// Walk the causal graph to find the process most responsible for the current
+/// memory pressure, then escalate: SIGSTOP first, then SIGKILL if we're truly OOM.
+fn causal_oom_reclaim() {
+    let driver = causal_oom_driver();
+    let victim  = driver.or_else(find_heaviest_user_task);
+
+    if let Some(pid) = victim {
+        let free_mb = crate::memory::free_mb();
+        let total_mb = crate::memory::total_ram_pages() * 4 / 1024;
+        let free_pct = if total_mb > 0 { free_mb * 100 / total_mb } else { 100 };
+
+        if free_pct < 2 {
+            // Truly out of memory — send SIGKILL.
+            crate::klog!(WARN,
+                "mem_pressure: OOM KILL pid={} (causal driver, {}% free)", pid, free_pct);
+            crate::scheduler::send_signal(pid, 9); // SIGKILL
+        } else {
+            // Soft reclaim — pause the driver.
+            crate::klog!(WARN,
+                "mem_pressure: CRITICAL — pausing causal driver pid={} ({}% free)",
+                pid, free_pct);
+            crate::scheduler::send_signal(pid, 19); // SIGSTOP
+        }
+    }
+}
+
+/// Identify the causal memory-pressure driver:
+/// - Pick the process with the highest (anomaly_score × mem_bytes) product,
+///   weighted by how many causal successors it has woken recently.
+/// - Falls back to the heaviest task if causal data is too sparse.
+fn causal_oom_driver() -> Option<crate::scheduler::Pid> {
+    let pids = crate::scheduler::all_pids();
+    if pids.is_empty() { return None; }
+
+    let mut best_pid: crate::scheduler::Pid = 0;
+    let mut best_score: u64 = 0;
+
+    for pid in &pids {
+        let mem    = crate::scheduler::task_mem_bytes(*pid);
+        let anom   = (crate::anomaly::score(*pid) * 1000.0) as u64;
+        // Causal fanout: how many successors has this pid woken?
+        let fanout = crate::causal::predict_successors(*pid as u64).len() as u64;
+        // Combined score: memory × anomaly × (1 + fanout)
+        let score  = mem.saturating_mul(anom.max(1)).saturating_mul(1 + fanout);
+        if score > best_score {
+            best_score = score;
+            best_pid   = *pid;
+        }
+    }
+    if best_pid != 0 { Some(best_pid) } else { None }
 }
 
 fn classify(free_pct: u8) -> MemPressure {

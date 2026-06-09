@@ -357,3 +357,324 @@ fn parse_dyn_so(data: &[u8]) -> Option<ElfImage> {
     }
     Some(ElfImage { entry: ehdr.e_entry, segments, interp: None, phdr_vaddr: None, phnum: ehdr.e_phnum })
 }
+
+// ── ELF relocation engine for kernel modules ──────────────────────────────────
+//
+// Supports relocatable ET_REL ELF objects (the output of `rustc --crate-type=cdylib`
+// or `cc -r`).  Processes SHT_RELA sections applying:
+//   R_X86_64_64    — absolute 64-bit address
+//   R_X86_64_PC32  — 32-bit PC-relative (call / jmp)
+//   R_X86_64_PLT32 — same as PC32 for our purposes (no PLT needed in-kernel)
+//   R_X86_64_32    — 32-bit absolute (zero-extended)
+//   R_X86_64_32S   — 32-bit absolute (sign-extended)
+//
+// The linker walks every SHT_RELA section, resolves the symbol against either
+// the module's own section table or the kernel's exported symbol table, and
+// patches the relocated bytes in place.
+
+const ET_REL:    u16 = 1;   // relocatable object
+const SHT_NULL:  u32 = 0;
+const SHT_PROGBITS: u32 = 1;
+const SHT_SYMTAB:   u32 = 2;
+const SHT_STRTAB:   u32 = 3;
+const SHT_RELA:     u32 = 4;
+const SHT_NOBITS:   u32 = 8;  // BSS
+
+const R_X86_64_NONE:  u32 = 0;
+const R_X86_64_64:    u32 = 1;
+const R_X86_64_PC32:  u32 = 2;
+const R_X86_64_32:    u32 = 10;
+const R_X86_64_32S:   u32 = 11;
+const R_X86_64_PLT32: u32 = 4;
+
+const STB_GLOBAL: u8 = 1;
+const STB_WEAK:   u8 = 2;
+
+#[derive(Debug, Clone, Copy)]
+#[repr(C)]
+pub struct Elf64Shdr {
+    pub sh_name:      u32,
+    pub sh_type:      u32,
+    pub sh_flags:     u64,
+    pub sh_addr:      u64,
+    pub sh_offset:    u64,
+    pub sh_size:      u64,
+    pub sh_link:      u32,
+    pub sh_info:      u32,
+    pub sh_addralign: u64,
+    pub sh_entsize:   u64,
+}
+
+#[derive(Debug, Clone, Copy)]
+#[repr(C)]
+struct Elf64Sym {
+    st_name:  u32,
+    st_info:  u8,
+    st_other: u8,
+    st_shndx: u16,
+    st_value: u64,
+    st_size:  u64,
+}
+
+#[derive(Debug, Clone, Copy)]
+#[repr(C)]
+struct Elf64Rela {
+    r_offset: u64,
+    r_info:   u64,
+    r_addend: i64,
+}
+
+impl Elf64Rela {
+    fn sym_idx(&self)  -> usize { (self.r_info >> 32) as usize }
+    fn rel_type(&self) -> u32   { (self.r_info & 0xFFFF_FFFF) as u32 }
+}
+
+/// Error type for the relocation engine.
+#[derive(Debug)]
+pub enum RelocError {
+    NotRelocatable,
+    BadSectionTable,
+    MissingSymbol(String),
+    Overflow32,
+    UnsupportedReloc(u32),
+    BadStrtab,
+}
+
+/// Kernel-exported symbol table entry.  Modules can call any symbol listed here.
+pub struct KernelExport {
+    pub name: &'static str,
+    pub addr: u64,
+}
+
+/// Resolve a kernel symbol name to its address.
+/// Function pointer → integer casts must happen at runtime, not const-eval time.
+pub fn resolve_kernel_symbol(name: &str) -> Option<u64> {
+    // These casts are evaluated at call time (runtime), not during const-init.
+    let exports: &[(&str, u64)] = &[
+        ("scheduler_uptime_ms",   crate::scheduler::uptime_ms   as *const () as u64),
+        ("scheduler_current_pid", crate::scheduler::current_pid as *const () as u64),
+        ("scheduler_send_signal", crate::scheduler::send_signal as *const () as u64),
+        ("vfs_write_file",        crate::vfs::write_file        as *const () as u64),
+        ("vfs_read_file",         crate::vfs::read_file         as *const () as u64),
+        ("entropy_fill",          crate::entropy::fill          as *const () as u64),
+        ("entropy_stir",          crate::entropy::stir          as *const () as u64),
+    ];
+    exports.iter().find(|(n, _)| *n == name).map(|(_, a)| *a)
+}
+
+/// Relocate a loaded module image in `buf` (mutable byte slice at `load_addr`).
+///
+/// `data` is the original ELF file bytes.  `buf` must be the writable mapping
+/// of the module already allocated at `load_addr`.
+///
+/// Returns `Ok(entry_addr)` — the virtual address of `module_init` if found, or
+/// `load_addr` as a fallback.
+pub fn relocate_module(data: &[u8], buf: &mut [u8], load_addr: u64) -> Result<u64, RelocError> {
+    if data.len() < core::mem::size_of::<Elf64Ehdr>() {
+        return Err(RelocError::NotRelocatable);
+    }
+    let ehdr: &Elf64Ehdr = unsafe { &*(data.as_ptr() as *const Elf64Ehdr) };
+    if ehdr.e_ident[0..4] != ELFMAG || ehdr.e_type != ET_REL {
+        return Err(RelocError::NotRelocatable);
+    }
+
+    let shdr_size = core::mem::size_of::<Elf64Shdr>();
+    let sh_off    = ehdr.e_shoff as usize;
+    let sh_count  = ehdr.e_shnum as usize;
+    if sh_off + sh_count * shdr_size > data.len() {
+        return Err(RelocError::BadSectionTable);
+    }
+
+    // ── Build per-section load addresses ─────────────────────────────────────
+    // For ET_REL, sections have no pre-assigned VA.  We lay them out linearly
+    // in the module buffer starting from load_addr.
+    let mut section_addrs: Vec<u64> = Vec::with_capacity(sh_count);
+    let mut cursor: u64 = load_addr;
+    for i in 0..sh_count {
+        let shdr = shdr_at(data, sh_off, i, shdr_size)?;
+        if shdr.sh_type == SHT_NOBITS || shdr.sh_type == SHT_NULL {
+            section_addrs.push(cursor);
+        } else if shdr.sh_size > 0 {
+            let align = shdr.sh_addralign.max(1);
+            cursor = (cursor + align - 1) & !(align - 1);
+            section_addrs.push(cursor);
+            // Copy section data into module buffer.
+            let off = shdr.sh_offset as usize;
+            let sz  = shdr.sh_size as usize;
+            if off + sz <= data.len() {
+                let buf_off = (cursor - load_addr) as usize;
+                if buf_off + sz <= buf.len() {
+                    buf[buf_off..buf_off + sz].copy_from_slice(&data[off..off + sz]);
+                }
+            }
+            cursor += shdr.sh_size;
+        } else {
+            section_addrs.push(cursor);
+        }
+    }
+
+    // ── Find .symtab and .strtab ──────────────────────────────────────────────
+    let (symtab_shdr, strtab_shdr) = find_symtab(data, sh_off, sh_count, shdr_size)?;
+    let syms = read_symbols(data, &symtab_shdr);
+    let strtab_off = strtab_shdr.sh_offset as usize;
+    let strtab_end = strtab_off + strtab_shdr.sh_size as usize;
+    let strtab = if strtab_end <= data.len() { &data[strtab_off..strtab_end] } else { &[] };
+
+    // ── Apply RELA relocations ────────────────────────────────────────────────
+    for i in 0..sh_count {
+        let shdr = shdr_at(data, sh_off, i, shdr_size)?;
+        if shdr.sh_type != SHT_RELA { continue; }
+
+        let target_sec = shdr.sh_info as usize; // section being relocated
+        if target_sec >= sh_count { continue; }
+        let target_addr = section_addrs[target_sec];
+
+        let rela_off  = shdr.sh_offset as usize;
+        let rela_size = core::mem::size_of::<Elf64Rela>();
+        let rela_count = (shdr.sh_size as usize) / rela_size;
+
+        for r in 0..rela_count {
+            let rela: Elf64Rela = unsafe {
+                core::ptr::read_unaligned(
+                    data.as_ptr().add(rela_off + r * rela_size) as *const Elf64Rela
+                )
+            };
+
+            let sym_idx = rela.sym_idx();
+            let sym = if sym_idx < syms.len() { syms[sym_idx] } else { continue };
+
+            // Resolve symbol value.
+            let sym_val: u64 = if sym.st_shndx == 0 {
+                // External symbol — look up in kernel exports or module sections.
+                let sym_name = read_str(strtab, sym.st_name as usize);
+                resolve_kernel_symbol(sym_name)
+                    .ok_or_else(|| RelocError::MissingSymbol(
+                        alloc::format!("{}", sym_name)
+                    ))?
+            } else if (sym.st_shndx as usize) < sh_count {
+                section_addrs[sym.st_shndx as usize] + sym.st_value
+            } else {
+                continue;
+            };
+
+            // Patch location in module buffer.
+            let patch_va  = target_addr + rela.r_offset;
+            let patch_off = (patch_va - load_addr) as usize;
+            let addend    = rela.r_addend;
+
+            apply_reloc(buf, patch_off, rela.rel_type(), sym_val, patch_va, addend)?;
+        }
+    }
+
+    // ── Find module_init entry point ──────────────────────────────────────────
+    let entry = find_symbol(strtab, &syms, "module_init", &section_addrs)
+        .unwrap_or(load_addr);
+
+    Ok(entry)
+}
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+
+fn shdr_at(data: &[u8], sh_off: usize, idx: usize, shdr_size: usize)
+    -> Result<Elf64Shdr, RelocError>
+{
+    let off = sh_off + idx * shdr_size;
+    if off + shdr_size > data.len() { return Err(RelocError::BadSectionTable); }
+    Ok(unsafe { core::ptr::read_unaligned(data.as_ptr().add(off) as *const Elf64Shdr) })
+}
+
+fn find_symtab(data: &[u8], sh_off: usize, sh_count: usize, shdr_size: usize)
+    -> Result<(Elf64Shdr, Elf64Shdr), RelocError>
+{
+    let mut symtab = None;
+    for i in 0..sh_count {
+        let sh = shdr_at(data, sh_off, i, shdr_size)?;
+        if sh.sh_type == SHT_SYMTAB { symtab = Some((i, sh)); break; }
+    }
+    let (symtab_idx, symtab_sh) = symtab.ok_or(RelocError::BadSectionTable)?;
+    // sh_link for SYMTAB points to the associated STRTAB.
+    let strtab_idx = symtab_sh.sh_link as usize;
+    let strtab_sh  = shdr_at(data, sh_off, strtab_idx, shdr_size)
+        .map_err(|_| RelocError::BadStrtab)?;
+    Ok((symtab_sh, strtab_sh))
+}
+
+fn read_symbols(data: &[u8], symtab: &Elf64Shdr) -> Vec<Elf64Sym> {
+    let sym_size  = core::mem::size_of::<Elf64Sym>();
+    let off       = symtab.sh_offset as usize;
+    let count     = (symtab.sh_size as usize) / sym_size;
+    let mut syms  = Vec::with_capacity(count);
+    for i in 0..count {
+        let p = off + i * sym_size;
+        if p + sym_size > data.len() { break; }
+        let s: Elf64Sym = unsafe { core::ptr::read_unaligned(data.as_ptr().add(p) as *const Elf64Sym) };
+        syms.push(s);
+    }
+    syms
+}
+
+fn read_str(strtab: &[u8], off: usize) -> &str {
+    if off >= strtab.len() { return ""; }
+    let slice = &strtab[off..];
+    let end   = slice.iter().position(|&b| b == 0).unwrap_or(slice.len());
+    core::str::from_utf8(&slice[..end]).unwrap_or("")
+}
+
+fn find_symbol(strtab: &[u8], syms: &[Elf64Sym], name: &str,
+               section_addrs: &[u64]) -> Option<u64>
+{
+    for s in syms {
+        if read_str(strtab, s.st_name as usize) == name
+            && (s.st_shndx as usize) < section_addrs.len()
+        {
+            return Some(section_addrs[s.st_shndx as usize] + s.st_value);
+        }
+    }
+    None
+}
+
+fn apply_reloc(buf: &mut [u8], off: usize, rel_type: u32,
+               sym: u64, pc: u64, addend: i64) -> Result<(), RelocError>
+{
+    match rel_type {
+        R_X86_64_NONE => {}
+
+        R_X86_64_64 => {
+            // S + A
+            let val = sym.wrapping_add(addend as u64);
+            if off + 8 > buf.len() { return Ok(()); }
+            buf[off..off+8].copy_from_slice(&val.to_le_bytes());
+        }
+
+        R_X86_64_PC32 | R_X86_64_PLT32 => {
+            // S + A - P  (32-bit PC-relative)
+            let val = (sym as i64).wrapping_add(addend).wrapping_sub(pc as i64);
+            if val > i32::MAX as i64 || val < i32::MIN as i64 {
+                return Err(RelocError::Overflow32);
+            }
+            if off + 4 > buf.len() { return Ok(()); }
+            buf[off..off+4].copy_from_slice(&(val as i32).to_le_bytes());
+        }
+
+        R_X86_64_32 => {
+            // S + A, zero-extended into 32 bits
+            let val = sym.wrapping_add(addend as u64);
+            if val > u32::MAX as u64 { return Err(RelocError::Overflow32); }
+            if off + 4 > buf.len() { return Ok(()); }
+            buf[off..off+4].copy_from_slice(&(val as u32).to_le_bytes());
+        }
+
+        R_X86_64_32S => {
+            // S + A, sign-extended into 32 bits
+            let val = (sym as i64).wrapping_add(addend);
+            if val > i32::MAX as i64 || val < i32::MIN as i64 {
+                return Err(RelocError::Overflow32);
+            }
+            if off + 4 > buf.len() { return Ok(()); }
+            buf[off..off+4].copy_from_slice(&(val as i32).to_le_bytes());
+        }
+
+        other => return Err(RelocError::UnsupportedReloc(other)),
+    }
+    Ok(())
+}

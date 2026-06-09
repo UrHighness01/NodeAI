@@ -495,6 +495,8 @@ pub fn exit_current_direct(pid: Pid, code: i32) -> ! {
     crate::syscall::cleanup_pid_vmas(pid);
     crate::ptrace::cleanup_pid(pid as u64);
     crate::job_control::cleanup_pid(pid);
+    crate::namespaces::cleanup_pid(pid);
+    crate::syscall_proxy::cleanup_pid(pid);
     if parent_pid != 0 {
         wake_pid(parent_pid);
         send_signal(parent_pid, 17); // SIGCHLD
@@ -538,6 +540,8 @@ pub fn exit_current(code: i32) -> ! {
     crate::mem_pressure::remove_pid(pid);
     crate::ptrace::cleanup_pid(pid as u64);
     crate::job_control::cleanup_pid(pid);
+    crate::namespaces::cleanup_pid(pid);
+    crate::syscall_proxy::cleanup_pid(pid);
 
     // Wake the parent and send SIGCHLD.
     if parent_pid != 0 {

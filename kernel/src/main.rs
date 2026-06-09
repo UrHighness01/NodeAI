@@ -76,6 +76,8 @@ pub mod entropy;           // behavioral entropy pool — /dev/random + getrando
 pub mod modules;           // AI-validated kernel module hot-swap (insmod/rmmod)
 pub mod ptrace;            // causal ptrace + predictive observability
 pub mod job_control;       // cognitive fg/bg with causal subgraph priority elevation
+pub mod namespaces;        // behavioral namespaces — AI-triggered dynamic isolation
+pub mod syscall_proxy;     // adaptive syscall proxy — AI-driven I/O pre-fetch + batching
 
 /// Bootloader configuration — tells the bootloader to map all physical memory
 /// at a dynamic virtual offset so we can access physical frames by VA.
@@ -302,6 +304,7 @@ fn idle_loop() -> ! {
                 now / 1000, tasks, free);
             crate::vfs::procfs::refresh();
             crate::page_cache::tick_writeback();
+            crate::syscall_proxy::tick();
         }
         x86_64::instructions::interrupts::enable_and_hlt();
     }

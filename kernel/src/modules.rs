@@ -8,12 +8,12 @@
 //! current system anomaly score, producing a float risk in [0, 1].
 //! Modules scoring above 0.80 are rejected with EPERM.
 //!
-//! After passing validation, modules are registered in MODULES and their
-//! ELF entry point is called if a suitable function pointer can be resolved
-//! (future: full ELF relocation; for now we track the image only).
+//! After passing validation, ET_REL modules are fully relocated via the
+//! elf::relocate_module() engine (R_X86_64_64/PC32/PLT32/32/32S) and their
+//! `module_init` entry point is called, just like Linux insmod.
 
 use spin::Mutex;
-use alloc::{collections::BTreeMap, format, string::String, vec, vec::Vec};
+use alloc::{collections::BTreeMap, format, string::String, vec::Vec};
 
 // ── Module state ──────────────────────────────────────────────────────────────
 
@@ -26,6 +26,8 @@ pub struct KernelModule {
     pub size:         usize,
     pub ai_risk:      f32,
     pub load_time_ms: u64,
+    pub entry_addr:   u64,     // resolved module_init VA (0 if ET_EXEC/not relocated)
+    pub relocated:    bool,    // true if full ELF relocation was applied
 }
 
 static MODULES: Mutex<BTreeMap<String, KernelModule>> = Mutex::new(BTreeMap::new());
@@ -102,15 +104,36 @@ pub fn load_module(data: &[u8], params: &str) -> Result<(), &'static str> {
 
     let risk = ai_validate(data, &name)?;
 
+    // ── ELF relocation for ET_REL objects ─────────────────────────────────────
+    // Allocate a kernel buffer at the next free module VA and apply relocations.
+    let (entry_addr, relocated) = try_relocate(data, &name);
+
     MODULES.lock().insert(name.clone(), KernelModule {
         name:         name.clone(),
         state:        ModuleState::Active,
         size:         data.len(),
         ai_risk:      risk,
         load_time_ms: crate::scheduler::uptime_ms(),
+        entry_addr,
+        relocated,
     });
 
-    crate::klog!(INFO, "modules: '{}' loaded ({} bytes, risk={:.3})", name, data.len(), risk);
+    crate::klog!(INFO,
+        "modules: '{}' loaded ({} bytes, risk={:.3}, relocated={}, entry={:#x})",
+        name, data.len(), risk, relocated, entry_addr
+    );
+
+    // Call module_init if the relocation succeeded and we have a valid entry.
+    if relocated && entry_addr != 0 {
+        // SAFETY: the module passed AI validation; it was relocated into kernel
+        // virtual address space.  We call it as a bare function with no args.
+        unsafe {
+            let init_fn: extern "C" fn() = core::mem::transmute(entry_addr);
+            init_fn();
+        }
+        crate::klog!(INFO, "modules: '{}' module_init() returned", name);
+    }
+
     Ok(())
 }
 
@@ -146,3 +169,38 @@ pub fn format_report() -> Vec<u8> {
 
 /// Return number of currently loaded modules.
 pub fn module_count() -> usize { MODULES.lock().len() }
+
+// ── ELF relocation helper ─────────────────────────────────────────────────────
+
+/// Try to relocate a ET_REL ELF image.  Returns (entry_va, relocated).
+/// On any error returns (0, false) and logs a warning.
+fn try_relocate(data: &[u8], name: &str) -> (u64, bool) {
+    // Check ELF type field — offset 16 in the ELF header, u16 LE.
+    if data.len() < 18 { return (0, false); }
+    let e_type = u16::from_le_bytes([data[16], data[17]]);
+    if e_type != 1 /* ET_REL */ { return (0, false); }
+
+    // Allocate module buffer: we use a heap Vec<u8> as our "module address space".
+    // On a real kernel this would be mapped to the module text VA region.
+    // Here we use the physical-offset window directly via a heap allocation.
+    let buf_size = data.len().next_power_of_two().max(4096);
+    let mut buf  = alloc::vec![0u8; buf_size];
+
+    let load_addr: u64 = buf.as_ptr() as u64;
+
+    match crate::elf::relocate_module(data, &mut buf, load_addr) {
+        Ok(entry) => {
+            // IMPORTANT: leak the Vec so the module code stays mapped.
+            // In a real kernel, this memory is tracked in MODULES and freed on rmmod.
+            let entry_va = if entry == load_addr { 0 } else { entry };
+            core::mem::forget(buf);
+            crate::klog!(INFO, "modules: '{}' relocated at {:#x}, entry={:#x}",
+                name, load_addr, entry_va);
+            (entry_va, true)
+        }
+        Err(e) => {
+            crate::klog!(WARN, "modules: '{}' relocation failed: {:?}", name, e);
+            (0, false)
+        }
+    }
+}

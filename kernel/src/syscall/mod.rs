@@ -603,9 +603,15 @@ pub unsafe extern "C" fn syscall_dispatch_extern(
     let (alert, score) = crate::anomaly::observe(pid, nr);
     if alert {
         crate::klog!(WARN, "ANOMALY: pid={} score={:.3} nr={}", pid, score, nr);
-        // Feed into AI security pipeline.
         ai_subsystem::event_bus::publish(
             ai_subsystem::event_bus::KernelEvent::SyscallIssued { pid, syscall_nr: nr });
+    }
+    // ── Behavioral namespace escalation ───────────────────────────────────────
+    crate::namespaces::update(pid, score);
+    // ── Adaptive syscall proxy: track pattern, enforce namespace blocks ───────
+    crate::syscall_proxy::observe_pattern(pid, nr, arg0, arg1 as usize);
+    if !crate::namespaces::allow_syscall(pid, nr, is_write_syscall(nr)) {
+        return EPERM;
     }
 
     // ── Behavioral syscall confinement ────────────────────────────────────────
@@ -3735,6 +3741,27 @@ unsafe fn sys_signalfd4(fd: i64, sigmask_ptr: u64, _sigsetsz: u64, _flags: i32) 
             EBADF
         }
     }
+}
+
+// ── is_write_syscall helper ───────────────────────────────────────────────────
+
+#[inline]
+fn is_write_syscall(nr: u64) -> bool {
+    matches!(nr,
+        1   |  // write
+        17  |  // pwrite64
+        20  |  // writev
+        44  |  // sendto
+        46  |  // sendmsg
+        83  |  // mkdir
+        85  |  // creat
+        86  |  // link
+        87  |  // unlink
+        88  |  // symlink
+        90  |  // chmod
+        92  |  // chown
+        257..=264 // openat, mkdirat, unlinkat, renameat, ...
+    )
 }
 
 // ── sys_init_module / sys_delete_module ──────────────────────────────────────
