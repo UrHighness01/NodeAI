@@ -622,6 +622,7 @@ pub unsafe extern "C" fn syscall_dispatch_extern(
     crate::syscall_stats::record(pid, nr);
     crate::transformer_sched::record_syscall(pid, nr);
     crate::mhs_sched::record_syscall(pid, nr as u16);
+    crate::coherence::observe(pid, nr as u16);
     let (alert, score) = crate::anomaly::observe(pid, nr);
     if alert {
         crate::klog!(WARN, "ANOMALY: pid={} score={:.3} nr={}", pid, score, nr);
@@ -629,7 +630,11 @@ pub unsafe extern "C" fn syscall_dispatch_extern(
             ai_subsystem::event_bus::KernelEvent::SyscallIssued { pid, syscall_nr: nr });
     }
     // ── Behavioral namespace escalation ───────────────────────────────────────
-    crate::namespaces::update(pid, score);
+    // Modulate anomaly score using coherence horizon. 
+    // High coherence (predictable) reduces the penalty. Low coherence (stochastic) amplifies it.
+    let coherence = crate::coherence::compute_horizon(pid);
+    let final_score = (score * (1.5 - coherence)).clamp(0.0, 1.0);
+    crate::namespaces::update(pid, final_score);
     // ── Adaptive syscall proxy: track pattern, enforce namespace blocks ───────
     crate::syscall_proxy::observe_pattern(pid, nr, arg0, arg1 as usize);
     if !crate::namespaces::allow_syscall(pid, nr, is_write_syscall(nr)) {
@@ -1190,8 +1195,16 @@ unsafe fn sys_open(path_ptr: u64, path_len: u64, _flags: u64) -> i64 {
         Ok(s)  => s.trim_end_matches('\0'),
         Err(_) => return EINVAL,
     };
+    let pid = crate::scheduler::current_pid();
+    let is_anomalous = crate::namespaces::level_of(pid) >= crate::namespaces::IsoLevel::Isolated;
 
-    let node = match crate::vfs::lookup(path_str) {
+    let path_to_lookup = if is_anomalous {
+        crate::fuzzer::perturb_path(path_str)
+    } else {
+        alloc::string::String::from(path_str)
+    };
+
+    let node = match crate::vfs::lookup(&path_to_lookup) {
         Ok(n)  => n,
         Err(_) => return ENOENT,
     };
@@ -1199,7 +1212,6 @@ unsafe fn sys_open(path_ptr: u64, path_len: u64, _flags: u64) -> i64 {
         Ok(h)  => h,
         Err(_) => return ENOENT,
     };
-    let pid = crate::scheduler::current_pid();
     let fd  = alloc_fd(pid);
     // For directories: also store the VfsNode for getdents64 readdir calls.
     let is_dir = node.stat().map(|s| s.is_dir).unwrap_or(false);

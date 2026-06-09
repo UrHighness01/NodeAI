@@ -66,6 +66,8 @@ mod llm;
 mod predictive_hibernate;
 pub mod syscall_stats;  // per-task syscall histograms
 pub mod anomaly;        // causal anomaly detector
+pub mod coherence;      // coherence-horizon anomaly attribution
+pub mod fuzzer;         // in-kernel syscall parseltongue fuzzer
 pub mod tunables;       // live AI-adjustable kernel parameters
 pub mod fingerprint;    // behavioral cluster classifier
 pub mod causal;         // live causal process wakeup DAG
