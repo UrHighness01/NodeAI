@@ -634,7 +634,8 @@ pub fn map_user_range(
     let pages = (size + page_sz - 1) / page_sz;
     for i in 0..pages {
         let v = vaddr + i * page_sz;
-        let phys = super::pmm::alloc_frame().ok_or("map_user_range: OOM")?;
+        let pid = crate::scheduler::current_pid();
+        let phys = super::self_model::alloc_frame_predictive(pid).ok_or("map_user_range: OOM")?;
 
         // Zero the frame via the physical-memory window before mapping.
         unsafe {
