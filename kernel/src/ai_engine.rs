@@ -335,6 +335,7 @@ pub fn update_task_profile(pid: u64, profile: &AiProfile) {
 
 /// Build a minimal bootstrap scheduler model (5→8→2) with near-zero weights.
 /// Output will always be close to the neutral fallback until real weights are loaded.
+/// After building, quantizes to INT8 for memory efficiency.
 fn build_default_scheduler_model() -> SequentialModel {
     let mut m = SequentialModel::new();
     m.add_layer(DenseLayer {
@@ -351,6 +352,18 @@ fn build_default_scheduler_model() -> SequentialModel {
         biases:     ai_subsystem::aligned_vec::AlignedVec::from(alloc::vec![0.5f32, 0.0f32].as_slice()),
         activation: Activation::Sigmoid,
     });
+
+    // Quantize each layer to INT8, log memory savings
+    let f32_bytes: usize = m.layers.iter().map(|l| l.weights.len() * 4 + l.biases.len() * 4).sum();
+    let q0 = m.layers[0].quantize();
+    let q1 = m.layers[1].quantize();
+    let i8_bytes: usize = q0.qweights.len() + q1.qweights.len()
+        + q0.scales.len() * 4 + q1.scales.len() * 4
+        + q0.biases.len() * 4 + q1.biases.len() * 4;
+    let saved_pct = if f32_bytes > 0 { (f32_bytes - i8_bytes) * 100 / f32_bytes } else { 0 };
+    crate::klog!(INFO, "ai_engine: scheduler model quantized — f32={}B → INT8={}B (saved {}%)",
+        f32_bytes, i8_bytes, saved_pct);
+
     m
 }
 
