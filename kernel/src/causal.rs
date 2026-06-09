@@ -103,6 +103,15 @@ pub fn record_wakeup(waker_pid: u64, wakee_pid: u64) {
     crate::scheduler::set_woke_by(wakee_pid, waker_pid);
 }
 
+/// Record that the AI subsystem autonomously applied a security constraint
+/// (e.g., capability revocation) on a process. This creates a causal edge
+/// from the AI to the degraded process, preventing the AI from later
+/// misinterpreting the process's subsequent crashes as novel anomalies.
+pub fn record_constraint(pid: u64) {
+    let uptime_ms = crate::scheduler::uptime_ms();
+    GRAPH.lock().record(AI_KERNEL_PID, pid, uptime_ms);
+}
+
 /// Look up who most recently woke a given PID (for anomaly enrichment).
 pub fn last_waker(pid: u64) -> Option<u64> {
     GRAPH.lock().last_waker(pid)

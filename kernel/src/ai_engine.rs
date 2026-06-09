@@ -113,6 +113,18 @@ pub fn process_tick(uptime_ms: u64) {
         }
     }
 
+    // Process background semantic syscall sandboxing (Round 20 Phase 1)
+    crate::semantic_gate::get_gatekeeper().process_queue();
+
+    // Flush Adaptive Causal Deferral events (Round 20 Phase 2)
+    crate::causal_deferral::get_deferral_buffer().flush();
+
+    // Round 19 Phase 1: Causal Memory Ballooning
+    // Run every 2000ms to proactively shape memory distribution based on behavioral valence.
+    if uptime_ms > 0 && uptime_ms % 2000 == 0 {
+        crate::mem_pressure::proactive_causal_resourcing();
+    }
+
     // Round 17 Phase 1: Automated Hyper-parameter Evolution with 60s Averaging
     if uptime_ms > 0 && uptime_ms % 5000 == 0 {
         let phi = crate::anomaly::global_phi();
@@ -209,6 +221,11 @@ fn apply_decision(decision: AiDecision) {
                     // Low valence (chaotic/negative) + high anomaly -> demote to lowest priority.
                     crate::causal::record_wakeup(crate::causal::AI_KERNEL_PID, pid);
                     crate::scheduler::adjust_priority(pid, 20);
+
+                    // Autonomous Revocation: revoke dangerous capabilities
+                    crate::security::revoke_capability(pid, crate::security::cap::NET_RAW);
+                    crate::security::revoke_capability(pid, crate::security::cap::SYS_ADMIN);
+                    crate::causal::record_constraint(pid);
 
                     // Round 16 Phase 4: Affective-Causal Scheduler Integration
                     // Check if its causal fan-out processes share a high negative valence.
