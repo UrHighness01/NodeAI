@@ -51,14 +51,14 @@ pub fn load_from_bytes(data: &[u8]) -> Result<SequentialModel, ModelLoadError> {
             return Err(ModelLoadError::TruncatedData);
         }
 
-        let mut weights = Vec::with_capacity(weight_count);
+        let mut weights = crate::aligned_vec::AlignedVec::with_capacity(weight_count);
         for i in 0..weight_count {
             let off = cursor + i * 4;
             weights.push(f32::from_le_bytes(data[off..off+4].try_into().unwrap()));
         }
         cursor += weight_count * 4;
 
-        let mut biases = Vec::with_capacity(bias_count);
+        let mut biases = crate::aligned_vec::AlignedVec::with_capacity(bias_count);
         for i in 0..bias_count {
             let off = cursor + i * 4;
             biases.push(f32::from_le_bytes(data[off..off+4].try_into().unwrap()));

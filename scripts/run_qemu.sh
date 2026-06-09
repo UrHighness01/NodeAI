@@ -97,7 +97,7 @@ echo "==> Starting QEMU (${MEMORY} MiB RAM)..."
 
 QEMU_ARGS=(
     -machine q35
-    -cpu qemu64,+avx2,+rdrand,+rdseed
+    -cpu Haswell
     -m "${MEMORY}M"
     -serial stdio
     -no-reboot

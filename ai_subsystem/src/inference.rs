@@ -7,6 +7,7 @@
 //!   - AVX2 accelerated matrix multiply (future extension)
 
 use alloc::vec::Vec;
+use crate::aligned_vec::AlignedVec;
 
 /// Activation function for a layer.
 #[derive(Debug, Clone, Copy)]
@@ -19,11 +20,40 @@ pub enum Activation {
 
 /// A single dense layer: weight matrix + bias vector.
 pub struct DenseLayer {
-    pub weights: Vec<f32>,   // [out_size * in_size] row-major
-    pub biases: Vec<f32>,    // [out_size]
+    pub weights: AlignedVec<f32, 32>,   // [out_size * in_size] row-major
+    pub biases: AlignedVec<f32, 32>,    // [out_size]
     pub in_size: usize,
     pub out_size: usize,
     pub activation: Activation,
+}
+
+#[target_feature(enable = "avx2")]
+pub unsafe fn avx2_dot_product_impl(weights: &[f32], inputs: &[f32]) -> f32 {
+    use core::arch::x86_64::{_mm256_load_ps, _mm256_mul_ps, _mm256_setzero_ps, _mm256_add_ps, _mm256_storeu_ps};
+    let mut sum = _mm256_setzero_ps();
+    let mut i = 0;
+    while i + 8 <= weights.len() && i + 8 <= inputs.len() {
+        let w = _mm256_load_ps(weights.as_ptr().add(i));
+        let x = _mm256_load_ps(inputs.as_ptr().add(i));
+        let m = _mm256_mul_ps(w, x);
+        sum = _mm256_add_ps(sum, m);
+        i += 8;
+    }
+    
+    let mut arr = [0.0; 8];
+    _mm256_storeu_ps(arr.as_mut_ptr(), sum);
+    let mut total: f32 = arr.iter().sum();
+    
+    while i < weights.len() && i < inputs.len() {
+        total += weights[i] * inputs[i];
+        i += 1;
+    }
+    
+    total
+}
+
+pub fn avx2_dot_product(weights: &[f32], inputs: &[f32]) -> f32 {
+    unsafe { avx2_dot_product_impl(weights, inputs) }
 }
 
 impl DenseLayer {
@@ -36,7 +66,7 @@ impl DenseLayer {
         for i in 0..self.out_size {
             let mut sum = self.biases[i];
             let row = &self.weights[i * self.in_size..(i + 1) * self.in_size];
-            // TODO: replace with AVX2 dot-product intrinsic when SMP/SIMD path is ready
+            // Scalar dot product for now; AVX2 will be hooked up inside with_simd in Phase 2
             for (w, x) in row.iter().zip(input.iter()) {
                 sum += w * x;
             }

@@ -340,15 +340,15 @@ fn build_default_scheduler_model() -> SequentialModel {
     m.add_layer(DenseLayer {
         in_size:    5,
         out_size:   8,
-        weights:    alloc::vec![0.01f32; 5 * 8],
-        biases:     alloc::vec![0.0f32; 8],
+        weights:    ai_subsystem::aligned_vec::AlignedVec::from(alloc::vec![0.01f32; 5 * 8].as_slice()),
+        biases:     ai_subsystem::aligned_vec::AlignedVec::from(alloc::vec![0.0f32; 8].as_slice()),
         activation: Activation::ReLU,
     });
     m.add_layer(DenseLayer {
         in_size:    8,
         out_size:   2,
-        weights:    alloc::vec![0.01f32; 8 * 2],
-        biases:     alloc::vec![0.5f32, 0.0f32],
+        weights:    ai_subsystem::aligned_vec::AlignedVec::from(alloc::vec![0.01f32; 8 * 2].as_slice()),
+        biases:     ai_subsystem::aligned_vec::AlignedVec::from(alloc::vec![0.5f32, 0.0f32].as_slice()),
         activation: Activation::Sigmoid,
     });
     m
@@ -476,21 +476,23 @@ pub fn load_llm_weights(data: &[u8]) -> bool {
             return false;
         }
 
-        let mut weights = alloc::vec![0f32; in_size * out_size];
-        for (i, w) in weights.iter_mut().enumerate() {
-            *w = f32::from_le_bytes([
+        let mut weights = ai_subsystem::aligned_vec::AlignedVec::with_capacity(in_size * out_size);
+        for i in 0..(in_size * out_size) {
+            let w = f32::from_le_bytes([
                 data[cursor + i*4], data[cursor + i*4+1],
                 data[cursor + i*4+2], data[cursor + i*4+3],
             ]);
+            weights.push(w);
         }
         cursor += w_bytes;
 
-        let mut biases = alloc::vec![0f32; out_size];
-        for (i, b) in biases.iter_mut().enumerate() {
-            *b = f32::from_le_bytes([
+        let mut biases = ai_subsystem::aligned_vec::AlignedVec::with_capacity(out_size);
+        for i in 0..out_size {
+            let b = f32::from_le_bytes([
                 data[cursor + i*4], data[cursor + i*4+1],
                 data[cursor + i*4+2], data[cursor + i*4+3],
             ]);
+            biases.push(b);
         }
         cursor += b_bytes;
 

@@ -19,3 +19,4 @@ pub mod safety;
 pub mod event_bus;
 pub mod audit;
 pub mod vector_store;
+pub mod aligned_vec;

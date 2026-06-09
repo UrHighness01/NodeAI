@@ -73,6 +73,7 @@ pub mod critic;         // adversarial critic for scheduler hardening
 pub mod adversarial_critic; // adversarial security critic for namespace hardening
 pub mod el_engine;      // scriptable kernel policy hooks
 pub mod semantic_sandbox; // INT8 semantic intent sandboxing
+pub mod semantic_gate;    // semantic syscall gatekeeper with fast-path cache
 pub mod hot_lock;       // AI-managed hot-lock splitting
 pub mod tunables;       // live AI-adjustable kernel parameters
 pub mod fingerprint;    // behavioral cluster classifier
@@ -80,6 +81,7 @@ pub mod causal;         // live causal process wakeup DAG
 pub mod transformer_sched; // transformer-based scheduling policy
 pub mod mhs_sched;         // MHS O(T) GLA scheduler (cross-project: Project-M)
 pub mod gla_prefetch;      // per-process persistent GLA page-fault advisor (Project-L)
+pub mod causal_deferral;   // causal-deferred event processing
 pub mod causal_prefetch;   // causal-linked fork-time I/O prefetching
 pub mod mem_pressure;      // memory pressure monitor + AI-aware reclaim
 pub mod page_cache;        // unified page cache — file data keyed by (inode, page_off)
@@ -91,6 +93,7 @@ pub mod namespaces;        // behavioral namespaces — AI-triggered dynamic iso
 pub mod syscall_proxy;     // adaptive syscall proxy — AI-driven I/O pre-fetch + batching
 pub mod meta_cognitive;    // meta-cognitive reflexive loop
 pub mod ubot_api;          // autonomous ubot metacognitive agent API
+pub mod simd_context;      // AVX2 SIMD xsave/xrstor infrastructure
 
 /// Bootloader configuration — tells the bootloader to map all physical memory
 /// at a dynamic virtual offset so we can access physical frames by VA.
@@ -253,6 +256,23 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     net::init_hosts();
 
     // ── Phase 8: AI subsystem ────────────────────────────────────────────────
+    simd_context::init();
+
+    // Verify AVX2 dot product matches scalar
+    let mut aligned_weights = ai_subsystem::aligned_vec::AlignedVec::<f32, 32>::new();
+    let mut aligned_inputs = ai_subsystem::aligned_vec::AlignedVec::<f32, 32>::new();
+    for i in 0..16 {
+        aligned_weights.push(i as f32);
+        aligned_inputs.push((16 - i) as f32);
+    }
+    let scalar_res: f32 = aligned_weights.iter().zip(aligned_inputs.iter()).map(|(w, x)| w * x).sum();
+    let avx_res = simd_context::with_simd(|| ai_subsystem::inference::avx2_dot_product(aligned_weights.as_slice(), aligned_inputs.as_slice()));
+    if (scalar_res - avx_res).abs() < 1e-4 {
+        klog!(INFO, "SIMD: avx2_dot_product matches scalar output ({})", avx_res);
+    } else {
+        klog!(ERROR, "SIMD mismatch: scalar={} avx={}", scalar_res, avx_res);
+    }
+
     ai_engine::init();
     fingerprint::init();
     transformer_sched::init();
