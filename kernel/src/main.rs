@@ -66,10 +66,21 @@ mod llm;
 mod predictive_hibernate;
 pub mod syscall_stats;  // per-task syscall histograms
 pub mod anomaly;        // causal anomaly detector
+pub mod coherence;      // coherence-horizon anomaly attribution
+pub mod fuzzer;         // in-kernel syscall parseltongue fuzzer
+pub mod autotune;       // dynamic EMA parameter adaptation
+pub mod critic;         // adversarial critic for scheduler hardening
+pub mod adversarial_critic; // adversarial security critic for namespace hardening
+pub mod el_engine;      // scriptable kernel policy hooks
+pub mod semantic_sandbox; // INT8 semantic intent sandboxing
+pub mod hot_lock;       // AI-managed hot-lock splitting
 pub mod tunables;       // live AI-adjustable kernel parameters
 pub mod fingerprint;    // behavioral cluster classifier
 pub mod causal;         // live causal process wakeup DAG
 pub mod transformer_sched; // transformer-based scheduling policy
+pub mod mhs_sched;         // MHS O(T) GLA scheduler (cross-project: Project-M)
+pub mod gla_prefetch;      // per-process persistent GLA page-fault advisor (Project-L)
+pub mod causal_prefetch;   // causal-linked fork-time I/O prefetching
 pub mod mem_pressure;      // memory pressure monitor + AI-aware reclaim
 pub mod page_cache;        // unified page cache — file data keyed by (inode, page_off)
 pub mod entropy;           // behavioral entropy pool — /dev/random + getrandom()
@@ -242,6 +253,9 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     ai_engine::init();
     fingerprint::init();
     transformer_sched::init();
+    mhs_sched::init();
+    gla_prefetch::init();
+    el_engine::init();
 
     // ── Phase 12b: Populate /proc and /ai virtual filesystem entries ──────────
     vfs::procfs::init();
@@ -259,6 +273,10 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     // ── Phase 11: Syscall fast-path (LSTAR/STAR/FMASK MSRs) ──────────────────
     syscall::init_lstar();
     klog!(INFO, "SYSCALL: fast-path active");
+
+    // ── Phase 12: Adversarial Security Critic ──────────────────────────────
+    adversarial_critic::init();
+    klog!(INFO, "CRITIC: Adversarial security critic thread spawned");
 
     klog!(INFO, "NodeAI Kernel boot complete — entering idle loop");
     vga_println!("NodeAI boot complete. AI kernel online.");
@@ -281,6 +299,7 @@ fn idle_loop() -> ! {
         wifi::poll();
         mem_pressure::tick();
         entropy::tick();
+        crate::critic::tick();
         net::http_server_poll();
         net::ssh_server_poll();
         crate::desktop::browser_fetch_tick();

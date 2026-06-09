@@ -4,9 +4,10 @@ use bootloader_api::BootInfo;
 use core::sync::atomic::{AtomicU64, Ordering};
 
 mod pmm;   // Physical Memory Manager (buddy allocator)
-mod vmm;   // Virtual Memory Manager  (page tables)
+pub mod vmm;   // Virtual Memory Manager  (page tables)
 mod heap;  // Kernel linked-list heap
 pub mod slab; // Slab allocator for fixed-size kernel objects
+pub mod self_model;
 
 pub use heap::KERNEL_HEAP;
 pub use vmm::{map_page, unmap_page, translate, map_mmio, map_user_range,

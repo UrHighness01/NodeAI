@@ -165,6 +165,8 @@ pub struct Task {
     pub stack_canary: u64,
     /// Physical-offset virtual address where the canary lives (bottom of stack).
     pub stack_canary_addr: u64,
+    /// Snapshot of the MHS FastState (Phase 3)
+    pub mhs_snapshot: Option<[f32; 16]>,
 }
 
 impl Task {
@@ -240,6 +242,7 @@ impl Task {
             sched_count:           0,
             stack_canary:      0,
             stack_canary_addr: 0,
+            mhs_snapshot:      None,
         }
     }
 
@@ -299,9 +302,9 @@ impl Task {
             runnable_at:            0,
             sched_latency_total_us: 0,
             sched_count:            0,
-            stack_canary:      0,
-            stack_canary_addr: 0,
+            stack_canary:           0,
+            stack_canary_addr:      0,
+            mhs_snapshot:           self.mhs_snapshot.clone(),
         })
     }
 }
-

@@ -10,7 +10,7 @@ use alloc::collections::BTreeMap;
 use spin::Mutex;
 
 /// Global task table: PID → Task.
-static TASKS: Mutex<BTreeMap<Pid, Task>> = Mutex::new(BTreeMap::new());
+pub(crate) static TASKS: Mutex<BTreeMap<Pid, Task>> = Mutex::new(BTreeMap::new());
 static NEXT_PID: core::sync::atomic::AtomicU64 =
     core::sync::atomic::AtomicU64::new(1);
 
@@ -844,4 +844,9 @@ pub fn task_name(pid: Pid) -> Option<alloc::string::String> {
 /// Return an estimate of memory used by a task in bytes (user_brk as a proxy).
 pub fn task_mem_bytes(pid: Pid) -> u64 {
     TASKS.lock().get(&pid).map(|t| t.user_brk).unwrap_or(0)
+}
+
+/// Return the CR3 (PML4) value for a task, or None if the task does not exist.
+pub fn get_task_cr3(pid: Pid) -> Option<u64> {
+    TASKS.lock().get(&pid).map(|t| t.cr3)
 }

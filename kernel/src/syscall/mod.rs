@@ -621,6 +621,9 @@ pub unsafe extern "C" fn syscall_dispatch_extern(
     // Per-task histogram, anomaly detection, and transformer context (all O(1)).
     crate::syscall_stats::record(pid, nr);
     crate::transformer_sched::record_syscall(pid, nr);
+    crate::mhs_sched::record_syscall(pid, nr as u16);
+    crate::coherence::observe(pid, nr as u16);
+    crate::memory::self_model::record_syscall(pid, nr as u16);
     let (alert, score) = crate::anomaly::observe(pid, nr);
     if alert {
         crate::klog!(WARN, "ANOMALY: pid={} score={:.3} nr={}", pid, score, nr);
@@ -628,7 +631,11 @@ pub unsafe extern "C" fn syscall_dispatch_extern(
             ai_subsystem::event_bus::KernelEvent::SyscallIssued { pid, syscall_nr: nr });
     }
     // ── Behavioral namespace escalation ───────────────────────────────────────
-    crate::namespaces::update(pid, score);
+    // Modulate anomaly score using coherence horizon. 
+    // High coherence (predictable) reduces the penalty. Low coherence (stochastic) amplifies it.
+    let coherence = crate::coherence::compute_horizon(pid);
+    let final_score = (score * (1.5 - coherence)).clamp(0.0, 1.0);
+    crate::namespaces::update(pid, final_score);
     // ── Adaptive syscall proxy: track pattern, enforce namespace blocks ───────
     crate::syscall_proxy::observe_pattern(pid, nr, arg0, arg1 as usize);
     if !crate::namespaces::allow_syscall(pid, nr, is_write_syscall(nr)) {
@@ -1000,6 +1007,13 @@ unsafe fn sys_read(fd: u64, buf_ptr: u64, len: u64) -> i64 {
                             }
                         }
                     }
+                    // Record file touch for causal-linked fork prefetch.
+                    // Use path hash as stable inode surrogate (we don't track real inodes here).
+                    if let Some(path) = FD_PATH_TABLE.lock().get(&(pid, fd)).cloned() {
+                        let ino_hash: u64 = path.bytes().fold(0xcbf29ce484222325u64,
+                            |h, b| h.wrapping_mul(0x100000001b3).wrapping_add(b as u64));
+                        crate::causal_prefetch::record_touch(pid, ino_hash, 0);
+                    }
                     n as i64
                 }
                 Err(crate::vfs::VfsError::WouldBlock) => {
@@ -1182,8 +1196,23 @@ unsafe fn sys_open(path_ptr: u64, path_len: u64, _flags: u64) -> i64 {
         Ok(s)  => s.trim_end_matches('\0'),
         Err(_) => return EINVAL,
     };
+    let pid = crate::scheduler::current_pid();
+    
+    // Semantic Syscall Sandboxing Phase
+    if !crate::semantic_sandbox::is_semantically_safe(pid, path_str) {
+        crate::klog!(WARN, "semantic_sandbox: Dropped sys_open for anomalous intent: {}", path_str);
+        return -13; // EACCES
+    }
 
-    let node = match crate::vfs::lookup(path_str) {
+    let is_anomalous = crate::namespaces::level_of(pid) >= crate::namespaces::IsoLevel::Isolated;
+
+    let path_to_lookup = if is_anomalous {
+        crate::fuzzer::perturb_path(path_str)
+    } else {
+        alloc::string::String::from(path_str)
+    };
+
+    let node = match crate::vfs::lookup(&path_to_lookup) {
         Ok(n)  => n,
         Err(_) => return ENOENT,
     };
@@ -1191,7 +1220,6 @@ unsafe fn sys_open(path_ptr: u64, path_len: u64, _flags: u64) -> i64 {
         Ok(h)  => h,
         Err(_) => return ENOENT,
     };
-    let pid = crate::scheduler::current_pid();
     let fd  = alloc_fd(pid);
     // For directories: also store the VfsNode for getdents64 readdir calls.
     let is_dir = node.stat().map(|s| s.is_dir).unwrap_or(false);
@@ -1299,6 +1327,7 @@ unsafe fn sys_mmap(addr: u64, len: u64, prot: u64, flags: u64, fd: i64, offset: 
     };
 
     let pid = crate::scheduler::current_pid();
+    crate::memory::self_model::record_allocation(pid, len_aligned as usize);
 
     // File-backed lazy mmap: fd != -1 maps a file region on demand.
     // Instead of eagerly copying the entire file at mmap() time, we register
@@ -1388,6 +1417,28 @@ pub fn demand_page_vma(pid: u64, vaddr: u64) -> bool {
                         } else { 0 }
                     });
                     crate::klog!(DEBUG, "mmap file-fault: pid={} va={:#x} file_off={}", pid, page_aligned, page_file_off);
+
+                    // Record file touch for causal-linked prefetch (on_fork will warm this).
+                    crate::causal_prefetch::record_touch(pid, fv.ino, page_file_off);
+
+                    // GLA memory advisor: predict next VPN to prefetch.
+                    let vpn = page_aligned >> 12;
+                    if let Some(predicted_vpn) = crate::gla_prefetch::on_fault(pid, vpn) {
+                        let predicted_va = predicted_vpn << 12;
+                        // Only prefault if within this file-backed VMA's range
+                        if predicted_va >= vma_start && predicted_va < fv.end {
+                            let pred_off = fv.file_off + (predicted_va - vma_start);
+                            let mut gla_tmp: alloc::vec::Vec<u8> = alloc::vec![0u8; 4096];
+                            crate::page_cache::read_bytes(fv.ino, pred_off, &mut gla_tmp, |poff, frame| {
+                                if let Ok(node) = crate::vfs::lookup(&fv.file_path) {
+                                    if let Ok(mut fh) = node.open() {
+                                        let _ = fh.seek(poff);
+                                        fh.read(frame).unwrap_or(0)
+                                    } else { 0 }
+                                } else { 0 }
+                            });
+                        }
+                    }
 
                     // AI prefetch: speculatively warm the page cache for ahead pages.
                     // Prefetch 2 pages for random-access processes, 4 for sequential.
@@ -1756,8 +1807,13 @@ unsafe fn sys_execve(path_ptr: u64, argv_ptr: u64, envp_ptr: u64) -> i64 {
 unsafe fn sys_fork() -> i64 {
     let parent_pid = crate::scheduler::current_pid();
     match crate::scheduler::fork_task(parent_pid) {
-        Some(child_pid) => child_pid as i64,
-        None            => EINVAL,
+        Some(child_pid) => {
+            // Causal-linked prefetch: warm page cache for child using parent's
+            // causal ancestry touch log (Project-L + causal.rs cross-integration).
+            crate::causal_prefetch::on_fork(child_pid, parent_pid);
+            child_pid as i64
+        }
+        None => EINVAL,
     }
 }
 
@@ -1852,7 +1908,10 @@ unsafe fn sys_brk(addr: u64) -> i64 {
     let size = new_aligned - base_brk;
 
     match crate::memory::map_user_range(base_brk, size, true, false) {
-        Ok(())  => { crate::scheduler::set_user_brk(pid, new_aligned); new_aligned as i64 }
+        Ok(())  => {
+            crate::memory::self_model::record_allocation(pid, size as usize);
+            crate::scheduler::set_user_brk(pid, new_aligned); new_aligned as i64
+        }
         Err(_)  => base_brk as i64,
     }
 }
@@ -3218,8 +3277,20 @@ unsafe fn sys_connect(sockfd: u64, addr_ptr: u64, alen: u64) -> i64 {
     let remote_port = u16::from_be(port_be);
     let remote_ip   = addr_be.to_be_bytes(); // network order → [a, b, c, d]
 
-    // Verify sockfd exists and is an unconnected socket.
     let pid = crate::scheduler::current_pid();
+
+    // ── Hardened Raw Socket Leak Suppression ─────────────────────────────────
+    let is_isolated = crate::namespaces::level_of(pid) >= crate::namespaces::IsoLevel::Isolated;
+    if is_isolated {
+        // Tor SOCKS5 default port is 9050. We drop connections to anything else.
+        if remote_ip != [127, 0, 0, 1] || remote_port != 9050 {
+            crate::klog!(WARN, "namespaces: ISOLATED pid={} DROPPED raw socket leak to {}.{}.{}.{}:{}", 
+                pid, remote_ip[0], remote_ip[1], remote_ip[2], remote_ip[3], remote_port);
+            return EPERM;
+        }
+    }
+
+    // Verify sockfd exists and is an unconnected socket.
     if !FD_TABLE.lock().contains_key(&(pid, sockfd)) { return EBADF; }
 
     // Active TCP open — blocks (yields CPU) until SYN-ACK or timeout.

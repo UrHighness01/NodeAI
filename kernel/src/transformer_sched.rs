@@ -572,6 +572,14 @@ pub fn record_wait(pid: u64, wait_us: u64) {
     }
 }
 
+/// Adversarial Critic endpoint: allows the Critic GAN to feed stress workloads
+/// into the SGD loop to harden the scheduling weights.
+pub fn train_adversarial(syscalls: &[u16; CONTEXT_LEN], target: [f32; N_OUTPUTS]) {
+    if let Some(model) = MODEL.lock().as_mut() {
+        model.sgd_step(syscalls, target);
+    }
+}
+
 /// Run transformer forward pass. Returns None if context not warm yet.
 pub fn predict(pid: u64) -> Option<SchedDecision> {
     let ctx_snapshot = {
