@@ -808,7 +808,7 @@ pub unsafe extern "C" fn syscall_dispatch_extern(
         nr::LISTEN        => sys_listen(arg0, arg1),
         nr::SENDTO        => sys_sendto(arg0, arg1, arg2, arg3, arg4, arg5),
         nr::RECVFROM      => sys_recvfrom(arg0, arg1, arg2, arg3, arg4, arg5),
-        nr::SHUTDOWN      => 0,
+        nr::SHUTDOWN      => sys_shutdown(arg0, arg1),
         nr::GETSOCKNAME   => sys_getsockname(arg0, arg1, arg2),
         nr::GETPEERNAME   => sys_getpeername(arg0, arg1, arg2),
         nr::SETSOCKOPT    => sys_setsockopt(arg0, arg1, arg2, arg3, arg4),
@@ -3467,6 +3467,23 @@ unsafe fn write_sockaddr_in(addr_ptr: u64, addrlen_ptr: u64, ip: [u8; 4], port: 
     if addrlen_ptr != 0 {
         if let Ok(lp) = validate_user_ptr_mut(addrlen_ptr, 4) {
             core::ptr::write_unaligned(lp as *mut u32, SA_LEN as u32);
+        }
+    }
+    0
+}
+
+/// sys_shutdown — gracefully close TCP connection by sending FIN.
+/// how: 0=SHUT_RD, 1=SHUT_WR (sends FIN), 2=SHUT_RDWR
+unsafe fn sys_shutdown(sockfd: u64, how: u64) -> i64 {
+    let pid = crate::scheduler::current_pid();
+    let local_port = match SOCKET_PORTS.lock().get(&(pid, sockfd)).copied() {
+        Some(p) => p,
+        None => return EBADF,
+    };
+    if how == 1 || how == 2 {
+        let peername = SOCKET_PEERNAME.lock().get(&(pid, sockfd)).copied();
+        if let Some((rip, rport)) = peername {
+            crate::net::tcp::close(local_port, rip, rport);
         }
     }
     0
