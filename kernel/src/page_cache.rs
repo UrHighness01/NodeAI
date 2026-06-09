@@ -182,17 +182,27 @@ pub fn tick_writeback() {
             )
         };
         // Walk VFS for the node: if found, write back.
-        if let Some(node) = find_node_by_ino(*ino) {
+        let write_ok = if let Some(node) = find_node_by_ino(*ino) {
             if let Ok(mut fh) = node.open() {
                 let _ = fh.seek(*page_off);
-                let _ = fh.write(page_data);
-                flushed += 1;
-            }
-        }
-        // Mark clean regardless (even if write failed — avoid infinite retry).
+                fh.write(page_data).is_ok()
+            } else { false }
+        } else {
+            // No VfsNode found (deleted file) — treat as success to avoid
+            // accumulating stale dirty entries for unreachable inodes.
+            true
+        };
+
         let mut cache = CACHE.lock();
         let key = CacheKey { ino: *ino, page_offset: *page_off };
-        if let Some(e) = cache.entries.get_mut(&key) { e.dirty = false; }
+        if write_ok {
+            flushed += 1;
+            if let Some(e) = cache.entries.get_mut(&key) { e.dirty = false; }
+        } else {
+            // Write failed — keep page dirty for retry; attribute error to causal graph.
+            drop(cache);
+            crate::causal::attribute_io_error(*ino, *page_off);
+        }
     }
 
     if flushed > 0 {

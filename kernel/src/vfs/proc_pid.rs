@@ -210,8 +210,9 @@ impl VfsNode for ProcPidDir {
             DirEntry { name: String::from("status"),      is_dir: false, ino: alloc_ino() },
             DirEntry { name: String::from("maps"),        is_dir: false, ino: alloc_ino() },
             DirEntry { name: String::from("smaps"),       is_dir: false, ino: alloc_ino() },
-            DirEntry { name: String::from("causal_graph"),is_dir: false, ino: alloc_ino() },
-            DirEntry { name: String::from("fd"),          is_dir: true,  ino: alloc_ino() },
+            DirEntry { name: String::from("causal_graph"),  is_dir: false, ino: alloc_ino() },
+            DirEntry { name: String::from("ptrace_state"),  is_dir: false, ino: alloc_ino() },
+            DirEntry { name: String::from("fd"),            is_dir: true,  ino: alloc_ino() },
         ])
     }
 
@@ -220,8 +221,9 @@ impl VfsNode for ProcPidDir {
             "status"       => Ok(Arc::new(ProcPidFile { ino: alloc_ino(), content: self.status() })),
             "maps"         => Ok(Arc::new(ProcPidFile { ino: alloc_ino(), content: self.maps()   })),
             "smaps"        => Ok(Arc::new(ProcPidFile { ino: alloc_ino(), content: self.smaps()  })),
-            "causal_graph" => Ok(Arc::new(ProcPidFile { ino: alloc_ino(), content: self.causal_graph() })),
-            "fd"           => Ok(Arc::new(ProcPidFdDir { pid: self.pid })),
+            "causal_graph"  => Ok(Arc::new(ProcPidFile { ino: alloc_ino(), content: self.causal_graph() })),
+            "ptrace_state"  => Ok(Arc::new(ProcPidFile { ino: alloc_ino(), content: crate::ptrace::format_pid_ptrace(self.pid) })),
+            "fd"            => Ok(Arc::new(ProcPidFdDir { pid: self.pid })),
             _              => Err(VfsError::NotFound),
         }
     }

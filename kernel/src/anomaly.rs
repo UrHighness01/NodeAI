@@ -151,6 +151,14 @@ pub fn score(pid: u64) -> f32 {
     DETECTORS.lock().get(&pid).map(|d| d.score).unwrap_or(0.0)
 }
 
+/// Return the system-wide average anomaly score across all tracked pids.
+pub fn global_score() -> f32 {
+    let d = DETECTORS.lock();
+    if d.is_empty() { return 0.0; }
+    let sum: f32 = d.values().map(|v| v.score).sum();
+    sum / d.len() as f32
+}
+
 /// Generate a summary for /ai/anomalies.
 pub fn format_report() -> alloc::vec::Vec<u8> {
     use alloc::string::String;

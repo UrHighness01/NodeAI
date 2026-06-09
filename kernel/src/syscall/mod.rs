@@ -415,6 +415,11 @@ pub mod nr {
     pub const ALARM:           u64 = 37;
     pub const PAUSE:           u64 = 34;
     pub const SECCOMP:         u64 = 317;
+    pub const INIT_MODULE:     u64 = 175;
+    pub const DELETE_MODULE:   u64 = 176;
+    pub const PTRACE:          u64 = 101;
+    pub const TCGETPGRP:       u64 = 111;
+    pub const TCSETPGRP:       u64 = 122;
 }
 
 // ── Per-CPU kernel stack for syscall handling ─────────────────────────────────
@@ -621,6 +626,9 @@ pub unsafe extern "C" fn syscall_dispatch_extern(
         return EPERM;
     }
 
+    // ── Causal ptrace intelligent breakpoints ─────────────────────────────────
+    crate::ptrace::check_trace_point(pid, nr);
+
     // ── AI-learned seccomp enforcement ────────────────────────────────────────
     // Build the per-pid allowlist passively; enforce if locked.
     seccomp_observe(pid, nr);
@@ -677,9 +685,14 @@ pub unsafe extern "C" fn syscall_dispatch_extern(
         nr::GETGID | nr::GETEGID => sys_getgid(),
         nr::SETUID        => 0,  // always root for now
         nr::SETGID        => 0,
-        nr::SETPGID       => 0,
-        nr::SETSID        => sys_getpid(),
-        nr::GETPGID       => sys_getpid(),
+        nr::SETPGID       => { crate::job_control::setpgid(arg0 as u32, arg1 as u32); 0 },
+        nr::SETSID        => { let p = sys_getpid() as u32; crate::job_control::setpgid(p, p); sys_getpid() },
+        nr::GETPGID       => crate::job_control::getpgid(arg0 as u32) as i64,
+        nr::TCGETPGRP     => crate::job_control::tcgetpgrp() as i64,
+        nr::TCSETPGRP     => { crate::job_control::tcsetpgrp(arg1 as u32); 0 },
+        nr::PTRACE        => crate::ptrace::sys_ptrace(arg0, arg1, arg2, arg3),
+        nr::INIT_MODULE   => sys_init_module(arg0, arg1, arg2),
+        nr::DELETE_MODULE => sys_delete_module(arg0, arg1),
         nr::UMASK         => 0o022,
         // ── Time (nanosleep, clock_gettime, gettimeofday) ─────────────────
         nr::NANOSLEEP     => sys_nanosleep(arg0, arg1),
@@ -3721,6 +3734,36 @@ unsafe fn sys_signalfd4(fd: i64, sigmask_ptr: u64, _sigsetsz: u64, _flags: i32) 
         } else {
             EBADF
         }
+    }
+}
+
+// ── sys_init_module / sys_delete_module ──────────────────────────────────────
+
+unsafe fn sys_init_module(umod: u64, len: u64, uargs: u64) -> i64 {
+    if len == 0 || len > 16 * 1024 * 1024 { return EINVAL; }
+    let phys_off = crate::memory::phys_offset();
+    let data = core::slice::from_raw_parts((phys_off + umod) as *const u8, len as usize);
+    let params = if uargs != 0 {
+        let p = (phys_off + uargs) as *const u8;
+        let mut end = 0usize;
+        while end < 256 && *p.add(end) != 0 { end += 1; }
+        core::str::from_utf8(core::slice::from_raw_parts(p, end)).unwrap_or("")
+    } else { "" };
+    match crate::modules::load_module(data, params) {
+        Ok(()) => 0,
+        Err(_) => EPERM,
+    }
+}
+
+unsafe fn sys_delete_module(name_ptr: u64, _flags: u64) -> i64 {
+    let phys_off = crate::memory::phys_offset();
+    let p = (phys_off + name_ptr) as *const u8;
+    let mut end = 0usize;
+    while end < 64 && *p.add(end) != 0 { end += 1; }
+    let name = core::str::from_utf8(core::slice::from_raw_parts(p, end)).unwrap_or("");
+    match crate::modules::remove_module(name) {
+        Ok(()) => 0,
+        Err(_) => ENOENT,
     }
 }
 

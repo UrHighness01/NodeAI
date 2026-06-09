@@ -73,6 +73,9 @@ pub mod transformer_sched; // transformer-based scheduling policy
 pub mod mem_pressure;      // memory pressure monitor + AI-aware reclaim
 pub mod page_cache;        // unified page cache — file data keyed by (inode, page_off)
 pub mod entropy;           // behavioral entropy pool — /dev/random + getrandom()
+pub mod modules;           // AI-validated kernel module hot-swap (insmod/rmmod)
+pub mod ptrace;            // causal ptrace + predictive observability
+pub mod job_control;       // cognitive fg/bg with causal subgraph priority elevation
 
 /// Bootloader configuration — tells the bootloader to map all physical memory
 /// at a dynamic virtual offset so we can access physical frames by VA.

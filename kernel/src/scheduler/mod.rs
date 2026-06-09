@@ -493,6 +493,8 @@ pub fn exit_current_direct(pid: Pid, code: i32) -> ! {
     crate::transformer_sched::remove(pid);
     crate::syscall::cleanup_pid_fds(pid);
     crate::syscall::cleanup_pid_vmas(pid);
+    crate::ptrace::cleanup_pid(pid as u64);
+    crate::job_control::cleanup_pid(pid);
     if parent_pid != 0 {
         wake_pid(parent_pid);
         send_signal(parent_pid, 17); // SIGCHLD
@@ -534,6 +536,8 @@ pub fn exit_current(code: i32) -> ! {
     crate::syscall::cleanup_pid_fds(pid);
     crate::syscall::cleanup_pid_vmas(pid);
     crate::mem_pressure::remove_pid(pid);
+    crate::ptrace::cleanup_pid(pid as u64);
+    crate::job_control::cleanup_pid(pid);
 
     // Wake the parent and send SIGCHLD.
     if parent_pid != 0 {
@@ -634,6 +638,15 @@ pub fn set_fs_base(pid: Pid, base: u64) {
     let mut tasks = TASKS.lock();
     if let Some(t) = tasks.get_mut(&pid) {
         t.fs_base = base;
+    }
+}
+
+/// Override the AI nice_adjust for a task (used by job_control for fg/bg).
+/// Pass 0 to clear the override and let the AI resume normal scheduling.
+pub fn set_nice_override(pid: Pid, nice: i8) {
+    let mut tasks = TASKS.lock();
+    if let Some(t) = tasks.get_mut(&pid) {
+        t.ai_profile.ai_nice_adjust = nice;
     }
 }
 

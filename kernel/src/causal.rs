@@ -193,3 +193,32 @@ pub fn format_report() -> alloc::vec::Vec<u8> {
     }
     out.into_bytes()
 }
+
+// ── I/O error attribution ─────────────────────────────────────────────────────
+
+/// When a page write-back fails for `ino`, find the process most causally
+/// responsible (most recently active waker) and send it SIGIO (29) as an
+/// EIO notification.  This implements causal I/O error attribution: instead
+/// of silently discarding dirty data, the kernel blames the most likely
+/// writer based on the wakeup graph.
+pub fn attribute_io_error(ino: u64, page_off: u64) {
+    let graph = GRAPH.lock();
+    let count = graph.count.min(N_EDGES);
+    let mut best_pid: u64 = 0;
+    let mut best_time: u64 = 0;
+    for i in 0..count {
+        let e = &graph.edges[i];
+        if e.waker != 0 && e.uptime_ms > best_time {
+            best_time = e.uptime_ms;
+            best_pid  = e.waker;
+        }
+    }
+    drop(graph);
+    if best_pid > 0 {
+        crate::scheduler::send_signal(best_pid, 29); // SIGIO / EIO
+        crate::klog!(WARN,
+            "causal: I/O error ino={} off={} attributed to pid={} (last waker)",
+            ino, page_off, best_pid
+        );
+    }
+}
