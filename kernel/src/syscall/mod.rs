@@ -2547,15 +2547,21 @@ unsafe fn sys_sigaltstack(ss_ptr: u64, old_ss_ptr: u64) -> i64 {
 
 // ── sys_rt_sigaction ─────────────────────────────────────────────────────────
 unsafe fn sys_rt_sigaction(signum: u64, act_ptr: u64, oldact_ptr: u64) -> i64 {
+    let pid = crate::scheduler::current_pid();
     if oldact_ptr != 0 {
         if let Ok(p) = validate_user_ptr_mut(oldact_ptr, 32) {
             core::ptr::write_bytes(p, 0, 32);
+            // Return the current handler address in the first 8 bytes
+            // In a full implementation this would be the sigaction struct
+            if signum < 64 {
+                let handler = crate::scheduler::get_signal_handler(pid, signum as usize);
+                *(p as *mut u64) = handler;
+            }
         }
     }
     if act_ptr != 0 && signum < 64 {
         if let Ok(p) = validate_user_ptr(act_ptr, 8) {
             let handler = *(p as *const u64);
-            let pid = crate::scheduler::current_pid();
             crate::scheduler::set_signal_handler(pid, signum as usize, handler);
         }
     }
@@ -2563,10 +2569,24 @@ unsafe fn sys_rt_sigaction(signum: u64, act_ptr: u64, oldact_ptr: u64) -> i64 {
 }
 
 // ── sys_rt_sigprocmask ───────────────────────────────────────────────────────
-unsafe fn sys_rt_sigprocmask(_how: u64, _set: u64, oldset: u64) -> i64 {
+// how: 0=SIG_BLOCK, 1=SIG_UNBLOCK, 2=SIG_SETMASK
+unsafe fn sys_rt_sigprocmask(how: u64, set: u64, oldset: u64) -> i64 {
+    let pid = crate::scheduler::current_pid();
     if oldset != 0 {
         if let Ok(p) = validate_user_ptr_mut(oldset, 8) {
-            *(p as *mut u64) = 0;
+            let old_mask = crate::scheduler::get_signal_mask(pid);
+            *(p as *mut u64) = old_mask;
+        }
+    }
+    if set != 0 && how <= 2 {
+        if let Ok(p) = validate_user_ptr(set, 8) {
+            let new_bits = *(p as *const u64);
+            match how {
+                0 => { crate::scheduler::mask_signals(pid, new_bits); } // SIG_BLOCK
+                1 => { crate::scheduler::unmask_signals(pid, new_bits); } // SIG_UNBLOCK
+                2 => { crate::scheduler::set_signal_mask(pid, new_bits); } // SIG_SETMASK
+                _ => {}
+            }
         }
     }
     0

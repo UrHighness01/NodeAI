@@ -838,6 +838,42 @@ pub fn set_signal_handler(pid: Pid, signum: usize, handler: u64) {
     }
 }
 
+/// Return the current signal handler address for `signum`, or 0 if none.
+pub fn get_signal_handler(pid: Pid, signum: usize) -> u64 {
+    let tasks = TASKS.lock();
+    tasks.get(&pid).map(|t| t.signal_handlers[signum]).unwrap_or(0)
+}
+
+/// Return the current signal mask for `pid`.
+pub fn get_signal_mask(pid: Pid) -> u64 {
+    let tasks = TASKS.lock();
+    tasks.get(&pid).map(|t| t.signal_mask).unwrap_or(0)
+}
+
+/// Set the absolute signal mask for `pid` (SIG_SETMASK).
+pub fn set_signal_mask(pid: Pid, mask: u64) {
+    let mut tasks = TASKS.lock();
+    if let Some(t) = tasks.get_mut(&pid) {
+        t.signal_mask = mask;
+    }
+}
+
+/// Block (add to mask) a set of signals (SIG_BLOCK).
+pub fn mask_signals(pid: Pid, mask: u64) {
+    let mut tasks = TASKS.lock();
+    if let Some(t) = tasks.get_mut(&pid) {
+        t.signal_mask |= mask;
+    }
+}
+
+/// Unblock (remove from mask) a set of signals (SIG_UNBLOCK).
+pub fn unmask_signals(pid: Pid, mask: u64) {
+    let mut tasks = TASKS.lock();
+    if let Some(t) = tasks.get_mut(&pid) {
+        t.signal_mask &= !mask;
+    }
+}
+
 /// Return total RAM in 4 KiB pages.
 pub fn total_ram_pages() -> u64 {
     crate::memory::total_ram_pages()
