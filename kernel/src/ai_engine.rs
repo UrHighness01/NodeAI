@@ -11,6 +11,9 @@ use ai_subsystem::{
     domains::scheduler_ai::{self, TaskFeatures},
     inference::{DenseLayer, SequentialModel, Activation},
 };
+use alloc::collections::BTreeMap;
+use alloc::vec::Vec;
+use alloc::string::{String, ToString};
 use crate::scheduler::task::AiProfile;
 
 /// Initialise the AI subsystem: event bus + tiny default models.
@@ -521,6 +524,242 @@ pub fn load_llm_weights(data: &[u8]) -> bool {
     *LLM_MODEL.lock() = Some(model);
     LLM_READY.store(true, core::sync::atomic::Ordering::Release);
     crate::klog!(INFO, "ai_engine: LLM loaded — {} layers, {} bytes", n_layers, data.len());
+    true
+}
+
+// ── GGUF weight loader (Project-T) ───────────────────────────────────────────
+
+/// Attempt to load weights from a GGUF-format file.
+/// Returns true on success, false if the format is unrecognised.
+///
+/// GGUF format (little-endian):
+///   [0..4]  magic "GGUF" (0x46554747)
+///   [4..8]  version (u32)
+///   [8..16] tensor_count (u64)
+///   [16..24] metadata_kv_count (u64)
+///   [...]   metadata KV pairs (skipped)
+///   [...]   tensor infos (name, dims, type, offset)
+///   [...]   tensor data (aligned to 32 bytes)
+///
+/// We extract f32 weight tensors and bias tensors, grouping them into layer
+/// pairs (weight + bias with matching prefix).
+pub fn load_gguf_weights(data: &[u8]) -> bool {
+    if data.len() < 24 || &data[..4] != b"GGUF" {
+        return false;
+    }
+
+    let _version = u32::from_le_bytes([data[4], data[5], data[6], data[7]]);
+    let tensor_count = u64::from_le_bytes([
+        data[8], data[9], data[10], data[11],
+        data[12], data[13], data[14], data[15],
+    ]);
+    let kv_count = u64::from_le_bytes([
+        data[16], data[17], data[18], data[19],
+        data[20], data[21], data[22], data[23],
+    ]);
+
+    let mut cursor = 24usize;
+
+    // Skip metadata KV pairs
+    for _ in 0..kv_count {
+        // Key: string (length + data)
+        if cursor + 8 > data.len() { return false; }
+        let key_len = u64::from_le_bytes([
+            data[cursor], data[cursor+1], data[cursor+2], data[cursor+3],
+            data[cursor+4], data[cursor+5], data[cursor+6], data[cursor+7],
+        ]);
+        cursor += 8 + key_len as usize;
+        if cursor > data.len() { return false; }
+        // Value type: u32
+        if cursor + 4 > data.len() { return false; }
+        let val_type = u32::from_le_bytes([data[cursor], data[cursor+1], data[cursor+2], data[cursor+3]]);
+        cursor += 4;
+        // Skip value based on type
+        match val_type {
+            0 => {} // uint8
+            1 => { cursor += 1; } // int8
+            2 => { cursor += 2; } // uint16
+            3 => { cursor += 2; } // int16
+            4 => { cursor += 4; } // uint32
+            5 => { cursor += 4; } // int32
+            6 => { cursor += 4; } // float32
+            7 => { cursor += 1; } // bool
+            8 => { // string
+                if cursor + 8 > data.len() { return false; }
+                let slen = u64::from_le_bytes([
+                    data[cursor], data[cursor+1], data[cursor+2], data[cursor+3],
+                    data[cursor+4], data[cursor+5], data[cursor+6], data[cursor+7],
+                ]);
+                cursor += 8 + slen as usize;
+            }
+            9 | 10 | 11 => { // array types - skip length + elements
+                if cursor + 8 > data.len() { return false; }
+                let arr_len = u64::from_le_bytes([
+                    data[cursor], data[cursor+1], data[cursor+2], data[cursor+3],
+                    data[cursor+4], data[cursor+5], data[cursor+6], data[cursor+7],
+                ]);
+                cursor += 8;
+                // Skip each element
+                for _ in 0..arr_len {
+                    if cursor + 4 > data.len() { return false; }
+                    let et = u32::from_le_bytes([data[cursor], data[cursor+1], data[cursor+2], data[cursor+3]]);
+                    cursor += 4;
+                    match et {
+                        8 => { // string elements
+                            if cursor + 8 > data.len() { return false; }
+                            let sl = u64::from_le_bytes([
+                                data[cursor], data[cursor+1], data[cursor+2], data[cursor+3],
+                                data[cursor+4], data[cursor+5], data[cursor+6], data[cursor+7],
+                            ]);
+                            cursor += 8 + sl as usize;
+                        }
+                        4 | 6 => { cursor += 4; }
+                        5 => { cursor += 4; }
+                        _ => { cursor += 4; }
+                    }
+                }
+            }
+            _ => { cursor += 4; } // unknown, skip 4 bytes
+        }
+        if cursor > data.len() { return false; }
+    }
+
+    // Read tensor infos
+    struct TensorInfo {
+        name: alloc::string::String,
+        n_dims: u32,
+        dims: [u64; 4],
+        tensor_type: u32,
+        offset: u64,
+    }
+
+    let mut tensors: Vec<TensorInfo> = Vec::with_capacity(tensor_count as usize);
+
+    for _ in 0..tensor_count {
+        if cursor + 8 > data.len() { return false; }
+        let name_len = u64::from_le_bytes([
+            data[cursor], data[cursor+1], data[cursor+2], data[cursor+3],
+            data[cursor+4], data[cursor+5], data[cursor+6], data[cursor+7],
+        ]);
+        cursor += 8;
+        if cursor + name_len as usize > data.len() { return false; }
+        let name_bytes = &data[cursor..cursor + name_len as usize];
+        let name = core::str::from_utf8(name_bytes).unwrap_or("").to_string();
+        cursor += name_len as usize;
+
+        if cursor + 4 > data.len() { return false; }
+        let n_dims = u32::from_le_bytes([data[cursor], data[cursor+1], data[cursor+2], data[cursor+3]]);
+        cursor += 4;
+
+        let mut dims = [0u64; 4];
+        for d in 0..n_dims.min(4) as usize {
+            if cursor + 8 > data.len() { return false; }
+            dims[d] = u64::from_le_bytes([
+                data[cursor], data[cursor+1], data[cursor+2], data[cursor+3],
+                data[cursor+4], data[cursor+5], data[cursor+6], data[cursor+7],
+            ]);
+            cursor += 8;
+        }
+
+        if cursor + 4 > data.len() { return false; }
+        let tensor_type = u32::from_le_bytes([data[cursor], data[cursor+1], data[cursor+2], data[cursor+3]]);
+        cursor += 4;
+
+        if cursor + 8 > data.len() { return false; }
+        let offset = u64::from_le_bytes([
+            data[cursor], data[cursor+1], data[cursor+2], data[cursor+3],
+            data[cursor+4], data[cursor+5], data[cursor+6], data[cursor+7],
+        ]);
+        cursor += 8;
+
+        tensors.push(TensorInfo { name, n_dims, dims, tensor_type, offset });
+    }
+
+    // Align cursor to 32 bytes (GGUF alignment for tensor data)
+    cursor = (cursor + 31) & !31;
+
+    if cursor > data.len() { return false; }
+
+    // Build model from tensors: group "weight" and "bias" by layer prefix
+    let mut model = SequentialModel::new();
+
+    // Sort tensors by their offset to process in storage order
+    // and pair weights with their biases
+    let mut weight_map: BTreeMap<alloc::string::String, &TensorInfo> = BTreeMap::new();
+    let mut bias_map: BTreeMap<alloc::string::String, &TensorInfo> = BTreeMap::new();
+
+    for t in &tensors {
+        if t.name.ends_with(".weight") {
+            let prefix = t.name.trim_end_matches(".weight").to_string();
+            weight_map.insert(prefix, t);
+        } else if t.name.ends_with(".bias") {
+            let prefix = t.name.trim_end_matches(".bias").to_string();
+            bias_map.insert(prefix, t);
+        }
+    }
+
+    // For each weight+bias pair, create a DenseLayer
+    for (prefix, w_info) in &weight_map {
+        let b_info = bias_map.get(prefix);
+        if w_info.n_dims < 2 { continue; }
+        // GGUF stores weights as [out_size, in_size] (row-major for our use)
+        let out_size = w_info.dims[0] as usize;
+        let in_size = w_info.dims[1] as usize;
+
+        // Read weight data
+        let w_start = cursor + w_info.offset as usize;
+        let w_count = in_size * out_size;
+        if w_start + w_count * 4 > data.len() { continue; }
+        // tensor_type 0 = f32, 2 = f16, 10 = q8_0, etc.  We only support f32.
+        if w_info.tensor_type != 0 { continue; }
+
+        let mut weights = ai_subsystem::aligned_vec::AlignedVec::with_capacity(w_count);
+        for i in 0..w_count {
+            let val = f32::from_le_bytes([
+                data[w_start + i*4], data[w_start + i*4 + 1],
+                data[w_start + i*4 + 2], data[w_start + i*4 + 3],
+            ]);
+            weights.push(val);
+        }
+
+        // Read bias data if available
+        let bias_count = out_size;
+        let mut biases = ai_subsystem::aligned_vec::AlignedVec::with_capacity(bias_count);
+        if let Some(bi) = b_info {
+            let b_start = cursor + bi.offset as usize;
+            if b_start + bias_count * 4 <= data.len() {
+                for i in 0..bias_count {
+                    let val = f32::from_le_bytes([
+                        data[b_start + i*4], data[b_start + i*4 + 1],
+                        data[b_start + i*4 + 2], data[b_start + i*4 + 3],
+                    ]);
+                    biases.push(val);
+                }
+            }
+        } else {
+            // Zero bias if not present
+            for _ in 0..bias_count {
+                biases.push(0.0);
+            }
+        }
+
+        model.add_layer(DenseLayer {
+            in_size,
+            out_size,
+            weights,
+            biases,
+            activation: Activation::ReLU,
+        });
+
+        crate::klog!(INFO, "ai_engine: GGUF layer '{}' {}×{} loaded", prefix, in_size, out_size);
+    }
+
+    if model.layers.is_empty() { return false; }
+
+    let n_layers = model.layers.len();
+    *LLM_MODEL.lock() = Some(model);
+    LLM_READY.store(true, core::sync::atomic::Ordering::Release);
+    crate::klog!(INFO, "ai_engine: GGUF model loaded — {} layers", n_layers);
     true
 }
 
