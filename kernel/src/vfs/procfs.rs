@@ -55,6 +55,7 @@ pub fn init() {
     write_file("/ai", "mhs_sched",         crate::mhs_sched::format_report());
     write_file("/proc", "gla_prefetch",    crate::gla_prefetch::format_report());
     write_file("/proc", "causal_prefetch", crate::causal_prefetch::format_report());
+    write_file("/proc", "collective",      crate::collective_integration::format_report());
 
     // Mount ProcRootNode over /proc so that /proc/<pid>/ and /proc/self/
     // resolve dynamically without pre-creating ramfs entries.
@@ -92,6 +93,7 @@ pub fn refresh() {
     write_file("/ai",   "mhs_sched",         crate::mhs_sched::format_report());
     write_file("/proc", "gla_prefetch",      crate::gla_prefetch::format_report());
     write_file("/proc", "causal_prefetch",   crate::causal_prefetch::format_report());
+    write_file("/proc", "collective",        crate::collective_integration::format_report());
 }
 
 // ── Content generators ────────────────────────────────────────────────────────

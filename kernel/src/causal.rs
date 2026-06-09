@@ -101,6 +101,8 @@ pub fn record_wakeup(waker_pid: u64, wakee_pid: u64) {
     GRAPH.lock().record(waker_pid, wakee_pid, uptime_ms);
     // Also stamp the wakee's Task so the anomaly detector can read it.
     crate::scheduler::set_woke_by(wakee_pid, waker_pid);
+    // Feed the interaction to the collective integration module.
+    crate::collective_integration::record_interaction(waker_pid, wakee_pid);
 }
 
 /// Record that the AI subsystem autonomously applied a security constraint
