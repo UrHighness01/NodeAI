@@ -37,6 +37,13 @@ impl RunQueue {
         self.queue.push_back(pid);
     }
 
+    fn move_to_front(&mut self, pid: Pid) {
+        if let Some(pos) = self.queue.iter().position(|&p| p == pid) {
+            self.queue.remove(pos);
+            self.queue.push_front(pid);
+        }
+    }
+
     fn current(&self) -> Option<Pid> {
         self.current_pid
     }
@@ -76,6 +83,10 @@ pub fn init() {
 
 pub fn enqueue(pid: Pid) {
     RUNQUEUE.lock().enqueue(pid);
+}
+
+pub fn move_to_front(pid: Pid) {
+    RUNQUEUE.lock().move_to_front(pid);
 }
 
 pub fn dequeue_next() -> Option<Pid> {

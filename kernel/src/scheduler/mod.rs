@@ -157,6 +157,13 @@ pub unsafe extern "C" fn schedule_from_interrupt(old_rsp: u64) -> u64 {
             crate::klog!(WARN, "SECURITY: pid={} phi is too low, dynamically demoting euid to 65534 (nobody)", pid);
             set_euid(pid, 65534);
         }
+
+        // Phase 1: Causal-Graph Assisted Task Affinity
+        // If this task habitually wakes specific consumers, pre-enqueue them
+        // at the front of the runqueue for temporal cache locality.
+        for succ in crate::causal::predict_successors(pid).into_iter().rev() {
+            runqueue::move_to_front(succ);
+        }
     }
 
     // Step 2: per-tick subsystem work.
