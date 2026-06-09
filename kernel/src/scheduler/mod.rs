@@ -845,3 +845,8 @@ pub fn task_name(pid: Pid) -> Option<alloc::string::String> {
 pub fn task_mem_bytes(pid: Pid) -> u64 {
     TASKS.lock().get(&pid).map(|t| t.user_brk).unwrap_or(0)
 }
+
+/// Return the CR3 (PML4) value for a task, or None if the task does not exist.
+pub fn get_task_cr3(pid: Pid) -> Option<u64> {
+    TASKS.lock().get(&pid).map(|t| t.cr3)
+}
