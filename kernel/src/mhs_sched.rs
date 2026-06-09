@@ -307,9 +307,14 @@ impl MhsModel {
         (pool, write_rate)
     }
 
-    fn forward(&self, syscalls: &[u16; CONTEXT_LEN]) -> MhsDecision {
-        let (fast_pool, _)            = self.gla_fast(syscalls);
+    fn forward(&self, syscalls: &[u16; CONTEXT_LEN], cached_fast: Option<&[f32]>) -> MhsDecision {
+        let (mut fast_pool, _)            = self.gla_fast(syscalls);
         let (slow_pool, slow_wr) = self.gla_slow(syscalls);
+
+        // Phase 3: Blend cached FastState (causal memory from last time task ran)
+        if let Some(cf) = cached_fast {
+            for i in 0..DH0 { fast_pool[i] = 0.5 * fast_pool[i] + 0.5 * cf[i]; }
+        }
 
         // Concatenate fast + slow pools → [DH0 + DH2] dim
         let mut concat = alloc::vec![0.0f32; DH0 + DH2];
@@ -428,14 +433,14 @@ struct MhsContext {
     history: [u16; CONTEXT_LEN],
     head:    usize,
     count:   usize,
-    /// Pending feedback: snapshot of history at the time of the last infer,
-    /// to be used as training input when the outcome is known.
     pending: Option<([u16; CONTEXT_LEN], [f32; N_OUTPUTS])>,
+    /// Phase 3: FastState buffer cache
+    fast_state_cache: Option<Vec<f32>>,
 }
 
 impl MhsContext {
     const fn new() -> Self {
-        Self { history: [0u16; CONTEXT_LEN], head: 0, count: 0, pending: None }
+        Self { history: [0u16; CONTEXT_LEN], head: 0, count: 0, pending: None, fast_state_cache: None }
     }
 
     fn push(&mut self, syscall_nr: u16) {
@@ -476,14 +481,14 @@ pub fn record_syscall(pid: u64, nr: u16) {
 
 /// Run MHS forward pass for `pid`.  Returns None if not enough history yet.
 pub fn infer(pid: u64) -> Option<MhsDecision> {
-    let snap = {
+    let (snap, fast_cache) = {
         let ctx = CONTEXTS.lock();
         let c = ctx.get(&pid)?;
         if !c.is_warm() { return None; }
-        c.snapshot()
+        (c.snapshot(), c.fast_state_cache.clone())
     };
     let model = MODEL.lock();
-    model.as_ref().map(|m| m.forward(&snap))
+    model.as_ref().map(|m| m.forward(&snap, fast_cache.as_deref()))
 }
 
 /// Record scheduling outcome for `pid` and run an SGD step.
@@ -511,6 +516,29 @@ pub fn record_feedback(pid: u64, actual_wait_us: u32, actual_burst: u32) {
 /// Remove per-PID context on process exit.
 pub fn remove(pid: u64) {
     CONTEXTS.lock().remove(&pid);
+}
+
+/// Phase 3: Snapshot the FastState for a context switch out.
+pub fn snapshot_fast_state(pid: u64) -> Option<alloc::vec::Vec<f32>> {
+    let snap = {
+        let ctx = CONTEXTS.lock();
+        let c = ctx.get(&pid)?;
+        if !c.is_warm() { return None; }
+        c.snapshot()
+    };
+    let model = MODEL.lock();
+    model.as_ref().map(|m| {
+        let (fast_pool, _) = m.gla_fast(&snap);
+        fast_pool
+    })
+}
+
+/// Phase 3: Restore the FastState for a context switch in.
+pub fn restore_fast_state(pid: u64, state: &[f32]) {
+    let mut ctx = CONTEXTS.lock();
+    if let Some(c) = ctx.get_mut(&pid) {
+        c.fast_state_cache = Some(state.to_vec());
+    }
 }
 
 /// Format /proc/sched_mhs report.
