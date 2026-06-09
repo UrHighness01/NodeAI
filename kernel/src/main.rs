@@ -70,6 +70,7 @@ pub mod coherence;      // coherence-horizon anomaly attribution
 pub mod fuzzer;         // in-kernel syscall parseltongue fuzzer
 pub mod autotune;       // dynamic EMA parameter adaptation
 pub mod critic;         // adversarial critic for scheduler hardening
+pub mod el_engine;      // scriptable kernel policy hooks
 pub mod tunables;       // live AI-adjustable kernel parameters
 pub mod fingerprint;    // behavioral cluster classifier
 pub mod causal;         // live causal process wakeup DAG

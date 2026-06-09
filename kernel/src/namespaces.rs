@@ -145,6 +145,12 @@ pub fn allow_syscall(pid: u64, nr: u64, is_write: bool) -> bool {
             return false;
         }
     }
+    // EL-Scriptable Kernel Policy Hook
+    if !crate::el_engine::hook_syscall(pid, nr) {
+        crate::klog!(WARN, "namespaces: EL ENGINE blocked syscall nr={} for pid={}", nr, pid);
+        return false;
+    }
+
     true
 }
 
