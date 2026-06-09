@@ -5,21 +5,30 @@
 //! shell.  Built by scripts/build_userspace.sh before the kernel is compiled.
 
 use alloc::vec::Vec;
+use alloc::format;
 
 /// Embedded ELF binary data for /bin/hello
 const HELLO_BIN: &[u8] = include_bytes!("hello.bin");
 
 /// Initialise the initrd filesystem: create /bin and populate with binaries.
 pub fn init() {
-    // Write binaries to VFS using the existing write_file helper
-    let _ = crate::vfs::write_file("/bin/hello", HELLO_BIN);
+    // Create /bin directory in the root ramfs
+    let root = crate::vfs::root();
+    let _ = root.mkdir("bin");
 
-    crate::klog!(INFO, "initrd: embedded userspace binaries registered — {} bytes in /bin/hello", HELLO_BIN.len());
+    // Write binary to VFS
+    match crate::vfs::write_file("/bin/hello", HELLO_BIN) {
+        Ok(_) => {
+            crate::klog!(INFO, "initrd: /bin/hello registered — {} bytes, VFS accessible", HELLO_BIN.len());
+        }
+        Err(e) => {
+            crate::klog!(WARN, "initrd: /bin/hello write failed: {:?}", e);
+        }
+    }
 }
 
 /// Format /proc report.
 pub fn format_report() -> Vec<u8> {
-    use alloc::format;
     alloc::format!(
         "NodeAI Initrd\n\
          ============\n\
