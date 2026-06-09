@@ -56,6 +56,8 @@ pub fn avx2_dot_product(weights: &[f32], inputs: &[f32]) -> f32 {
     unsafe { avx2_dot_product_impl(weights, inputs) }
 }
 
+pub static mut SIMD_WRAPPER: Option<fn(&mut dyn FnMut())> = None;
+
 impl DenseLayer {
     /// Forward pass: computes output = activation(W * input + b).
     /// All arithmetic in f32; INT8 quantized path is a future extension.
@@ -63,10 +65,25 @@ impl DenseLayer {
         output.clear();
         output.resize(self.out_size, 0.0f32);
 
+        unsafe {
+            if let Some(wrapper) = SIMD_WRAPPER {
+                let mut f = || {
+                    for i in 0..self.out_size {
+                        let mut sum = self.biases[i];
+                        let row = &self.weights[i * self.in_size..(i + 1) * self.in_size];
+                        sum += avx2_dot_product(row, input);
+                        output[i] = apply_activation(sum, self.activation);
+                    }
+                };
+                wrapper(&mut f);
+                return;
+            }
+        }
+
+        // Fallback scalar path
         for i in 0..self.out_size {
             let mut sum = self.biases[i];
             let row = &self.weights[i * self.in_size..(i + 1) * self.in_size];
-            // Scalar dot product for now; AVX2 will be hooked up inside with_simd in Phase 2
             for (w, x) in row.iter().zip(input.iter()) {
                 sum += w * x;
             }

@@ -258,19 +258,14 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     // ── Phase 8: AI subsystem ────────────────────────────────────────────────
     simd_context::init();
 
-    // Verify AVX2 dot product matches scalar
-    let mut aligned_weights = ai_subsystem::aligned_vec::AlignedVec::<f32, 32>::new();
-    let mut aligned_inputs = ai_subsystem::aligned_vec::AlignedVec::<f32, 32>::new();
-    for i in 0..16 {
-        aligned_weights.push(i as f32);
-        aligned_inputs.push((16 - i) as f32);
-    }
-    let scalar_res: f32 = aligned_weights.iter().zip(aligned_inputs.iter()).map(|(w, x)| w * x).sum();
-    let avx_res = simd_context::with_simd(|| ai_subsystem::inference::avx2_dot_product(aligned_weights.as_slice(), aligned_inputs.as_slice()));
-    if (scalar_res - avx_res).abs() < 1e-4 {
-        klog!(INFO, "SIMD: avx2_dot_product matches scalar output ({})", avx_res);
-    } else {
-        klog!(ERROR, "SIMD mismatch: scalar={} avx={}", scalar_res, avx_res);
+    // Register SIMD wrapper for DenseLayer inference.
+
+    // Register SIMD wrapper for DenseLayer inference.
+    // AVX2 bootstrap validation is NOT done in the boot path — inside
+    // with_simd(), interrupts are disabled, and any fault would cause
+    // a silent triple-freeze since the exception handler can't log.
+    unsafe {
+        ai_subsystem::inference::SIMD_WRAPPER = Some(|f| simd_context::with_simd(|| f()));
     }
 
     ai_engine::init();

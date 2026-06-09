@@ -17,6 +17,33 @@ static mut XSAVE_BUFFER: XSaveArea = XSaveArea::new();
 /// Initialize SIMD support by enabling OSXSAVE in CR4 and configuring XCR0.
 pub fn init() {
     unsafe {
+        // Check CPUID for XSAVE support before touching CR4 or XCR0.
+        // Leaf 1, ECX bit 26 = XSAVE + OSXSAVE capabilities.
+        let cpuid_ecx: u32;
+        unsafe {
+            core::arch::asm!(
+                "push rbx",
+                "cpuid",
+                "pop rbx",
+                inout("eax") 1u32 => _, lateout("ecx") cpuid_ecx, lateout("edx") _,
+                options(nostack, nomem),
+            );
+        }
+        // Check CPUID.01H:ECX[27] = XSAVE feature bit (CPU supports XSAVE/
+        // XRSTOR instructions).  Bit 26 = OSXSAVE (OS has enabled it) which
+        // is 0 at boot — the bootloader doesn't set CR4.OSXSAVE.  We set it
+        // ourselves below.
+        let has_xsave = (cpuid_ecx >> 27) & 1 != 0;
+        if !has_xsave {
+            crate::klog!(WARN, "SIMD: CPU lacks XSAVE (CPUID.01H.ECX[27]=0) — AVX2 disabled");
+            return;
+        }
+        let has_xsave = (cpuid_ecx >> 26) & 1 != 0;
+        if !has_xsave {
+            crate::klog!(WARN, "SIMD: CPU lacks XSAVE (CPUID.01H.ECX[26]=0) — AVX2 disabled");
+            return;
+        }
+
         // Enable OSXSAVE (bit 18) in CR4
         let mut cr4: u64;
         core::arch::asm!("mov {}, cr4", out(reg) cr4);
@@ -24,13 +51,10 @@ pub fn init() {
         core::arch::asm!("mov cr4, {}", in(reg) cr4);
 
         // Configure XCR0 to enable x87 (bit 0), SSE (bit 1), and AVX (bit 2)
-        // XCR0 is accessed via xsetbv with ecx = 0
-        let xcr0: u64 = 7; 
-        let eax = (xcr0 & 0xFFFF_FFFF) as u32;
-        let edx = (xcr0 >> 32) as u32;
-        core::arch::asm!("xsetbv", in("ecx") 0, in("eax") eax, in("edx") edx);
+        let xcr0: u64 = 7;
+        core::arch::asm!("xsetbv", in("ecx") 0, in("eax") (xcr0 as u32), in("edx") ((xcr0 >> 32) as u32));
     }
-    crate::klog!(INFO, "SIMD: OSXSAVE and XCR0 configured for AVX2 state management.");
+    crate::klog!(INFO, "SIMD: OSXSAVE + XCR0 configured for AVX2 state management.");
 }
 
 /// Execute a closure with SIMD registers available.
