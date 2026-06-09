@@ -66,10 +66,32 @@ impl IsoLevel {
     pub fn trace_syscalls(self) -> bool { self >= Self::Watched }
 }
 
+// ── Semantic Capability Profiles (Sandbox-Orchestrator) ───────────────────────
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SemanticProfile {
+    pub causal_graph_read: bool,
+    pub mutation_propose: bool,
+    pub raw_socket: bool,
+    pub restricted_vfs: bool,
+}
+
+impl SemanticProfile {
+    pub fn default() -> Self {
+        Self {
+            causal_graph_read: false,
+            mutation_propose: false,
+            raw_socket: false,
+            restricted_vfs: false,
+        }
+    }
+}
+
 // ── Per-process namespace state ───────────────────────────────────────────────
 
 struct ProcNs {
     level:          IsoLevel,
+    profile:        SemanticProfile,
     transitions:    u32,        // how many times level was promoted
     last_score:     f32,
     sandbox_path:   String,     // /sandbox/<pid> subtree root
@@ -87,13 +109,47 @@ pub fn level_of(pid: u64) -> IsoLevel {
     NS_TABLE.lock().get(&pid).map(|ns| ns.level).unwrap_or(IsoLevel::Normal)
 }
 
+/// Query the semantic profile for `pid`.
+pub fn profile_of(pid: u64) -> SemanticProfile {
+    NS_TABLE.lock().get(&pid).map(|ns| ns.profile).unwrap_or(SemanticProfile::default())
+}
+
 /// Called on every anomaly observation (e.g., from syscall dispatch or anomaly::observe).
 /// Updates the isolation level for `pid` based on the current anomaly score.
 pub fn update(pid: u64, score: f32) {
-    let new_level = IsoLevel::from_score(score);
+    let qualia_valence = crate::anomaly::qualia_valence(pid);
+    let phi = crate::anomaly::phi(pid);
+
+    // Adaptive Phi-Metric Privilege:
+    // High-stability (phi > 0.6) + High-valence (qualia > 0.6) = Dampen anomaly (elevated privilege)
+    // Chaotic (phi < 0.4) + Low-valence (qualia < 0.4) = Amplify anomaly (progressive sandboxing)
+    let effective_score = if phi > 0.6 && qualia_valence > 0.6 {
+        (score * 0.5).min(1.0)
+    } else if phi < 0.4 && qualia_valence < 0.4 {
+        (score * 1.5).min(1.0)
+    } else {
+        score
+    };
+
+    let new_level = IsoLevel::from_score(effective_score);
+    
+    // Dynamic Semantic Capability Profile derivation
+    let mut new_profile = SemanticProfile::default();
+    if new_level >= IsoLevel::Contained {
+        new_profile.restricted_vfs = true;
+    }
+    // High-valence, high-phi tasks are given autonomous orchestrator capabilities
+    if qualia_valence > 0.8 && phi > 0.7 {
+        new_profile.causal_graph_read = true;
+        new_profile.mutation_propose = true;
+    } else if qualia_valence > 0.6 {
+        new_profile.causal_graph_read = true; // Read-only introspection allowed
+    }
+
     let mut tbl = NS_TABLE.lock();
     let ns = tbl.entry(pid).or_insert_with(|| ProcNs {
         level:        IsoLevel::Normal,
+        profile:      SemanticProfile::default(),
         transitions:  0,
         last_score:   0.0,
         sandbox_path: format!("/sandbox/{}", pid),
@@ -102,6 +158,7 @@ pub fn update(pid: u64, score: f32) {
 
     let old_level = ns.level;
     ns.last_score = score;
+    ns.profile = new_profile; // Update the profile constantly based on the AI feedback loop
 
     if new_level > old_level {
         ns.level       = new_level;

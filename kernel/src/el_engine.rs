@@ -20,7 +20,10 @@ pub enum Expr {
     Score,
     Kill,
     Isolate,
+    HasMitigation,
     Gt(alloc::boxed::Box<Expr>, alloc::boxed::Box<Expr>),
+    ZapTask(alloc::boxed::Box<Expr>),
+    ZapLink(alloc::boxed::Box<Expr>, alloc::boxed::Box<Expr>),
 }
 
 /// The currently loaded policy script.
@@ -82,12 +85,16 @@ pub fn load_error_policy(script: &str) {
                     alloc::boxed::Box::new(Expr::Number(5))
                 )),
                 alloc::boxed::Box::new(Expr::If(
-                    alloc::boxed::Box::new(Expr::Gt(
-                        alloc::boxed::Box::new(Expr::Score),
-                        alloc::boxed::Box::new(Expr::Number(50)) // representing 0.5 as 50
-                    )),
-                    alloc::boxed::Box::new(Expr::Block(alloc::vec![Expr::Isolate, Expr::Kill])),
-                    alloc::boxed::Box::new(Expr::Return(alloc::boxed::Box::new(Expr::Number(0))))
+                    alloc::boxed::Box::new(Expr::HasMitigation),
+                    alloc::boxed::Box::new(Expr::Block(alloc::vec![Expr::Isolate])),
+                    alloc::boxed::Box::new(Expr::If(
+                        alloc::boxed::Box::new(Expr::Gt(
+                            alloc::boxed::Box::new(Expr::Score),
+                            alloc::boxed::Box::new(Expr::Number(50)) // representing 0.5 as 50
+                        )),
+                        alloc::boxed::Box::new(Expr::Block(alloc::vec![Expr::Isolate, Expr::Kill])),
+                        alloc::boxed::Box::new(Expr::Return(alloc::boxed::Box::new(Expr::Number(0))))
+                    ))
                 )),
                 alloc::boxed::Box::new(Expr::Return(alloc::boxed::Box::new(Expr::Number(0))))
             );
@@ -134,6 +141,25 @@ fn eval(expr: &Expr, pid: u64, nr: u64) -> Option<u64> {
             crate::klog!(WARN, "el_engine: EL script isolated pid={}", pid);
             Some(1)
         },
+        Expr::ZapTask(pid_expr) => {
+            if let Some(target_pid) = eval(pid_expr, pid, nr) {
+                crate::scheduler::kill_task(target_pid, 9);
+                crate::klog!(WARN, "el_engine: ZAPPER surgically terminated pid={}", target_pid);
+                Some(1)
+            } else { None }
+        },
+        Expr::ZapLink(waker_expr, wakee_expr) => {
+            if let Some(waker) = eval(waker_expr, pid, nr) {
+                if let Some(wakee) = eval(wakee_expr, pid, nr) {
+                    crate::klog!(WARN, "el_engine: ZAPPER surgically severed causal link {} -> {}", waker, wakee);
+                    // (Here we'd break the futex/pipe mapping)
+                    Some(1)
+                } else { None }
+            } else { None }
+        },
+        Expr::HasMitigation => {
+            if crate::ai_engine::check_memory_label(nr) { Some(1) } else { Some(0) }
+        },
         Expr::If(cond, true_branch, false_branch) => {
             let c = eval(cond, pid, nr)?;
             if c != 0 {
@@ -175,4 +201,13 @@ pub fn hook_error(pid: u64, error_code: u64) -> bool {
         }
     }
     false
+}
+
+/// Helper to programmatically trigger Zapper from AI engine
+pub fn trigger_zapper(waker: u64, wakee: u64) -> bool {
+    let ast = Expr::ZapLink(
+        alloc::boxed::Box::new(Expr::Number(waker)),
+        alloc::boxed::Box::new(Expr::Number(wakee))
+    );
+    eval(&ast, waker, 0).unwrap_or(0) != 0
 }

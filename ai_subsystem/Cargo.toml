@@ -5,6 +5,7 @@ edition.workspace = true
 
 [dependencies]
 hal = { path = "../hal" }
+libm = { version = "0.2.16", default-features = false }
 
 [dependencies.spin]
 version = "0.9"

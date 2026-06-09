@@ -407,6 +407,8 @@ pub mod nr {
     pub const AI_LOG:          u64 = 201;
     pub const SYS_INTENT:      u64 = 202; // NodeAI-specific: declare scheduling intent
     pub const TKILL:           u64 = 200;   // re-use slot — routed same as AI_QUERY when called correctly
+    pub const UBOT_PROPOSE:    u64 = 203;
+    pub const UBOT_QUERY_PHI:  u64 = 204;
     pub const TGKILL:          u64 = 234;
     // Later syscall constants (not in Phase 11 core set)
     pub const READLINK:        u64 = 89;
@@ -815,6 +817,8 @@ pub unsafe extern "C" fn syscall_dispatch_extern(
         nr::AI_QUERY      => sys_ai_query(arg0, arg1),
         nr::AI_LOG        => sys_ai_log(arg0, arg1, arg2),
         nr::SYS_INTENT    => sys_intent(arg0, arg1),
+        nr::UBOT_PROPOSE  => crate::ubot_api::sys_ubot_propose_mutation(arg0, arg1, arg2),
+        nr::UBOT_QUERY_PHI=> crate::ubot_api::sys_ubot_query_phi(),
         _                 => {
             crate::klog!(WARN, "SYSCALL: unimplemented nr={}", nr);
             ENOSYS

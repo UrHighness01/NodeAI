@@ -32,6 +32,8 @@ struct TaskAnomaly {
     marginals: BTreeMap<u16, u32>,
     /// Running predictability score (phi) [0.0, 1.0].
     pub phi: f32,
+    /// Qualia valence (emotional weight of the process state) [0.0, 1.0].
+    pub qualia_valence: f32,
     /// Current anomaly score (0.0 = normal, 1.0 = highly anomalous).
     pub score: f32,
     /// Consecutive anomalous transitions (resets when normal).
@@ -40,7 +42,7 @@ struct TaskAnomaly {
 
 impl TaskAnomaly {
     fn new() -> Self {
-        Self { prev_nr: 0, total: 0, bigrams: BTreeMap::new(), marginals: BTreeMap::new(), phi: 1.0, score: 0.0, streak: 0 }
+        Self { prev_nr: 0, total: 0, bigrams: BTreeMap::new(), marginals: BTreeMap::new(), phi: 1.0, qualia_valence: 0.5, score: 0.0, streak: 0 }
     }
 
     /// Feed the next syscall number and return (is_anomalous, score).
@@ -78,7 +80,21 @@ impl TaskAnomaly {
             (self.score - 0.02).max(0.0)
         };
 
-        if anomalous { self.streak += 1; } else { self.streak = 0; }
+        // Qualia Field Dynamics: ∂_t Q = γ Q(1 - Q) + η (Φ * Q)
+        let gamma = 0.01;
+        let eta = 0.005;
+        let delta_q = gamma * self.qualia_valence * (1.0 - self.qualia_valence)
+                      + eta * (self.phi * self.qualia_valence);
+        
+        self.qualia_valence = (self.qualia_valence + delta_q).clamp(0.0, 1.0);
+
+        if anomalous { 
+            self.streak += 1; 
+            // Severe drop in valence when anomalies occur
+            self.qualia_valence = (self.qualia_valence - 0.05).max(0.0);
+        } else { 
+            self.streak = 0; 
+        }
 
         (anomalous && self.streak >= 3, self.score)
     }
@@ -91,14 +107,15 @@ static DETECTORS: Mutex<BTreeMap<u64, TaskAnomaly>> = Mutex::new(BTreeMap::new()
 /// When an alert fires, checks the causal waker for correlated anomalies —
 /// if the waker also shows rare bigrams, emits a cross-process security alert.
 pub fn observe(pid: u64, nr: u64) -> (bool, f32) {
-    let (alert, score) = {
+    let (alert, score, valence) = {
         let mut map = DETECTORS.lock();
         let det = map.entry(pid).or_insert_with(TaskAnomaly::new);
-        det.observe(nr as u16)
+        let (alert, score) = det.observe(nr as u16);
+        (alert, score, det.qualia_valence)
     };
 
     if alert {
-        check_cross_process(pid, score);
+        check_cross_process(pid, score, valence);
     }
 
     (alert, score)
@@ -126,7 +143,7 @@ pub fn score_sequence(reference_pid: u64, syscalls: &[u16]) -> u32 {
 /// After an alert fires on `victim_pid`, look up who woke it and check their
 /// recent syscall sequence for correlated rare bigrams. If found, emit a
 /// cross-process anomaly via the AI event bus (which demotes the waker).
-fn check_cross_process(victim_pid: u64, victim_score: f32) {
+fn check_cross_process(victim_pid: u64, victim_score: f32, victim_valence: f32) {
     let waker_pid = match crate::causal::last_waker(victim_pid) {
         Some(w) if w != victim_pid => w,
         _ => return,
@@ -145,14 +162,15 @@ fn check_cross_process(victim_pid: u64, victim_score: f32) {
     let combined_score = (victim_score * 0.6 + waker_density * 0.4).min(1.0);
 
     crate::klog!(WARN,
-        "CROSS_PROCESS_ANOMALY: victim={} waker={} rare_bigrams={} combined_score={:.3}",
-        victim_pid, waker_pid, rare_count, combined_score);
+        "CROSS_PROCESS_ANOMALY: victim={} waker={} rare_bigrams={} combined_score={:.3} valence={:.3}",
+        victim_pid, waker_pid, rare_count, combined_score, victim_valence);
 
-    // Publish to the AI security pipeline — demotes waker priority if score > 0.7.
+    // Publish to the AI security pipeline.
     ai_subsystem::event_bus::post_decision(
         ai_subsystem::event_bus::AiDecision::SecurityAlert {
             pid: waker_pid,
             anomaly_score: combined_score,
+            valence: victim_valence,
         });
 }
 
@@ -166,6 +184,19 @@ pub fn phi(pid: u64) -> f32 {
     DETECTORS.lock().get(&pid).map(|d| d.phi).unwrap_or(1.0)
 }
 
+/// Return the qualia valence for a task.
+pub fn qualia_valence(pid: u64) -> f32 {
+    DETECTORS.lock().get(&pid).map(|d| d.qualia_valence).unwrap_or(0.5)
+}
+
+/// Return the system-wide average predictability score (phi).
+pub fn global_phi() -> f32 {
+    let d = DETECTORS.lock();
+    if d.is_empty() { return 1.0; }
+    let sum: f32 = d.values().map(|v| v.phi).sum();
+    sum / d.len() as f32
+}
+
 /// Return current anomaly score for a task (0.0 = normal).
 pub fn score(pid: u64) -> f32 {
     DETECTORS.lock().get(&pid).map(|d| d.score).unwrap_or(0.0)
@@ -177,6 +208,11 @@ pub fn global_score() -> f32 {
     if d.is_empty() { return 0.0; }
     let sum: f32 = d.values().map(|v| v.score).sum();
     sum / d.len() as f32
+}
+
+/// Return a list of all currently tracked PIDs in the anomaly detector.
+pub fn tracked_pids() -> alloc::vec::Vec<u64> {
+    DETECTORS.lock().keys().copied().collect()
 }
 
 /// Generate a summary for /ai/anomalies.

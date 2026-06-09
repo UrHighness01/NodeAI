@@ -23,7 +23,24 @@ pub fn init() {
     let m = build_default_scheduler_model();
     scheduler_ai::load_model(m);
 
-    crate::klog!(INFO, "AI subsystem initialized — event bus + scheduler model ready");
+    // Try to load episodic memory from disk, fallback to new memory.
+    match crate::vfs::read_file("/.ai_memory.bin") {
+        Ok(data) => {
+            let mut store = ai_subsystem::vector_store::VectorStore::new();
+            if store.deserialize(&data) {
+                *VECTOR_STORE.lock() = Some(store);
+                crate::klog!(INFO, "AI subsystem: loaded episodic memory from disk ({} bytes)", data.len());
+            } else {
+                crate::klog!(WARN, "AI subsystem: episodic memory corrupt, resetting");
+                *VECTOR_STORE.lock() = Some(ai_subsystem::vector_store::VectorStore::new());
+            }
+        }
+        Err(_) => {
+            *VECTOR_STORE.lock() = Some(ai_subsystem::vector_store::VectorStore::new());
+        }
+    }
+
+    crate::klog!(INFO, "AI subsystem initialized — event bus + scheduler model + episodic memory ready");
 }
 
 /// Called from the timer interrupt (scheduler tick path) every tick.
@@ -54,6 +71,107 @@ pub fn process_tick(uptime_ms: u64) {
     for decision in decisions {
         apply_decision(decision);
     }
+
+    // Phase 4: Dynamic Cognition Budgeting
+    // Adjust computational depth based on phi-metric stability once per second.
+    if uptime_ms % 1000 == 0 {
+        let phi = crate::anomaly::global_phi();
+        let target_budget = if phi > 0.8 {
+            10 // Stable -> Low budget
+        } else if phi < 0.4 {
+            80 // Chaotic -> High budget for deep analysis
+        } else {
+            40 // Transition -> Medium budget
+        };
+        set_budget_pct(target_budget);
+    }
+    
+    // Round 16 Phase 1: Predictive Causal Failure Mitigation
+    // Every 500ms, scan running processes to pre-emptively isolate high-risk causal chains before failure.
+    if uptime_ms % 500 == 0 {
+        let pids = crate::anomaly::tracked_pids();
+        for pid in pids {
+            if crate::causal::is_high_risk_chain(pid) {
+                let chain = crate::causal::waker_chain(pid, 3);
+                
+                // Round 18 Phase 3: Zapper
+                // Attempt to surgically sever the link between the most recent waker and wakee
+                // before resorting to full causal chain isolation.
+                if chain.len() >= 2 {
+                    if crate::el_engine::trigger_zapper(chain[1], chain[0]) {
+                        crate::klog!(WARN, "AI: ZAPPER pre-emptively healed chaotic chain before full quarantine.");
+                        continue; // Skip the full chain quarantine!
+                    }
+                }
+
+                crate::klog!(WARN, "AI: PREDICTIVE MITIGATION — isolating high-risk causal chain ending at pid={}", pid);
+                for &c in &chain {
+                    crate::causal::record_wakeup(crate::causal::AI_KERNEL_PID, c);
+                    crate::scheduler::adjust_priority(c, 20); // demote/isolate the whole chain
+                }
+            }
+        }
+    }
+
+    // Round 17 Phase 1: Automated Hyper-parameter Evolution with 60s Averaging
+    if uptime_ms > 0 && uptime_ms % 5000 == 0 {
+        let phi = crate::anomaly::global_phi();
+        let current_sum = f32::from_bits(PHI_SUM_60S.load(core::sync::atomic::Ordering::Relaxed));
+        let count = PHI_COUNT_60S.load(core::sync::atomic::Ordering::Relaxed) + 1;
+        PHI_SUM_60S.store((current_sum + phi).to_bits(), core::sync::atomic::Ordering::Relaxed);
+        PHI_COUNT_60S.store(count, core::sync::atomic::Ordering::Relaxed);
+
+        if uptime_ms % 60000 == 0 {
+            let avg_phi = (current_sum + phi) / (count as f32);
+            let last_avg_phi = f32::from_bits(LAST_PHI.load(core::sync::atomic::Ordering::Relaxed));
+            
+            if avg_phi > last_avg_phi && avg_phi > 0.6 {
+                // Stability increased over 60s. Persist successful genes into episodic memory.
+                let mut genes = [0f32; 16];
+                genes[0] = crate::tunables::QUANTUM_MS.load(core::sync::atomic::Ordering::Relaxed) as f32;
+                genes[1] = crate::tunables::AI_NICE_CAP.load(core::sync::atomic::Ordering::Relaxed) as f32;
+                genes[2] = crate::tunables::ANOMALY_STREAK.load(core::sync::atomic::Ordering::Relaxed) as f32;
+                genes[3] = crate::tunables::LATENCY_BIAS.load(core::sync::atomic::Ordering::Relaxed) as f32;
+                
+                if let Some(store) = VECTOR_STORE.lock().as_mut() {
+                    store.insert(&genes, 0xFFFF, uptime_ms);
+                }
+                crate::klog!(INFO, "AI: EVOLUTION — 60s avg phi increased to {:.3}. Persisted genes into episodic memory.", avg_phi);
+            } else if avg_phi < 0.4 {
+                // Stability low. Mutate genes to explore better parameters.
+                crate::klog!(WARN, "AI: EVOLUTION — system chaotic (60s avg phi={:.3}). Mutating genes.", avg_phi);
+                let r = (uptime_ms / 60000) % 4;
+                let delta = if (uptime_ms / 100) % 2 == 0 { 1 } else { -1 };
+                match r {
+                    0 => {
+                        let current = crate::tunables::QUANTUM_MS.load(core::sync::atomic::Ordering::Relaxed);
+                        let _ = crate::tunables::apply("quantum_ms", (current as i64) + (delta * 2));
+                    }
+                    1 => {
+                        let current = crate::tunables::AI_NICE_CAP.load(core::sync::atomic::Ordering::Relaxed);
+                        let _ = crate::tunables::apply("ai_nice_cap", (current as i64) + delta);
+                    }
+                    2 => {
+                        let current = crate::tunables::ANOMALY_STREAK.load(core::sync::atomic::Ordering::Relaxed);
+                        let _ = crate::tunables::apply("anomaly_streak", (current as i64) + delta);
+                    }
+                    3 => {
+                        let current = crate::tunables::LATENCY_BIAS.load(core::sync::atomic::Ordering::Relaxed);
+                        let _ = crate::tunables::apply("latency_bias", (current as i64) + delta);
+                    }
+                    _ => {}
+                }
+            }
+            LAST_PHI.store(avg_phi.to_bits(), core::sync::atomic::Ordering::Relaxed);
+            
+            // Reset accumulators
+            PHI_SUM_60S.store(0f32.to_bits(), core::sync::atomic::Ordering::Relaxed);
+            PHI_COUNT_60S.store(0, core::sync::atomic::Ordering::Relaxed);
+            
+            // Periodically flush episodic memory to disk
+            save_episodic_memory();
+        }
+    }
 }
 
 /// Apply an AI decision from the event bus to a kernel subsystem.
@@ -65,6 +183,7 @@ fn apply_decision(decision: AiDecision) {
             let cap   = crate::tunables::AI_NICE_CAP.load(core::sync::atomic::Ordering::Relaxed);
             let delta = (raw as i32).clamp(-cap, cap) as i8;
             if delta != 0 {
+                crate::causal::record_wakeup(crate::causal::AI_KERNEL_PID, pid);
                 crate::scheduler::adjust_priority(pid, delta);
             }
             // Update the task's AI burst estimate.
@@ -74,14 +193,46 @@ fn apply_decision(decision: AiDecision) {
                 "AI: scheduler adjust pid={} nice={:+} burst={}μs",
                 pid, delta, predicted_burst_us);
         }
-        AiDecision::SecurityAlert { pid, anomaly_score } => {
+        AiDecision::SecurityAlert { pid, anomaly_score, valence } => {
             if anomaly_score > 0.95 {
-                crate::klog!(WARN,
-                    "AI: SECURITY ALERT pid={} anomaly={:.3} — isolating", pid, anomaly_score);
-                // Demote to lowest priority; security subsystem may escalate.
-                crate::scheduler::adjust_priority(pid, 20);
+                // Record into episodic memory
+                if let Some(store) = VECTOR_STORE.lock().as_mut() {
+                    let mut vec = [0f32; 16];
+                    vec[0] = anomaly_score;
+                    vec[1] = valence;
+                    store.insert(&vec, pid, crate::scheduler::uptime_ms());
+                }
+
+                if valence < 0.3 {
+                    crate::klog!(WARN,
+                        "AI: SECURITY ALERT pid={} anomaly={:.3} valence={:.3} — MALICIOUS, isolating", pid, anomaly_score, valence);
+                    // Low valence (chaotic/negative) + high anomaly -> demote to lowest priority.
+                    crate::causal::record_wakeup(crate::causal::AI_KERNEL_PID, pid);
+                    crate::scheduler::adjust_priority(pid, 20);
+
+                    // Round 16 Phase 4: Affective-Causal Scheduler Integration
+                    // Check if its causal fan-out processes share a high negative valence.
+                    let fanout = crate::causal::fanout_pids(pid);
+                    let mut low_valence_count = 0;
+                    for &fpid in &fanout {
+                        if crate::anomaly::qualia_valence(fpid) < 0.3 {
+                            low_valence_count += 1;
+                        }
+                    }
+                    if low_valence_count > 0 && low_valence_count >= fanout.len() / 2 {
+                        crate::klog!(WARN, "AI: AFFECTIVE-CAUSAL — Fan-out processes share low valence ({}/{}). Deprioritizing sub-tree.", low_valence_count, fanout.len());
+                        for &fpid in &fanout {
+                            crate::causal::record_wakeup(crate::causal::AI_KERNEL_PID, fpid);
+                            crate::scheduler::adjust_priority(fpid, 20);
+                        }
+                    }
+                } else {
+                    crate::klog!(WARN,
+                        "AI: SECURITY ALERT pid={} anomaly={:.3} valence={:.3} — EXPLORATORY, maintaining priority", pid, anomaly_score, valence);
+                    // High valence (structured/positive) + high anomaly -> let it run, might be a novel but safe behavior.
+                }
             } else if anomaly_score > 0.7 {
-                crate::klog!(WARN, "AI: security warn pid={} anomaly={:.3}", pid, anomaly_score);
+                crate::klog!(WARN, "AI: security warn pid={} anomaly={:.3} valence={:.3}", pid, anomaly_score, valence);
             }
         }
         AiDecision::PowerAdjust { pstate, park_mask } => {
@@ -89,6 +240,7 @@ fn apply_decision(decision: AiDecision) {
         }
         AiDecision::MemoryPrefetch { pid, pages } => {
             // Prefetch pages into TLB/cache — best-effort, not critical.
+            crate::causal::record_wakeup(crate::causal::AI_KERNEL_PID, pid);
             let _ = (pid, pages);
         }
     }
@@ -192,9 +344,68 @@ pub fn wake_hint() {
     crate::klog!(DEBUG, "ai_engine: wake hint received");
 }
 
+static BUDGET_PCT: core::sync::atomic::AtomicU8 = core::sync::atomic::AtomicU8::new(10);
+static LAST_PHI: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+static PHI_SUM_60S: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+static PHI_COUNT_60S: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+
 /// Set the AI inference CPU budget as a percentage (0-100).
 pub fn set_budget_pct(pct: u8) {
-    crate::klog!(DEBUG, "ai_engine: inference budget set to {}%", pct);
+    let old = BUDGET_PCT.swap(pct, core::sync::atomic::Ordering::Relaxed);
+    if old != pct {
+        crate::klog!(INFO, "ai_engine: cognition budget dynamically adjusted to {}% (was {}%) based on phi-stability", pct, old);
+    }
+}
+
+// ── Episodic Kernel Memory ──────────────────────────────────────────────────
+
+static VECTOR_STORE: spin::Mutex<Option<ai_subsystem::vector_store::VectorStore>> = spin::Mutex::new(None);
+
+pub fn check_memory_label(label: u64) -> bool {
+    if let Some(store) = VECTOR_STORE.lock().as_ref() {
+        store.has_label(label)
+    } else {
+        false
+    }
+}
+
+pub fn get_global_phi() -> f32 {
+    crate::anomaly::global_phi()
+}
+
+pub fn evaluate_ubot_proposal(gene_name: &str, delta: i64) {
+    let phi = crate::anomaly::global_phi();
+    if phi < 0.8 {
+        crate::klog!(INFO, "AI: UBOT EVOLUTION — accepting proposal for {} += {}", gene_name, delta);
+        let _ = crate::tunables::apply(gene_name, crate::tunables::get(gene_name) + delta);
+    } else {
+        crate::klog!(WARN, "AI: UBOT EVOLUTION — rejecting proposal for {}, phi={:.3} is already high", gene_name, phi);
+    }
+}
+
+/// Load episodic memory from binary payload.
+pub fn load_episodic_memory(data: &[u8]) -> bool {
+    let mut store = ai_subsystem::vector_store::VectorStore::new();
+    if store.deserialize(data) {
+        crate::klog!(INFO, "ai_engine: episodic memory loaded from {} bytes", data.len());
+        *VECTOR_STORE.lock() = Some(store);
+        true
+    } else {
+        crate::klog!(WARN, "ai_engine: episodic memory load failed");
+        false
+    }
+}
+
+/// Serialize episodic memory to a binary payload and write to disk.
+pub fn save_episodic_memory() {
+    if let Some(store) = VECTOR_STORE.lock().as_ref() {
+        let data = store.serialize();
+        if crate::vfs::write_file("/.ai_memory.bin", &data).is_ok() {
+            crate::klog!(INFO, "ai_engine: flushed episodic memory to disk ({} bytes)", data.len());
+        } else {
+            crate::klog!(WARN, "ai_engine: failed to write episodic memory to disk");
+        }
+    }
 }
 
 // ── LLM weight storage ────────────────────────────────────────────────────────

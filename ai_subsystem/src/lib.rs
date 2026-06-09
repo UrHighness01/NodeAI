@@ -18,3 +18,4 @@ pub mod domains;
 pub mod safety;
 pub mod event_bus;
 pub mod audit;
+pub mod vector_store;

@@ -14,6 +14,8 @@
 
 use spin::Mutex;
 
+pub const AI_KERNEL_PID: u64 = u64::MAX;
+
 const N_EDGES: usize = 512;
 
 #[derive(Clone, Copy, Default)]
@@ -69,7 +71,20 @@ impl CausalGraph {
             let e = &self.edges[idx];
             if e.waker == 0 && e.wakee == 0 { continue; }
             let age = now_ms.saturating_sub(e.uptime_ms);
-            out.push_str(&alloc::format!("{:<7} {:<7} {}\n", e.waker, e.wakee, age));
+            
+            let waker_str = if e.waker == AI_KERNEL_PID {
+                alloc::string::String::from("AI_KNL ")
+            } else {
+                alloc::format!("{:<7}", e.waker)
+            };
+            
+            let wakee_str = if e.wakee == AI_KERNEL_PID {
+                alloc::string::String::from("AI_KNL ")
+            } else {
+                alloc::format!("{:<7}", e.wakee)
+            };
+            
+            out.push_str(&alloc::format!("{} {} {}\n", waker_str, wakee_str, age));
         }
         out.push_str(&alloc::format!("\ntotal_edges={}\n", self.count));
         out.into_bytes()
@@ -186,8 +201,10 @@ pub fn format_report() -> alloc::vec::Vec<u8> {
         if let Some((wakee, prob)) = predict_next_wake(waker) {
             if prob >= 0.3 {
                 let boost = if prob >= 0.5 { "yes(-5)" } else { "no" };
+                let waker_str = if waker == AI_KERNEL_PID { alloc::string::String::from("AI_KNL   ") } else { alloc::format!("{:<9}", waker) };
+                let wakee_str = if wakee == AI_KERNEL_PID { alloc::string::String::from("AI_KNL       ") } else { alloc::format!("{:<13}", wakee) };
                 out.push_str(&alloc::format!(
-                    "{:<9} {:<13} {:.2}  {}\n", waker, wakee, prob, boost));
+                    "{} {} {:.2}  {}\n", waker_str, wakee_str, prob, boost));
             }
         }
     }
@@ -216,6 +233,11 @@ pub fn waker_chain(pid: u64, depth: usize) -> alloc::vec::Vec<u64> {
 /// Return the number of distinct processes that `pid` has woken in recent history.
 /// Used as a causal fanout metric for TCP and OOM priority.
 pub fn causal_fanout(pid: u64) -> usize {
+    fanout_pids(pid).len()
+}
+
+/// Return the list of distinct processes that `pid` has woken in recent history.
+pub fn fanout_pids(pid: u64) -> alloc::vec::Vec<u64> {
     let graph = GRAPH.lock();
     let len = graph.count.min(N_EDGES).min(64);
     let mut wakees: alloc::collections::BTreeSet<u64> = alloc::collections::BTreeSet::new();
@@ -224,10 +246,30 @@ pub fn causal_fanout(pid: u64) -> usize {
         let e = &graph.edges[idx];
         if e.waker == pid && e.wakee != 0 { wakees.insert(e.wakee); }
     }
-    wakees.len()
+    wakees.into_iter().collect()
 }
 
 // ── I/O error attribution ─────────────────────────────────────────────────────
+
+/// Check if the causal chain leading to `pid` matches a high-risk failure signature.
+/// A high-risk signature is either:
+/// 1) A deep chain (>= 3) where most tasks are chaotic (phi < 0.3).
+/// 2) A massive causal fanout (> 16) from a chaotic waker (phi < 0.4).
+pub fn is_high_risk_chain(pid: u64) -> bool {
+    let chain = waker_chain(pid, 3);
+    if chain.len() >= 3 {
+        let chaotic_count = chain.iter().filter(|&&c| crate::anomaly::phi(c) < 0.3).count();
+        if chaotic_count >= 3 {
+            return true;
+        }
+    }
+    
+    if causal_fanout(pid) > 16 && crate::anomaly::phi(pid) < 0.4 {
+        return true;
+    }
+    
+    false
+}
 
 /// When a page write-back fails for `ino`, find the process most causally
 /// responsible (most recently active waker) and send it SIGIO (29) as an

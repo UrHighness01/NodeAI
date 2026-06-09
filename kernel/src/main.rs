@@ -90,6 +90,7 @@ pub mod job_control;       // cognitive fg/bg with causal subgraph priority elev
 pub mod namespaces;        // behavioral namespaces — AI-triggered dynamic isolation
 pub mod syscall_proxy;     // adaptive syscall proxy — AI-driven I/O pre-fetch + batching
 pub mod meta_cognitive;    // meta-cognitive reflexive loop
+pub mod ubot_api;          // autonomous ubot metacognitive agent API
 
 /// Bootloader configuration — tells the bootloader to map all physical memory
 /// at a dynamic virtual offset so we can access physical frames by VA.
@@ -360,6 +361,18 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
     if panicking_pid > 0 {
         let chain = causal::waker_chain(panicking_pid, 8);
         crash_dump::record_causal_chain(&chain);
+        
+        // Phase 4: Introspective Loop Closure — Causal Blame Report
+        let mut causal_blame = alloc::string::String::new();
+        causal_blame.push_str("CAUSAL BLAME REPORT\n");
+        causal_blame.push_str("-------------------\n");
+        for (i, node) in chain.iter().enumerate() {
+            let anomaly_score = crate::anomaly::score(*node);
+            let has_mitigation = crate::ai_engine::check_memory_label(*node);
+            causal_blame.push_str(&alloc::format!("Hop {}: PID={} (anomaly_score={:.3}, has_mitigation={})\n", 
+                i, *node, anomaly_score, has_mitigation));
+        }
+        logger::log(logger::Level::ERROR, "panic.causal", 0, format_args!("\n{}", causal_blame));
     }
 
     // AI self-diagnosis — only if LLM is loaded (AtomicBool check, no locks).

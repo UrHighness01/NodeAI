@@ -10,4 +10,3 @@ rustflags = [
     "-C", "link-arg=-Tlayout.ld",
 ]
 linker = "rust-lld"
-linker-flavor = "ld.lld"

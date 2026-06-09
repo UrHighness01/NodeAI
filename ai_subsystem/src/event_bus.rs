@@ -22,7 +22,7 @@ pub enum KernelEvent {
 pub enum AiDecision {
     SchedulerAdjust { pid: u64, nice_delta: i8, predicted_burst_us: u64 },
     MemoryPrefetch  { pid: u64, pages: u32 },
-    SecurityAlert   { pid: u64, anomaly_score: f32 },
+    SecurityAlert   { pid: u64, anomaly_score: f32, valence: f32 },
     PowerAdjust     { pstate: u8, park_mask: u64 },
 }
 

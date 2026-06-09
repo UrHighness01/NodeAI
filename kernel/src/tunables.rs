@@ -68,6 +68,18 @@ pub fn apply(name: &str, value: i64) -> Result<i64, &'static str> {
     }
 }
 
+/// Get the current value of a tunable.
+pub fn get(name: &str) -> i64 {
+    match name {
+        "quantum_ms" => QUANTUM_MS.load(Ordering::Relaxed) as i64,
+        "latency_bias" => LATENCY_BIAS.load(Ordering::Relaxed) as i64,
+        "batch_bias" => BATCH_BIAS.load(Ordering::Relaxed) as i64,
+        "ai_nice_cap" => AI_NICE_CAP.load(Ordering::Relaxed) as i64,
+        "anomaly_streak" => ANOMALY_STREAK.load(Ordering::Relaxed) as i64,
+        _ => 0,
+    }
+}
+
 /// Format the current tunable table for /ai/tunables.
 pub fn format_table() -> alloc::vec::Vec<u8> {
     alloc::format!(
