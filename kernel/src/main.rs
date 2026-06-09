@@ -70,6 +70,7 @@ pub mod coherence;      // coherence-horizon anomaly attribution
 pub mod fuzzer;         // in-kernel syscall parseltongue fuzzer
 pub mod autotune;       // dynamic EMA parameter adaptation
 pub mod critic;         // adversarial critic for scheduler hardening
+pub mod adversarial_critic; // adversarial security critic for namespace hardening
 pub mod el_engine;      // scriptable kernel policy hooks
 pub mod semantic_sandbox; // INT8 semantic intent sandboxing
 pub mod hot_lock;       // AI-managed hot-lock splitting
@@ -271,6 +272,10 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     // ── Phase 11: Syscall fast-path (LSTAR/STAR/FMASK MSRs) ──────────────────
     syscall::init_lstar();
     klog!(INFO, "SYSCALL: fast-path active");
+
+    // ── Phase 12: Adversarial Security Critic ──────────────────────────────
+    adversarial_critic::init();
+    klog!(INFO, "CRITIC: Adversarial security critic thread spawned");
 
     klog!(INFO, "NodeAI Kernel boot complete — entering idle loop");
     vga_println!("NodeAI boot complete. AI kernel online.");
