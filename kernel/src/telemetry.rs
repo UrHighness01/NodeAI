@@ -212,6 +212,12 @@ pub fn apply_proposal(key: &str, value: i64) {
 /// Heavy procfs refresh (ai/fingerprints, transformer_sched etc.) is intentionally
 /// NOT called here — it runs from idle_loop's 5-second heartbeat to keep the
 /// 100ms tick path lightweight and lock-free.
+// Last observed values for binding events direction tracking.
+static mut LAST_SCHED: f32 = 0.0;
+static mut LAST_MEM: f32 = 0.0;
+static mut LAST_ANOM: f32 = 0.0;
+static mut LAST_SYSC: f32 = 0.0;
+
 pub fn tick(uptime_ms: u64) {
     if uptime_ms % 1000 < 10 {
         refresh_vfs();
@@ -234,5 +240,23 @@ pub fn tick(uptime_ms: u64) {
         // Syscall: syscall count from syscall module
         let syscall_val = crate::syscall::syscall_count() as f32;
         crate::cross_modal::observe(crate::cross_modal::Domain::Syscall, syscall_val);
+
+        unsafe {
+            // Feed binding events observer with direction changes
+            let sched_dir = if coherence_val > LAST_SCHED * 1.01 { 1 } else if coherence_val < LAST_SCHED * 0.99 { -1 } else { 0 };
+            LAST_SCHED = coherence_val;
+            let mem_dir = if mem_val > LAST_MEM * 1.01 { 1 } else if mem_val < LAST_MEM * 0.99 { -1 } else { 0 };
+            LAST_MEM = mem_val;
+            let anom_dir = if anomaly_val > LAST_ANOM * 1.01 { 1 } else if anomaly_val < LAST_ANOM * 0.99 { -1 } else { 0 };
+            LAST_ANOM = anomaly_val;
+            let sys_dir = if syscall_val > LAST_SYSC * 1.01 { 1 } else if syscall_val < LAST_SYSC * 0.99 { -1 } else { 0 };
+            LAST_SYSC = syscall_val;
+
+            crate::binding_events::observe(crate::cross_modal::Domain::Scheduler, sched_dir);
+            crate::binding_events::observe(crate::cross_modal::Domain::Memory, mem_dir);
+            crate::binding_events::observe(crate::cross_modal::Domain::Anomaly, anom_dir);
+            crate::binding_events::observe(crate::cross_modal::Domain::Syscall, sys_dir);
+            crate::binding_events::tick();
+        }
     }
 }

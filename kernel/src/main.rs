@@ -100,6 +100,7 @@ pub mod novel_detector;   // temporal novelty detection (Project-C)
 pub mod causal_recovery;  // episodic recovery from past crashes (Project-C/VectorStore)
 pub mod info_bottleneck; // information bottleneck retention analysis (Project-C)
 pub mod causal_intervention; // targeted root-cause namespace escalation (Project-C)
+pub mod binding_events;  // cross-modal binding event detection (Project-C)
 
 /// Bootloader configuration — tells the bootloader to map all physical memory
 /// at a dynamic virtual offset so we can access physical frames by VA.
