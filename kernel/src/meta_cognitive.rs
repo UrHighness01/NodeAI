@@ -39,7 +39,7 @@ pub fn tick() {
     // 1. Goal: Memory Abundance
     if free_mb < goals.target_free_memory_mb {
         crate::klog!(WARN, "meta_cognitive: System drifting from Memory Abundance goal ({}MB < {}MB). Recalibrating VMM aggressiveness.", free_mb, goals.target_free_memory_mb);
-        // In a real implementation we would tune the VMM or LRU scan rate here
+        crate::memory::vmm::increase_reclaim_aggressiveness();
         recalibrated = true;
     }
 

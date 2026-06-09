@@ -90,6 +90,20 @@ pub fn unmap_page(page: Page<Size4KiB>) -> Result<PhysFrame<Size4KiB>, &'static 
     Ok(frame)
 }
 
+use core::sync::atomic::{AtomicU8, Ordering};
+static RECLAIM_AGGRESSIVENESS: AtomicU8 = AtomicU8::new(1);
+
+pub fn increase_reclaim_aggressiveness() {
+    let old = RECLAIM_AGGRESSIVENESS.fetch_add(1, Ordering::Relaxed);
+    crate::klog!(INFO, "vmm: Reclaim aggressiveness increased from {} to {}", old, old + 1);
+    
+    // Perform a global reclaim pass on all user tasks
+    let pids = crate::scheduler::all_pids();
+    for pid in pids {
+        reclaim_file_backed_pages(pid);
+    }
+}
+
 /// Simulate transparent LRU reclaim by unmapping file-backed user pages.
 /// When the user process faults on them again, they will be paged back in from NVMe.
 pub fn reclaim_file_backed_pages(pid: u64) {
@@ -99,6 +113,7 @@ pub fn reclaim_file_backed_pages(pid: u64) {
     };
 
     let mut reclaimed_pages = 0;
+    let aggressiveness = RECLAIM_AGGRESSIVENESS.load(Ordering::Relaxed);
 
     unsafe {
         let phys_off = PHYS_OFFSET;
@@ -122,13 +137,24 @@ pub fn reclaim_file_backed_pages(pid: u64) {
                     for l1i in 0..512usize {
                         let l1e = *l1.add(l1i);
                         // Check if PRESENT but NOT ACCESSED (LRU candidate)
-                        if l1e & PTE_PRESENT != 0 && l1e & PTE_ACCESSED == 0 {
-                            // Clear PRESENT, set SWAPPED flag
-                            *l1.add(l1i) = (l1e & !PTE_PRESENT) | PTE_SWAPPED;
+                        if l1e & PTE_PRESENT != 0 {
+                            let mut reclaim = false;
+                            if l1e & PTE_ACCESSED == 0 {
+                                reclaim = true;
+                            } else if aggressiveness > 3 {
+                                // High aggressiveness: reclaim even if accessed, but clear accessed bit for next time?
+                                // Let's just aggressively reclaim
+                                reclaim = true;
+                            }
                             
-                            // In a full implementation, we'd queue the physical frame to NVMe here.
-                            // We use a genuine VMM unmap by clearing the PTE, which forces a fault later.
-                            reclaimed_pages += 1;
+                            if reclaim {
+                                // Clear PRESENT, set SWAPPED flag
+                                *l1.add(l1i) = (l1e & !PTE_PRESENT) | PTE_SWAPPED;
+                                
+                                // In a full implementation, we'd queue the physical frame to NVMe here.
+                                // We use a genuine VMM unmap by clearing the PTE, which forces a fault later.
+                                reclaimed_pages += 1;
+                            }
                         }
                     }
                 }
@@ -139,7 +165,9 @@ pub fn reclaim_file_backed_pages(pid: u64) {
         core::arch::asm!("mov cr3, {}", in(reg) cr3, options(nostack, nomem));
     }
 
-    crate::klog!(INFO, "vmm: Reclaimed {} file-backed LRU pages for pid={} to NVMe swap", reclaimed_pages, pid);
+    if reclaimed_pages > 0 {
+        crate::klog!(INFO, "vmm: Reclaimed {} file-backed LRU pages for pid={} to NVMe swap", reclaimed_pages, pid);
+    }
 }
 
 /// Translate a virtual address to its physical address.
