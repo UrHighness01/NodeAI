@@ -1389,15 +1389,18 @@ pub fn demand_page_vma(pid: u64, vaddr: u64) -> bool {
                     });
                     crate::klog!(DEBUG, "mmap file-fault: pid={} va={:#x} file_off={}", pid, page_aligned, page_file_off);
 
-                    // AI prefetch: speculatively load ahead pages into the page cache.
+                    // AI prefetch: speculatively warm the page cache for ahead pages.
                     // Prefetch 2 pages for random-access processes, 4 for sequential.
+                    // IMPORTANT: use heap Vec not stack array — this runs inside the page-fault
+                    // interrupt handler where the kernel stack is already deep; a 4 KiB stack
+                    // allocation per iteration would overflow the stack and generate #UD/#SS.
                     let cluster = crate::fingerprint::cluster_of(pid);
-                    let prefetch_pages: u64 = if cluster <= 1 { 4 } else { 2 }; // 0,1 = sequential
+                    let prefetch_pages: u64 = if cluster <= 1 { 4 } else { 2 };
                     let path_clone = fv.file_path.clone();
+                    let mut tmp: alloc::vec::Vec<u8> = alloc::vec![0u8; 4096];
                     for i in 1..=prefetch_pages {
                         let ahead_off = page_file_off + i * 4096;
                         if ahead_off >= fv.end.saturating_sub(vma_start) + fv.file_off { break; }
-                        let mut tmp = [0u8; 4096];
                         crate::page_cache::read_bytes(fv.ino, ahead_off, &mut tmp, |poff, frame| {
                             if let Ok(node) = crate::vfs::lookup(&path_clone) {
                                 if let Ok(mut fh) = node.open() {
