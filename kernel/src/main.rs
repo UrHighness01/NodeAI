@@ -102,6 +102,7 @@ pub mod info_bottleneck; // information bottleneck retention analysis (Project-C
 pub mod causal_intervention; // targeted root-cause namespace escalation (Project-C)
 pub mod binding_events;  // cross-modal binding event detection (Project-C)
 pub mod rlimit;         // POSIX resource limits (setrlimit/getrlimit)
+pub mod initrd;         // embedded userspace binary loader
 
 /// Bootloader configuration — tells the bootloader to map all physical memory
 /// at a dynamic virtual offset so we can access physical frames by VA.
@@ -288,6 +289,9 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
 
     // ── Phase 14: Users & authentication ─────────────────────────────────────
     users::init();
+
+    // Load embedded userspace binaries into VFS
+    crate::initrd::init();
 
     // Restore persistent episodic memory from disk (if available)
     crate::causal_recovery::load_from_disk();
