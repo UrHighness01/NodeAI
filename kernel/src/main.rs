@@ -72,6 +72,7 @@ pub mod autotune;       // dynamic EMA parameter adaptation
 pub mod critic;         // adversarial critic for scheduler hardening
 pub mod el_engine;      // scriptable kernel policy hooks
 pub mod semantic_sandbox; // INT8 semantic intent sandboxing
+pub mod hot_lock;       // AI-managed hot-lock splitting
 pub mod tunables;       // live AI-adjustable kernel parameters
 pub mod fingerprint;    // behavioral cluster classifier
 pub mod causal;         // live causal process wakeup DAG
