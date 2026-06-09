@@ -10,7 +10,7 @@ use alloc::collections::BTreeMap;
 use spin::Mutex;
 
 /// Global task table: PID → Task.
-static TASKS: Mutex<BTreeMap<Pid, Task>> = Mutex::new(BTreeMap::new());
+pub(crate) static TASKS: Mutex<BTreeMap<Pid, Task>> = Mutex::new(BTreeMap::new());
 static NEXT_PID: core::sync::atomic::AtomicU64 =
     core::sync::atomic::AtomicU64::new(1);
 
