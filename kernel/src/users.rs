@@ -198,6 +198,7 @@ pub fn init() {
         let mut g = GROUPS.lock();
         g.push(Group { name: String::from("root"),   gid: 0,    members: Vec::new() });
         g.push(Group { name: String::from("nodeai"), gid: 1000, members: Vec::new() });
+        g.push(Group { name: String::from("nobody"), gid: 65534, members: Vec::new() });
         g.push(Group { name: String::from("sudo"),   gid: 27,   members: alloc::vec![String::from("nodeai")] });
     }
 
@@ -215,6 +216,12 @@ pub fn init() {
             uid: 1000, gid: 1000,
             home: String::from("/home/nodeai"),
             shell: String::from("/bin/sh"),
+        });
+        u.push(User {
+            username: String::from("nobody"),
+            uid: 65534, gid: 65534,
+            home: String::from("/nonexistent"),
+            shell: String::from("/bin/false"),
         });
     }
 
@@ -364,6 +371,13 @@ fn create_home_dirs() {
 
 /// Get the currently active user's UID.
 pub fn current_uid() -> Uid {
+    // If a task is currently running, use its euid.
+    let pid = crate::scheduler::current_pid();
+    if pid > 0 { // Assuming 0 is idle/invalid, adjust if current_pid can be 0. Wait, in scheduler it might return 0.
+        if let Some(euid) = crate::scheduler::get_euid(pid) {
+            return euid;
+        }
+    }
     CURRENT_UID.load(core::sync::atomic::Ordering::Relaxed)
 }
 

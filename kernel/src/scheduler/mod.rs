@@ -150,6 +150,13 @@ pub unsafe extern "C" fn schedule_from_interrupt(old_rsp: u64) -> u64 {
             }
         };
         crate::transformer_sched::on_deschedule(pid, actual_nice, actual_burst, actual_pf);
+
+        // Phase 4: Phi-Metric Privilege Separation
+        // Demote highly chaotic (unpredictable) tasks to 'nobody' (65534)
+        if crate::anomaly::phi(pid) < 0.3 && get_euid(pid).unwrap_or(0) != 65534 {
+            crate::klog!(WARN, "SECURITY: pid={} phi is too low, dynamically demoting euid to 65534 (nobody)", pid);
+            set_euid(pid, 65534);
+        }
     }
 
     // Step 2: per-tick subsystem work.
@@ -849,4 +856,19 @@ pub fn task_mem_bytes(pid: Pid) -> u64 {
 /// Return the CR3 (PML4) value for a task, or None if the task does not exist.
 pub fn get_task_cr3(pid: Pid) -> Option<u64> {
     TASKS.lock().get(&pid).map(|t| t.cr3)
+}
+
+/// Set the task's euid.
+pub fn set_euid(pid: u64, euid: u32) {
+    if let Some(mut tasks) = TASKS.try_lock() {
+        if let Some(t) = tasks.get_mut(&pid) {
+            t.euid = euid;
+        }
+    }
+}
+
+/// Get the task's euid without blocking.
+pub fn get_euid(pid: u64) -> Option<u32> {
+    let tasks = TASKS.try_lock()?;
+    tasks.get(&pid).map(|t| t.euid)
 }

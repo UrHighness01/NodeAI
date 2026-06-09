@@ -28,6 +28,10 @@ struct TaskAnomaly {
     total:   u32,
     /// Bigram transition counts: (prev_nr, cur_nr) → count.
     bigrams: BTreeMap<(u16, u16), u32>,
+    /// Marginal transition counts: prev_nr → count.
+    marginals: BTreeMap<u16, u32>,
+    /// Running predictability score (phi) [0.0, 1.0].
+    pub phi: f32,
     /// Current anomaly score (0.0 = normal, 1.0 = highly anomalous).
     pub score: f32,
     /// Consecutive anomalous transitions (resets when normal).
@@ -36,24 +40,35 @@ struct TaskAnomaly {
 
 impl TaskAnomaly {
     fn new() -> Self {
-        Self { prev_nr: 0, total: 0, bigrams: BTreeMap::new(), score: 0.0, streak: 0 }
+        Self { prev_nr: 0, total: 0, bigrams: BTreeMap::new(), marginals: BTreeMap::new(), phi: 1.0, score: 0.0, streak: 0 }
     }
 
     /// Feed the next syscall number and return (is_anomalous, score).
     fn observe(&mut self, nr: u16) -> (bool, f32) {
-        let key = (self.prev_nr, nr);
+        let prev = self.prev_nr;
+        let key = (prev, nr);
         self.prev_nr = nr;
         self.total = self.total.saturating_add(1);
 
+        let marginal_count = self.marginals.get(&prev).copied().unwrap_or(0);
+        let bigram_count = self.bigrams.get(&key).copied().unwrap_or(0);
+
+        if self.total >= WARMUP_CALLS && marginal_count > 0 {
+            let p = bigram_count as f32 / marginal_count as f32;
+            self.phi = self.phi * 0.95 + p * 0.05;
+        }
+
         if self.total < WARMUP_CALLS {
             // Warmup: just record, don't score.
+            *self.marginals.entry(prev).or_insert(0) += 1;
             *self.bigrams.entry(key).or_insert(0) += 1;
             return (false, 0.0);
         }
 
-        let count = self.bigrams.get(&key).copied().unwrap_or(0);
+        let count = bigram_count;
         let freq  = count as f32 / self.total as f32;
 
+        *self.marginals.entry(prev).or_insert(0) += 1;
         *self.bigrams.entry(key).or_insert(0) += 1;
 
         let anomalous = freq < crate::autotune::get_anomaly_threshold() && count == 0; // never-seen transition
@@ -144,6 +159,11 @@ fn check_cross_process(victim_pid: u64, victim_score: f32) {
 /// Remove state when a task exits.
 pub fn remove(pid: u64) {
     DETECTORS.lock().remove(&pid);
+}
+
+/// Return the predictability score (phi) for a task (1.0 = predictable, 0.0 = chaotic).
+pub fn phi(pid: u64) -> f32 {
+    DETECTORS.lock().get(&pid).map(|d| d.phi).unwrap_or(1.0)
 }
 
 /// Return current anomaly score for a task (0.0 = normal).
