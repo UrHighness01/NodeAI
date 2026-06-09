@@ -94,8 +94,9 @@ pub mod syscall_proxy;     // adaptive syscall proxy — AI-driven I/O pre-fetch
 pub mod meta_cognitive;    // meta-cognitive reflexive loop
 pub mod ubot_api;          // autonomous ubot metacognitive agent API
 pub mod simd_context;      // AVX2 SIMD xsave/xrstor infrastructure
-pub mod novel_detector;   // temporal novelty detection (Project-C)
 pub mod collective_integration; // cross-process coherence coupling (Project-C)
+pub mod cross_modal;       // cross-domain predictive coupling (Project-C)
+pub mod novel_detector;   // temporal novelty detection (Project-C)
 
 /// Bootloader configuration — tells the bootloader to map all physical memory
 /// at a dynamic virtual offset so we can access physical frames by VA.

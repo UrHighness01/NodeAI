@@ -95,8 +95,7 @@ pub fn refresh() {
     write_file("/proc", "gla_prefetch",      crate::gla_prefetch::format_report());
     write_file("/proc", "causal_prefetch",   crate::causal_prefetch::format_report());
     write_file("/proc", "collective",        crate::collective_integration::format_report());
-    write_file("/proc", "novelty",           crate::novel_detector::format_report());
-}
+    write_file("/proc", "novelty",           crate::novel_detector::format_report());    write_file("/proc", "cross_modal",     crate::cross_modal::format_report());}
 
 // ── Content generators ────────────────────────────────────────────────────────
 

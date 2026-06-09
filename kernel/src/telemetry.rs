@@ -208,11 +208,31 @@ pub fn apply_proposal(key: &str, value: i64) {
 
 /// Called every timer tick from the scheduler (fast, no allocation).
 /// Refresh telemetry VFS file once per second.
+/// Feeds cross-modal coupling tracker with subsystem signals.
 /// Heavy procfs refresh (ai/fingerprints, transformer_sched etc.) is intentionally
 /// NOT called here — it runs from idle_loop's 5-second heartbeat to keep the
 /// 100ms tick path lightweight and lock-free.
 pub fn tick(uptime_ms: u64) {
     if uptime_ms % 1000 < 10 {
         refresh_vfs();
+    }
+
+    // Feed cross-modal coupling tracker every tick (~10ms)
+    if uptime_ms % 100 < 10 {
+        // Scheduler coherence proxy: task count + uptime-derived rate
+        let coherence_val = crate::scheduler::task_count() as f32;
+        crate::cross_modal::observe(crate::cross_modal::Domain::Scheduler, coherence_val);
+
+        // Memory: free MB
+        let mem_val = crate::memory::free_mb() as f32;
+        crate::cross_modal::observe(crate::cross_modal::Domain::Memory, mem_val);
+
+        // Global anomaly score as system health signal
+        let anomaly_val = crate::anomaly::global_score();
+        crate::cross_modal::observe(crate::cross_modal::Domain::Anomaly, anomaly_val);
+
+        // Syscall: syscall count from syscall module
+        let syscall_val = crate::syscall::syscall_count() as f32;
+        crate::cross_modal::observe(crate::cross_modal::Domain::Syscall, syscall_val);
     }
 }
