@@ -1196,6 +1196,13 @@ unsafe fn sys_open(path_ptr: u64, path_len: u64, _flags: u64) -> i64 {
         Err(_) => return EINVAL,
     };
     let pid = crate::scheduler::current_pid();
+    
+    // Semantic Syscall Sandboxing Phase
+    if !crate::semantic_sandbox::is_semantically_safe(pid, path_str) {
+        crate::klog!(WARN, "semantic_sandbox: Dropped sys_open for anomalous intent: {}", path_str);
+        return -13; // EACCES
+    }
+
     let is_anomalous = crate::namespaces::level_of(pid) >= crate::namespaces::IsoLevel::Isolated;
 
     let path_to_lookup = if is_anomalous {
