@@ -1200,6 +1200,7 @@ unsafe fn redraw_terminal_line(row: usize) {
 
 unsafe fn scroll_terminal() {
     let clamped = term_rows_clamped();
+    if clamped == 0 { return; }
     let rows = clamped - 1;
     for r in 0..rows {
         TERM_BUF[r]   = TERM_BUF[r + 1];
