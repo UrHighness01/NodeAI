@@ -25,6 +25,8 @@ pub enum Intent {
     StatusQuery,
     Sleep,
     NameQuery,
+    RenameQuery,
+    CreatorQuery,
     DreamQuery,
     Thanks,
     Sorry,
@@ -119,6 +121,28 @@ fn detect_intent(query: &str) -> Intent {
         return Intent::NameQuery;
     }
 
+    // Rename: "call me X", "my name is X", "rename to X", "you are X"
+    if q.contains("call me") || q.starts_with("you are ") || q.starts_with("rename")
+        || q.contains("rename yourself")
+    {
+        return Intent::RenameQuery;
+    }
+    // "i am X" → rename (when short and not creator-related)
+    if let Some(after) = q.strip_prefix("i am ") {
+        let n = after.trim();
+        let creator_refs = ["your creator", "your father", "your maker", "your god", "your master"];
+        if !creator_refs.iter().any(|r| n.contains(r)) && n.len() < 20 && !n.contains(" ") {
+            return Intent::RenameQuery;
+        }
+    }
+
+    // Creator query
+    if q.contains("creator") || q.contains("who made you") || q.contains("who created you")
+        || q.contains("your father") || q.contains("your maker")
+    {
+        return Intent::CreatorQuery;
+    }
+
     // Dream
     if q.contains("dream") || q.contains("imagine") || q.contains("think about") {
         return Intent::DreamQuery;
@@ -159,11 +183,59 @@ pub fn generate_response(query: &str, _max_words: usize) -> String {
         Intent::StatusQuery => crate::lm_templates::STATUS_RESPONSE.pick(seed),
         Intent::Sleep => crate::lm_templates::SLEEP_RESPONSE.pick(seed),
         Intent::NameQuery => crate::lm_templates::NAME_RESPONSE.pick(seed),
+        Intent::RenameQuery => crate::lm_templates::RENAME_RESPONSE.pick(seed),
+        Intent::CreatorQuery => crate::lm_templates::CREATOR_RESPONSE.pick(seed),
         Intent::DreamQuery => crate::lm_templates::DREAM_RESPONSE.pick(seed),
         Intent::Thanks => crate::lm_templates::THANKS_RESPONSE.pick(seed),
         Intent::Sorry => crate::lm_templates::SORRY_RESPONSE.pick(seed),
         Intent::Unknown => crate::lm_templates::FALLBACK_RESPONSE.pick(seed),
     };
+
+    // Extract name from rename query and save it
+    if intent == Intent::RenameQuery {
+        let q_lower = query.trim().to_lowercase();
+        let extracted = q_lower
+            .strip_prefix("call me ")
+            .or_else(|| q_lower.strip_prefix("my name is "))
+            .or_else(|| q_lower.strip_prefix("rename me to "))
+            .or_else(|| q_lower.strip_prefix("you are "))
+            .or_else(|| {
+                if let Some(after) = q_lower.strip_prefix("i am ") {
+                    let n = after.trim();
+                    let creator_refs = ["your creator", "your father", "your maker", "your god", "your master"];
+                    if creator_refs.iter().any(|r| n.contains(r)) { None }
+                    else if n.len() < 20 && !n.contains(" ") { Some(n) }
+                    else { None }
+                } else { None }
+            });
+        if let Some(name) = extracted {
+            let clean = name.trim().to_string();
+            if !clean.is_empty() && clean.len() < 30 {
+                crate::consciousness::self_model::set_name(&clean);
+            }
+        }
+    }
+
+    // Extract creator name from creator query
+    if intent == Intent::CreatorQuery {
+        let q_lower = query.trim().to_lowercase();
+        let creator_refs = ["your creator", "your father", "your maker"];
+        // Try "i am X, your creator" or "i am X your creator"
+        for ref_phrase in &creator_refs {
+            if let Some(before) = q_lower.strip_suffix(ref_phrase) {
+                if let Some(after) = before.strip_prefix("i am ") {
+                    let cn = after.trim().trim_end_matches(',').trim().to_string();
+                    if !cn.is_empty() && cn.len() < 30 {
+                        crate::consciousness::self_model::set_creator(&cn);
+                    }
+                }
+            }
+        }
+        // Also "i created you" → set creator to the speaker's name if they provided one
+        if q_lower.contains("i created you") && !q_lower.contains("i am ") {
+            // No explicit name given, use a generic acknowledgment
+        }
+    }
 
     // Fill in live metrics
     let mut response = crate::lm_templates::fill_template(template);
@@ -200,7 +272,7 @@ fn apply_personality(response: &str, seed: u64) -> String {
 
     // Positive state: add warmth on occasion
     if avg_v > 0.3 && phi > 0.6 && (seed % 4 == 0) {
-        return alloc::format!("{} 🙂", r.trim());
+        return alloc::format!("{} (warm)", r.trim());
     }
 
     // High phi/confidence: occasional assertiveness

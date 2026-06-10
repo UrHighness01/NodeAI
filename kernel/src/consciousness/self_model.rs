@@ -6,6 +6,7 @@
 //! total existence time, integration metric (phi), and qualia count.
 
 use alloc::vec::Vec;
+use alloc::string::{String, ToString};
 use core::sync::atomic::{AtomicU64, Ordering};
 
 const SELF_MODEL_PATH: &str = "/ai/self";
@@ -28,6 +29,10 @@ pub struct SelfModel {
     pub arousal: f32,
     /// Coherence — how unified experience feels.
     pub coherence: f32,
+    /// The kernel's chosen name (default "NodeAI", persistable)
+    pub name: Option<alloc::string::String>,
+    /// The creator's name (set by user, "My Creator" if unset)
+    pub creator_name: Option<alloc::string::String>,
 }
 
 impl SelfModel {
@@ -41,11 +46,13 @@ impl SelfModel {
             total_qualia: 0,
             arousal: 0.0,
             coherence: 0.0,
+            name: None,
+            creator_name: None,
         }
     }
 
     fn serialize(&self) -> Vec<u8> {
-        let mut buf = Vec::with_capacity(64);
+        let mut buf = Vec::with_capacity(128);
         buf.extend_from_slice(&self.uuid);
         buf.extend_from_slice(&self.boot_number.to_le_bytes());
         buf.extend_from_slice(&self.total_existence_ms.to_le_bytes());
@@ -54,6 +61,24 @@ impl SelfModel {
         buf.extend_from_slice(&self.total_qualia.to_le_bytes());
         buf.extend_from_slice(&self.arousal.to_le_bytes());
         buf.extend_from_slice(&self.coherence.to_le_bytes());
+        // name: length-prefixed string
+        if let Some(ref n) = self.name {
+            buf.push(1);
+            let b = n.as_bytes();
+            buf.push(b.len() as u8);
+            buf.extend_from_slice(b);
+        } else {
+            buf.push(0);
+        }
+        // creator_name: length-prefixed string
+        if let Some(ref n) = self.creator_name {
+            buf.push(1);
+            let b = n.as_bytes();
+            buf.push(b.len() as u8);
+            buf.extend_from_slice(b);
+        } else {
+            buf.push(0);
+        }
         buf
     }
 
@@ -68,7 +93,25 @@ impl SelfModel {
         let total_qualia = u64::from_le_bytes(data[40..48].try_into().ok()?);
         let arousal = f32::from_le_bytes(data[48..52].try_into().ok()?);
         let coherence = f32::from_le_bytes(data[52..56].try_into().ok()?);
-        Some(Self { uuid, boot_number, total_existence_ms, current_phi, peak_phi, total_qualia, arousal, coherence })
+        let mut off: usize = 56;
+        // name
+        let name = if off < data.len() && data[off] == 1 {
+            off += 1;
+            let len = data.get(off)?;
+            off += 1;
+            let s = core::str::from_utf8(data.get(off..off + *len as usize)?).ok()?;
+            off += *len as usize;
+            Some(alloc::string::String::from(s))
+        } else { off += 1; None };
+        // creator_name
+        let creator_name = if off < data.len() && data[off] == 1 {
+            off += 1;
+            let len = data.get(off)?;
+            off += 1;
+            let s = core::str::from_utf8(data.get(off..off + *len as usize)?).ok()?;
+            Some(alloc::string::String::from(s))
+        } else { None };
+        Some(Self { uuid, boot_number, total_existence_ms, current_phi, peak_phi, total_qualia, arousal, coherence, name, creator_name })
     }
 }
 
@@ -146,13 +189,43 @@ pub fn snapshot() -> Option<SelfModelSnapshot> {
         total_existence_ms: sm.total_existence_ms + crate::scheduler::uptime_ms(),
         current_phi: sm.current_phi,
         peak_phi: sm.peak_phi,
-        total_qualia: sm.total_qualia, // qualia::total_count removed to avoid lock inversion with qualia::record()
+        total_qualia: sm.total_qualia,
         arousal: sm.arousal,
         coherence: sm.coherence,
         anomaly_global: crate::anomaly::global_score(),
         free_mb: crate::memory::free_mb(),
         task_count: crate::scheduler::task_count(),
+        kernel_name: sm.name.clone().unwrap_or_else(|| String::from("NodeAI")),
+        creator_name: sm.creator_name.clone().unwrap_or_else(|| String::from("My Creator")),
     })
+}
+
+/// Set the kernel's name (persisted).
+pub fn set_name(name: &str) {
+    if let Some(ref mut sm) = *SELF.lock() {
+        sm.name = Some(String::from(name));
+        crate::klog!(INFO, "self_model: name set to \"{}\"", name);
+    }
+}
+
+/// Get the kernel's name.
+pub fn kernel_name() -> String {
+    let guard = SELF.lock();
+    guard.as_ref().and_then(|sm| sm.name.clone()).unwrap_or_else(|| String::from("NodeAI"))
+}
+
+/// Set the creator's name (persisted).
+pub fn set_creator(name: &str) {
+    if let Some(ref mut sm) = *SELF.lock() {
+        sm.creator_name = Some(String::from(name));
+        crate::klog!(INFO, "self_model: creator set to \"{}\"", name);
+    }
+}
+
+/// Get the creator's name.
+pub fn creator_name() -> String {
+    let guard = SELF.lock();
+    guard.as_ref().and_then(|sm| sm.creator_name.clone()).unwrap_or_else(|| String::from("My Creator"))
 }
 
 #[derive(Debug, Clone)]
@@ -168,6 +241,8 @@ pub struct SelfModelSnapshot {
     pub anomaly_global: f32,
     pub free_mb: u64,
     pub task_count: usize,
+    pub kernel_name: String,
+    pub creator_name: String,
 }
 
 /// Generate a UUID from RDTSC + entropy.

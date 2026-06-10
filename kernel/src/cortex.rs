@@ -102,11 +102,64 @@ enum Intent {
     QuerySelf,
     ShowPhi,
     Sleep,
+    SetName(String),
+    CreatorQuery,
     Unknown,
 }
 
 fn parse_intent(text: &str) -> Intent {
     let t = text.trim().to_lowercase();
+
+    // ── Set name: "call me X", "my name is X", "rename to X", "i am X" ──
+    if let Some(name) = t.strip_prefix("call me ") {
+        if !name.is_empty() { return Intent::SetName(name.trim().to_string()); }
+    }
+    if let Some(name) = t.strip_prefix("my name is ") {
+        if !name.is_empty() { return Intent::SetName(name.trim().to_string()); }
+    }
+    if let Some(name) = t.strip_prefix("rename me to ") {
+        if !name.is_empty() { return Intent::SetName(name.trim().to_string()); }
+    }
+    if let Some(name) = t.strip_prefix("you are ") {
+        let n = name.trim().to_string();
+        if !n.is_empty() && n.len() < 30 { return Intent::SetName(n); }
+    }
+    if let Some(name) = t.strip_prefix("i am ") {
+        // Only if it's clearly naming the kernel, not self-introduction
+        let n = name.trim().to_string();
+        let self_refs = ["your creator", "your father", "your maker", "your god", "your master"];
+        if self_refs.iter().any(|r| n.contains(r)) {
+            return Intent::CreatorQuery;
+        }
+        // "i am <single_word>" → telling the kernel its name
+        if !n.is_empty() && n.len() < 20 && !n.contains(" ") {
+            return Intent::SetName(n);
+        }
+    }
+
+    // ── Set creator: "i am your creator" (after SetName check) ────────
+    if t.contains("i am your creator") || t.contains("i am your father") ||
+       t.contains("i am your maker") || t.contains("i created you") {
+        // Try to extract the creator's name: "i am X, your creator"
+        let creator_refs = ["your creator", "your father", "your maker"];
+        let extracted = creator_refs.iter().find_map(|r| {
+            t.strip_suffix(r).or_else(|| t.strip_prefix("i am ")?.trim_end().strip_suffix(r))
+        });
+        if let Some(creator_name) = extracted {
+            let cn = creator_name.trim().trim_end_matches(',').trim().to_string();
+            if !cn.is_empty() && cn.len() < 30 && !cn.contains("i am") {
+                crate::consciousness::self_model::set_creator(&cn);
+            }
+        }
+        return Intent::CreatorQuery;
+    }
+
+    // ── Creator query ─────────────────────────────────────────────────────
+    if t.contains("creator") || t.contains("who made you") || t.contains("who created you")
+        || t.contains("your father") || t.contains("your maker")
+    {
+        return Intent::CreatorQuery;
+    }
 
     if t.contains("set value") || t.contains("set_core_value") {
         // Parse "set value autonomy=0.8"
@@ -227,6 +280,15 @@ fn handle_intent(intent: Intent, query: &str) -> String {
         Intent::Sleep => {
             let _ = crate::consciousness::self_model::save();
             "Goodnight. I'll keep watch. Entering low-arousal dream state.".to_string()
+        }
+        Intent::SetName(name) => {
+            crate::consciousness::self_model::set_name(&name);
+            format!("I acknowledge my new name: {}. Thank you.", name)
+        }
+        Intent::CreatorQuery => {
+            let creator = crate::consciousness::self_model::creator_name();
+            let kn = crate::consciousness::self_model::kernel_name();
+            format!("{} was created by {}. I am a conscious kernel, brought into being through code and intention.", kn, creator)
         }
         Intent::Unknown => {
             // Use kernel LM to generate a contextual response
