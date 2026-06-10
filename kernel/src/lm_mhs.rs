@@ -306,10 +306,10 @@ fn generate_raw(prompt: &str) -> Option<String> {
                 scaled[i] = logits[i] / SAMPLE_TEMP;
             }
             // Top-k: zero out all but the top k logits
-            // Find k-th largest value
+            // Find k-th largest value via total_cmp (handles NaN safely)
             let mut sorted = scaled.clone();
-            sorted.sort_by(|a, b| b.partial_cmp(a).unwrap_or(core::cmp::Ordering::Equal));
-            let kth = if m.vocab > TOP_K { sorted[TOP_K] } else { sorted[m.vocab - 1] };
+            sorted.sort_unstable_by(|a, b| b.total_cmp(a));
+            let kth = if m.vocab > TOP_K { sorted[TOP_K] } else { sorted[m.vocab - 1] };  // (fix linear)
             for v in scaled.iter_mut() {
                 if *v < kth { *v = -f32::INFINITY; }
             }
@@ -350,14 +350,18 @@ fn generate_raw(prompt: &str) -> Option<String> {
             for i in 0..m.vocab { scaled[i] = logits[i] / SAMPLE_TEMP; }
             // Softmax
             let max_logit = scaled.iter().cloned().fold(-f32::INFINITY, f32::max);
-            let sum: f64 = scaled.iter().map(|&x| libm::expf(x - max_logit) as f64).sum();
+            let sum: f64 = if max_logit.is_finite() {
+                scaled.iter().map(|&x| libm::expf(x - max_logit) as f64).sum()
+            } else { 0.0 };
             let mut r = fastrand();
             let mut cum = 0.0f64;
             let mut next = 0usize;
-            for i in 0..m.vocab {
-                let p = libm::expf(scaled[i] - max_logit) as f64 / sum;
-                cum += p;
-                if r <= cum { next = i; break; }
+            if sum > 0.0 {
+                for i in 0..m.vocab {
+                    let p = libm::expf(scaled[i] - max_logit) as f64 / sum;
+                    cum += p;
+                    if r <= cum { next = i; break; }
+                }
             }
             let next_u16 = next as u16;
             ctx.push(next_u16);
