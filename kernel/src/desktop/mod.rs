@@ -1169,7 +1169,7 @@ fn draw_win_titlebar(f: &mut fb::Framebuffer) {
 // ── Terminal geometry & rendering ─────────────────────────────────────────────
 
 fn term_cols() -> usize {
-    (fb::width().saturating_sub(8)) / FONT_W
+    ((fb::width().saturating_sub(8)) / FONT_W).min(TERM_COLS_MAX)
 }
 
 fn term_rows() -> usize {

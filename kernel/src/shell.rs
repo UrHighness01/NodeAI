@@ -1741,21 +1741,9 @@ fn write_consciousness_query(query: &str) {
     if let Ok(node) = vfs::lookup("/dev/consciousness") {
         if let Ok(mut fh) = node.open() {
             let _ = fh.write(&msg);
-            // Read back the response (stored in last_response: field of snapshot)
-            let mut buf = alloc::vec![0u8; 4096];
-            if let Ok(n) = fh.read(&mut buf) {
-                let text = core::str::from_utf8(&buf[..n]).unwrap_or("");
-                // Extract the last_response: line from the snapshot
-                for line in text.lines() {
-                    if let Some(resp) = line.strip_prefix("  last_response: ") {
-                        println!("{}", resp);
-                        return;
-                    }
-                }
-                // Fallback: print whole snapshot
-                if !text.is_empty() {
-                    println!("{}", text);
-                }
+            // Retrieve response directly from cortex (avoids VFS read path)
+            if let Some(resp) = crate::cortex::last_response() {
+                println!("{}", resp);
             }
             return;
         }

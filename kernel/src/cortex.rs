@@ -240,6 +240,11 @@ fn store_response(response: &str) {
     *LAST_RESPONSE.lock() = Some(String::from(response));
 }
 
+/// Retrieve the last response text directly (avoids VFS read path).
+pub fn last_response() -> Option<String> {
+    LAST_RESPONSE.lock().clone()
+}
+
 // ── VfsNode implementation ───────────────────────────────────────────────────
 
 impl crate::vfs::VfsNode for ConscNode {
