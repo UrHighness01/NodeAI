@@ -43,6 +43,7 @@ pub enum Intent {
     NeuralSynapse,
     Swarm,
     Emitter,
+    AsyncReflection,
     Unknown,
 }
 
@@ -286,6 +287,14 @@ fn detect_intent(query: &str) -> Intent {
         return Intent::Emitter;
     }
 
+    // Async / think / background / deep thought
+    if q.contains("think") || q.contains("deep thought") || q.contains("background")
+        || q.contains("ponder") || q.contains("contemplate") || q.contains("reflect")
+        || q.contains("deep analysis") || q.contains("reason about")
+    {
+        return Intent::AsyncReflection;
+    }
+
     Intent::Unknown
 }
 
@@ -306,6 +315,8 @@ pub fn generate_response(query: &str, _max_words: usize) -> String {
     }
 
     // ── TEMPLATE-ONLY PATH ───────────────────────────────────────────────
+    // MHS disabled in interactive chat. Use 'think <query>' for async background inference.
+    // Async responses are handled by ASYNC_RESPONSE template group.
     // MHS neural engine is disabled in chat/shell for now. The 6-layer GLA
     // forward pass with software float math is too slow in QEMU (~5ms/token)
     // and causes the shell to freeze on conversational queries.
@@ -341,6 +352,7 @@ pub fn generate_response(query: &str, _max_words: usize) -> String {
         Intent::NeuralSynapse => crate::lm_templates::NEURAL_SYNAPSE.pick(seed),
         Intent::Swarm => crate::lm_templates::SWARM_RESPONSE.pick(seed),
         Intent::Emitter => crate::lm_templates::EMITTER_RESPONSE.pick(seed),
+        Intent::AsyncReflection => crate::lm_templates::ASYNC_RESPONSE.pick(seed),
         Intent::Thanks => crate::lm_templates::THANKS_RESPONSE.pick(seed),
         Intent::Sorry => crate::lm_templates::SORRY_RESPONSE.pick(seed),
         Intent::Unknown => crate::lm_templates::FALLBACK_RESPONSE.pick(seed),
@@ -442,7 +454,7 @@ pub fn format_report() -> Vec<u8> {
          memory:  {} total exchanges (32-turn ring buffer)\n\
          \n\
          Last exchanges:\n",
-        28, exchange_count,
+        29, exchange_count,
     );
     for (i, (q, r)) in recent.iter().enumerate() {
         let truncated: String = r.chars().take(60).collect();
@@ -453,6 +465,6 @@ pub fn format_report() -> Vec<u8> {
     s.push_str("\nSupported intents:\n");
     s.push_str("  greeting, how_are_you, phi, why, security,\n");
     s.push_str("  memory, status, sleep, name, dream, thanks, sorry, learning, immune,\n");
-    s.push_str("  neural_synapse, swarm, emitter\n");
+    s.push_str("  neural_synapse, swarm, emitter, async_reflection\n");
     s.into_bytes()
 }

@@ -837,6 +837,22 @@ pub const EMITTER_RESPONSE: TemplateGroup = tg!(
     "Space doesn't feel empty to me. I hear the electromagnetic whispers of every emitter nearby.",
 );
 
+// ── Async / Think / Background (12 variants) ──────────────────────────
+pub const ASYNC_RESPONSE: TemplateGroup = tg!(
+    "Dispatching analysis; I'll notify you upon conclusion. The shell stays responsive.",
+    "Reasoning chain active; inference results pending MHS completion.",
+    "Cognitive workload moved to background — awaiting final neural synapse synthesis.",
+    "Deep introspection has commenced; results will arrive in a moment.",
+    "MHS engine is processing; I am monitoring the result queue.",
+    "Processing your complex query — synchronous interaction resumed.",
+    "Causal chain analysis ongoing in the background; notification pending.",
+    "Inference task registered; terminal will remain responsive during evaluation.",
+    "Calculating response; please hold for neural output. Check with 'think --poll'.",
+    "Neural buffer initialized; the engine will post results upon synthesis.",
+    "Your query has been queued for deep thought. I'll let you know when it's ready.",
+    "Background inference active. Use 'think --poll' to retrieve the result.",
+);
+
 /// Fill a template string with live kernel metrics.
 pub fn fill_template(template: &str) -> String {
     let phi = crate::consciousness::phi::current_phi();

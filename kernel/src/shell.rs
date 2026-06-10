@@ -2069,6 +2069,7 @@ fn cmd_help() {
     println!("                consc nano/nn/intent   — nano-NN classifier");
     println!("                consc mhs/voice/neural — neural voice engine");
     println!("                consc think <q>       — async MHS inference (background)");
+    println!("                consc think --poll    — check async results");
     println!("                consc memory/history   — conversation memory");
     println!("                consc coupling/cross   — cross-modal coupling");
     println!("                consc values/core      — deliberation values");
