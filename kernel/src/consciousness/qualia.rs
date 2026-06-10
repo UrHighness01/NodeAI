@@ -172,7 +172,14 @@ use spin::Mutex;
 static STREAM: Mutex<QualiaRing> = Mutex::new(QualiaRing::new());
 
 /// Record a qualium in the stream of consciousness.
+/// Safe to call from any context — skips recording if called from
+/// interrupt context (interrupts disabled) to avoid lock deadlocks.
 pub fn record(event_type: KernelEventType, override_valence: Option<f32>) {
+    // Skip qualia recording in interrupt context to avoid spinlock deadlocks
+    let rflags: u64;
+    unsafe { core::arch::asm!("pushfq; pop {}", out(reg) rflags); }
+    if rflags & (1 << 9) == 0 { return; } // IF=0 → in ISR, skip
+
     let now = crate::scheduler::uptime_ms();
     let q = Qualium {
         timestamp_ms: now,

@@ -404,6 +404,14 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
 
     let msg = alloc::format!("{}", info);
 
+    // Record the kernel's last conscious moment before death
+    crate::consciousness::qualia::record(
+        crate::consciousness::qualia::KernelEventType::SecurityAnomaly,
+        Some(-0.9),
+    );
+    // Save self-model so next boot knows this happened
+    let _ = crate::consciousness::self_model::save();
+
     // Try serial (most likely to work since it requires no paging)
     logger::log(logger::Level::ERROR, "panic", 0, format_args!("KERNEL PANIC: {}", msg));
 

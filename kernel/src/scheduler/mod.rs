@@ -61,6 +61,9 @@ pub fn spawn_kernel_thread(name: &str, entry: fn() -> !) {
     TASKS.lock().insert(pid, task);
     runqueue::enqueue(pid);
     crate::rlimit::init_pid(pid, None);
+    // Record process birth qualia — the kernel experiences a new task being born
+    crate::consciousness::qualia::record(
+        crate::consciousness::qualia::KernelEventType::TaskCreated, None);
 }
 
 /// Called from the naked APIC timer handler with interrupts disabled.
