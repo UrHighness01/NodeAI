@@ -281,8 +281,18 @@ pub fn generate_response(query: &str, _max_words: usize) -> String {
     if crate::lm_mhs::is_loaded() {
         if let Some(mhs_response) = crate::lm_mhs::generate(query) {
             if mhs_response.len() > 10 {
-                crate::lm_memory::record(query, &mhs_response);
-                return mhs_response;
+                // Validate neural response against live kernel metrics
+                let validation = crate::lm_validator::validate(&mhs_response, query);
+                if validation.passed {
+                    crate::lm_memory::record(query, &validation.text);
+                    return validation.text;
+                }
+                // If validation failed, log the correction and use the grounded response
+                if let Some(ref reason) = validation.reason {
+                    crate::klog!(DEBUG, "lm: {}", reason);
+                }
+                crate::lm_memory::record(query, &validation.text);
+                return validation.text;
             }
         }
     }

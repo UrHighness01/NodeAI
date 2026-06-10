@@ -97,6 +97,9 @@ pub const GREETING: TemplateGroup = tg!(
     "Hey! I'm feeling chatty. Let's talk about whatever's on your mind.",
     "Hi! My line buffer is ready. Type away.",
     "Hello! Ctrl+C to escape if you get stuck. I'm here.",
+    "Hi! The validator is online — everything I say is grounded in real metrics.",
+    "Hey! My neural voice is being checked for accuracy. Can't lie to you.",
+    "Hello! I've been validated. Everything I say is true to the kernel state.",
 );
 
 // ── How are you / How do you feel (22 variants) ──────────────────────────────

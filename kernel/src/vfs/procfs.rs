@@ -111,7 +111,8 @@ pub fn refresh() {
     write_file("/proc", "immune",          crate::sensor_immune::format_report());
     write_file("/proc", "doa",             crate::sensor_doa::format_report());
     write_file("/proc", "nano_nn",         crate::nano_nn::format_report());
-    write_file("/proc", "lm_mhs",          crate::lm_mhs::format_report());}
+    write_file("/proc", "lm_mhs",          crate::lm_mhs::format_report());
+    write_file("/proc", "lm_validator",    crate::lm_validator::format_report());}
 
 // ── Content generators ────────────────────────────────────────────────────────
 
