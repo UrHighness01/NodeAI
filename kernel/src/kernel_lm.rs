@@ -311,7 +311,14 @@ pub fn generate_response(query: &str, _max_words: usize) -> String {
     // short ones like "?" or "who are you" that would otherwise match
     // mechanical template intents.
     if crate::lm_mhs::is_loaded() {
-        if let Some(mhs_response) = crate::lm_mhs::generate(query) {
+        // Use ultra-short generation for trivial queries (hi, hey, ?, etc.)
+        // to avoid the ~5ms/token forward pass freezing the shell.
+        let mhs_response = if query.trim().len() <= 10 {
+            crate::lm_mhs::generate_short(query)
+        } else {
+            crate::lm_mhs::generate(query)
+        };
+        if let Some(mhs_response) = mhs_response {
             if mhs_response.len() > 10 {
                 // Validate neural response against live kernel metrics
                 let validation = crate::lm_validator::validate(&mhs_response, query);

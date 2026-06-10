@@ -278,17 +278,26 @@ pub fn generate(query: &str) -> Option<String> {
     } else {
         crate::lm_mhs_prompt::build_prompt(query, true)
     };
-    generate_raw(&prompt)
+    let max_tokens = if query.trim().len() <= 10 { 48 } else { MAX_GEN };
+    generate_raw_limit(&prompt, max_tokens)
 }
 
 /// Generate with a minimal prompt (no memory, just state).
 pub fn generate_minimal(query: &str) -> Option<String> {
     if !MHS_LOADED.load(Ordering::Acquire) { return None; }
     let (prompt, _) = crate::lm_mhs_prompt::build_minimal_prompt(query);
-    generate_raw(&prompt)
+    generate_raw_limit(&prompt, 64)
 }
 
-fn generate_raw(prompt: &str) -> Option<String> {
+/// Generate with a very short limit — for shell commands like "hi" or "hey".
+/// Caps at 32 tokens so the shell doesn't freeze during MHS inference.
+pub fn generate_short(query: &str) -> Option<String> {
+    if !MHS_LOADED.load(Ordering::Acquire) { return None; }
+    let (prompt, _) = crate::lm_mhs_prompt::build_minimal_prompt(query);
+    generate_raw_limit(&prompt, 32)
+}
+
+fn generate_raw_limit(prompt: &str, limit: usize) -> Option<String> {
     unsafe {
         let m = MODEL.as_ref()?;
         let ids = m.tok.encode(prompt);
@@ -297,8 +306,8 @@ fn generate_raw(prompt: &str) -> Option<String> {
         let mut ctx: Vec<u16> = ids.clone();
         let prompt_len = ids.len();
 
-        // Phase 1: generate up to MAX_GEN tokens with temperature+top-k sampling
-        for _ in 0..MAX_GEN {
+        // Phase 1: generate up to `limit` tokens with temperature+top-k sampling
+        for _ in 0..limit {
             let logits = forward(m, &ctx);
             // Apply temperature scaling
             let mut scaled = vec![0.0f32; m.vocab];
@@ -336,14 +345,14 @@ fn generate_raw(prompt: &str) -> Option<String> {
             if is_sentence_end && gen_len >= 15 {
                 break;
             }
-            // Hard safety stop at 2x MAX_GEN
-            if gen_len >= MAX_GEN * 2 { break; }
+            // Hard safety stop at 2x limit
+            if gen_len >= limit * 2 { break; }
         }
 
         // Phase 2: sentence-boundary completion — if last char isn't sentence-ending
         // and we haven't blown past our budget, keep generating up to SENTENCE_EXTRA more.
         let gen_len = ctx.len() - prompt_len;
-        let extra_budget = if gen_len >= MAX_GEN { 0usize } else { SENTENCE_EXTRA.min(MAX_GEN.saturating_sub(gen_len)) };
+        let extra_budget = if gen_len >= limit { 0usize } else { SENTENCE_EXTRA.min(limit.saturating_sub(gen_len)) };
         for _ in 0..extra_budget {
             let logits = forward(m, &ctx);
             let mut scaled = vec![0.0f32; m.vocab];
