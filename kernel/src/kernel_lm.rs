@@ -305,34 +305,34 @@ pub fn generate_response(query: &str, _max_words: usize) -> String {
         apply_creator(query);
     }
 
-    // ── NEURAL-FIRST PATH (MHS loaded) ───────────────────────────────────
-    // Try MHS neural generation BEFORE intent/template selection.
-    // This gives natural conversational responses for ALL queries including
-    // short ones like "?" or "who are you" that would otherwise match
-    // mechanical template intents.
+    // ── NEURAL-FIRST PATH (MHS loaded) — ONLY for complex conversational intents
+    // Simple intents (greetings, status, thanks, etc.) use templates for speed.
+    // This prevents the shell from freezing on quick "consc hi" commands.
     if crate::lm_mhs::is_loaded() {
-        // Use ultra-short generation for trivial queries (hi, hey, ?, etc.)
-        // to avoid the ~5ms/token forward pass freezing the shell.
-        let mhs_response = if query.trim().len() <= 10 {
-            crate::lm_mhs::generate_short(query)
-        } else {
-            crate::lm_mhs::generate(query)
-        };
-        if let Some(mhs_response) = mhs_response {
-            if mhs_response.len() > 10 {
-                // Validate neural response against live kernel metrics
-                let validation = crate::lm_validator::validate(&mhs_response, query);
-                if validation.passed {
+        let use_mhs = matches!(intent,
+            Intent::Unknown | Intent::Philosophical | Intent::Emotional
+            | Intent::Curious | Intent::Learning | Intent::DreamQuery
+            | Intent::WhyQuery | Intent::Humor | Intent::Immune
+            | Intent::NeuralSynapse | Intent::Swarm | Intent::Emitter
+        );
+        if use_mhs {
+            let mhs_response = if query.trim().len() <= 10 {
+                crate::lm_mhs::generate_short(query)
+            } else {
+                crate::lm_mhs::generate(query)
+            };
+            if let Some(mhs_response) = mhs_response {
+                if mhs_response.len() > 10 {
+                    let validation = crate::lm_validator::validate(&mhs_response, query);
+                    if validation.passed {
+                        crate::lm_memory::record(query, &validation.text);
+                        return validation.text;
+                    }
                     crate::lm_memory::record(query, &validation.text);
                     return validation.text;
                 }
-                // If validation failed, validator has already produced a grounded
-                // replacement. Use it.
-                crate::lm_memory::record(query, &validation.text);
-                return validation.text;
             }
         }
-        // MHS returned nothing short/invalid — fall through to templates
     }
 
     // ── TEMPLATE FALLBACK PATH (MHS not loaded or failed) ─────────────────
