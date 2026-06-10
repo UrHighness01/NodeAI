@@ -108,6 +108,7 @@ pub mod cortex;         // /dev/cortex bridge to userspace
 pub mod kernel_lm;      // template-driven kernel language model
 pub mod sensor_cortex;  // EW sensory cortex (RF spectrum sensing)
 pub mod sensor_spectrum; // spectrum sensing algorithms (cyclostationary, Gabor, energy)
+pub mod sensor_threat;   // CFAR + JPDA threat detection
 
 /// Bootloader configuration — tells the bootloader to map all physical memory
 /// at a dynamic virtual offset so we can access physical frames by VA.
@@ -319,7 +320,8 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
         alloc::boxed::Box::new(crate::sensor_cortex::AmbientSensor::new(5000, 1))
     );
     crate::sensor_cortex::register_vfs();
-    crate::klog!(INFO, "sensor_cortex: 2x ambient RF sensors + /dev/sensor registered");
+    crate::sensor_threat::init();
+    crate::klog!(INFO, "sensor_cortex: 2x ambient RF sensors + /dev/sensor + threat tracker registered");
     // ── Phase 10: Security hardening ─────────────────────────────────────────
     security::init();
 
@@ -386,8 +388,9 @@ fn idle_loop() -> ! {
             let tasks = crate::scheduler::task_count();
             let free  = crate::memory::free_mb();
             let sensor_stats = crate::sensor_cortex::stats();
-            crate::klog!(INFO, "NodeAI alive — uptime={}s tasks={} free={}MiB sensor_signals={}",
-                now / 1000, tasks, free, sensor_stats.signals_detected);
+            let threat_lvl = crate::sensor_threat::threat_level();
+            crate::klog!(INFO, "NodeAI alive — uptime={}s tasks={} free={}MiB sensor_signals={} threat_lvl={:.2}",
+                now / 1000, tasks, free, sensor_stats.signals_detected, threat_lvl);
             crate::vfs::procfs::refresh();
             crate::page_cache::tick_writeback();
             crate::syscall_proxy::tick();

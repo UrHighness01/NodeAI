@@ -152,6 +152,19 @@ pub fn tick(now_ms: u64) {
             );
         }
     }
+
+    // Run threat detection on last spectrum (CFAR + JPDA)
+    if !inner.last_spectrum.is_empty() {
+        // Build a simple FFT-magnitude-like vector from spectrum energy values
+        let mut fft_mags: Vec<f32> = inner.last_spectrum.iter()
+            .map(|s| (s.energy_dbm + 100.0).max(0.0)) // normalize to positive
+            .collect();
+        // Pad to at least 32 bins for meaningful CFAR
+        while fft_mags.len() < 32 {
+            fft_mags.push(0.0);
+        }
+        crate::sensor_threat::tick(&fft_mags);
+    }
 }
 
 /// Compute approximate energy in dBm from a batch of IQ samples.

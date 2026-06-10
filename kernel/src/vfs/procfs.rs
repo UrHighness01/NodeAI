@@ -106,7 +106,8 @@ pub fn refresh() {
     write_file("/proc", "collective",        crate::collective_integration::format_report());
     write_file("/proc", "novelty",           crate::novel_detector::format_report());
     write_file("/proc", "cross_modal",     crate::cross_modal::format_report());
-    write_file("/proc", "sensor",          crate::sensor_cortex::fmt_report().into_bytes());}
+    write_file("/proc", "sensor",          crate::sensor_cortex::fmt_report().into_bytes());
+    write_file("/proc", "threat",          crate::sensor_threat::format_report());}
 
 // ── Content generators ────────────────────────────────────────────────────────
 
