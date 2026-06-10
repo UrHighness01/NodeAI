@@ -164,6 +164,10 @@ pub fn tick(now_ms: u64) {
             fft_mags.push(0.0);
         }
         crate::sensor_threat::tick(&fft_mags);
+
+        // Run immune reflex selection based on current threat level
+        let threat_lvl = crate::sensor_threat::threat_level();
+        let _response = crate::sensor_immune::select_response(threat_lvl, now_ms);
     }
 }
 

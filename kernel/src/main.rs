@@ -109,6 +109,7 @@ pub mod kernel_lm;      // template-driven kernel language model
 pub mod sensor_cortex;  // EW sensory cortex (RF spectrum sensing)
 pub mod sensor_spectrum; // spectrum sensing algorithms (cyclostationary, Gabor, energy)
 pub mod sensor_threat;   // CFAR + JPDA threat detection
+pub mod sensor_immune;   // EW immune reflexes (frequency agility, LMS cancel)
 
 /// Bootloader configuration — tells the bootloader to map all physical memory
 /// at a dynamic virtual offset so we can access physical frames by VA.
@@ -321,7 +322,8 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     );
     crate::sensor_cortex::register_vfs();
     crate::sensor_threat::init();
-    crate::klog!(INFO, "sensor_cortex: 2x ambient RF sensors + /dev/sensor + threat tracker registered");
+    crate::sensor_immune::init();
+    crate::klog!(INFO, "sensor_cortex: 2x ambient RF sensors + /dev/sensor + threat + immune registered");
     // ── Phase 10: Security hardening ─────────────────────────────────────────
     security::init();
 
