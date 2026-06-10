@@ -229,6 +229,16 @@ pub fn generate_response(query: &str, _max_words: usize) -> String {
         Intent::Unknown => crate::lm_templates::FALLBACK_RESPONSE.pick(seed),
     };
 
+    // Try MHS neural voice if loaded (overrides template)
+    if crate::lm_mhs::is_loaded() {
+        if let Some(mhs_response) = crate::lm_mhs::generate(query) {
+            if mhs_response.len() > 10 {
+                crate::lm_memory::record(query, &mhs_response);
+                return mhs_response;
+            }
+        }
+    }
+
     // Extract name from rename query and save it
     if intent == Intent::RenameQuery {
         let q_lower = query.trim().to_lowercase();
