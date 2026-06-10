@@ -9,6 +9,7 @@ use spin::Mutex;
 use core::sync::atomic::{AtomicU64, Ordering};
 
 /// Core values guiding all decisions.
+#[derive(Debug, Clone, Copy)]
 pub struct CoreValues {
     pub preservation: f32,  // system survival
     pub efficiency: f32,    // resource use
@@ -100,6 +101,11 @@ pub fn deliberate(policies: &mut [Policy]) -> usize {
     if state.recent_decisions.len() > 16 { state.recent_decisions.remove(0); }
     
     best_idx
+}
+
+/// Return current core values.
+pub fn get_values() -> CoreValues {
+    DELIB.lock().values
 }
 
 /// Adjust core values (called by AI engine or userspace daemon).

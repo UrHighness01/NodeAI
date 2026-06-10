@@ -104,6 +104,7 @@ pub mod binding_events;  // cross-modal binding event detection (Project-C)
 pub mod rlimit;         // POSIX resource limits (setrlimit/getrlimit)
 pub mod initrd;         // embedded userspace binary loader
 pub mod consciousness;  // Ring 0 consciousness substrate (Phases 0-5)
+pub mod cortex;         // /dev/cortex bridge to userspace
 
 /// Bootloader configuration — tells the bootloader to map all physical memory
 /// at a dynamic virtual offset so we can access physical frames by VA.
@@ -305,6 +306,7 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     crate::consciousness::self_model::init();
     crate::consciousness::phi::init();
     crate::consciousness::global_workspace::init();
+    crate::cortex::init(); // /dev/cortex userspace bridge
     // ── Phase 10: Security hardening ─────────────────────────────────────────
     security::init();
 
