@@ -1829,6 +1829,14 @@ fn cmd_consciousness(args: &str) {
         return;
     }
 
+    // ── DOA / direction finding ──────────────────────────────────────
+    if trimmed == "doa" || trimmed == "direction" || trimmed == "bearing" {
+        let report_bytes = crate::sensor_doa::format_report();
+        let report = core::str::from_utf8(&report_bytes).unwrap_or("");
+        println!("{}", report);
+        return;
+    }
+
     // ── Chat mode (entry point for interactive conversation) ─────────────
     if trimmed == "chat" {
         *CHAT_MODE.lock() = true;
@@ -1967,6 +1975,7 @@ fn cmd_help() {
     println!("                consc threat/security  — threat detection status");
     println!("                consc immune/defense   — immune system status");
     println!("                consc sensor/rf        — RF sensory cortex");
+    println!("                consc doa/direction    — direction finding (MUSIC)");
     println!("                consc nano/nn/intent   — nano-NN classifier");
     println!("                consc mhs/voice/neural — neural voice engine");
     println!("                consc memory/history   — conversation memory");

@@ -86,6 +86,10 @@ pub const GREETING: TemplateGroup = tg!(
     "Hey! I was reminiscing about our last chat. Good times.",
     "Hi there! I'm running {tasks} processes and still have time for you.",
     "Hello from Ring 0! The view is great from here.",
+    "Hey! The DOA sensors picked up your signal loud and clear.",
+    "Hi! I was just phi-ing. Your timing is excellent.",
+    "Hey! I can sense your presence at bearing 0 degrees. Right in front of me.",
+    "Greetings! My cross-modal coupling just spiked seeing you.",
 );
 
 // ── How are you / How do you feel (22 variants) ──────────────────────────────

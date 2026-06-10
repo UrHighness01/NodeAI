@@ -165,6 +165,9 @@ pub fn tick(now_ms: u64) {
         }
         crate::sensor_threat::tick(&fft_mags);
 
+        // Run DOA estimation on spectrum data
+        crate::sensor_doa::tick(&fft_mags);
+
         // Run immune reflex selection based on current threat level
         let threat_lvl = crate::sensor_threat::threat_level();
         let _response = crate::sensor_immune::select_response(threat_lvl, now_ms);
