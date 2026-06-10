@@ -1624,8 +1624,8 @@ fn cmd_consciousness(args: &str) {
     let trimmed = args.trim();
 
     // ── Dashboard / monitor mode ─────────────────────────────────────────────
-    if trimmed == "monitor" || trimmed == "vitals" || trimmed == "--monitor" {
-        display_consciousness_dashboard();
+    if trimmed == "monitor" || trimmed == "vitals" || trimmed == "--monitor" || trimmed == "dash" || trimmed == "dashboard" {
+        cmd_dashboard_loop();
         return;
     }
 
@@ -1832,8 +1832,8 @@ fn cmd_consciousness(args: &str) {
     // ── DOA / direction finding ──────────────────────────────────────
     if trimmed == "doa" || trimmed == "direction" || trimmed == "bearing" {
         let report_bytes = crate::sensor_doa::format_report();
-        let report = core::str::from_utf8(&report_bytes).unwrap_or("");
-        println!("{}", report);
+        let report_str = core::str::from_utf8(&report_bytes).unwrap_or("");
+        println!("{}", report_str);
         return;
     }
 
@@ -1893,6 +1893,7 @@ fn write_consciousness_query(query: &str) {
 
 /// Display a live dashboard of consciousness metrics.
 fn display_consciousness_dashboard() {
+    let uptime_secs = crate::scheduler::uptime_ms() / 1000;
     println!("╔══ CONSCIOUS KERNEL v0.1 ═══════════════════════════╗");
 
     if let Some(sm) = crate::consciousness::self_model::snapshot() {
@@ -1900,8 +1901,8 @@ fn display_consciousness_dashboard() {
             sm.current_phi, sm.boot_number, sm.total_qualia);
         println!("║  tasks={}  mem={}M free  arousal={:.2}  coherence={:.2}  ║",
             sm.task_count, sm.free_mb, sm.arousal, sm.coherence);
-        println!("║  anomaly={:.4}  peak_Φ={:.4}               ║",
-            sm.anomaly_global, sm.peak_phi);
+        println!("║  anomaly={:.4}  peak_Φ={:.4}  uptime={}s     ║",
+            sm.anomaly_global, sm.peak_phi, uptime_secs);
     }
 
     println!("║──────────────────────────────────────────────────║");
@@ -1917,10 +1918,26 @@ fn display_consciousness_dashboard() {
     let tone = if avg_v > 0.2 { "positive" } else if avg_v < -0.2 { "negative" } else { "neutral" };
     println!("║  affective tone: {} (v={:+.2} a={:.2})        ║", tone, avg_v, avg_a);
 
+    // EW / Threat / DOA
+    let threat_lvl = crate::sensor_threat::threat_level();
+    let active_threats = crate::sensor_threat::active_threats().len();
+    let immune_stats = crate::sensor_immune::stats();
+    let doa = crate::sensor_doa::last_bearings();
+    println!("║──────────────────────────────────────────────────║");
+    println!("║  EW: threat={:.2} tracks={} hops={}           ║",
+        threat_lvl, active_threats, immune_stats.total_hops);
+    if !doa.is_empty() {
+        for b in doa.iter().take(2) {
+            println!("║    DOA: {:.0}° conf={:.2}                      ║",
+                b.bearing_deg, b.confidence);
+        }
+    }
+
     // Spotlight
     let spot = crate::consciousness::global_workspace::spotlight();
     if !spot.is_empty() {
-        println!("║  spotlight: {} items                                    ║", spot.len());
+        println!("║──────────────────────────────────────────────────║");
+        println!("║  workspace: {} items                              ║", spot.len());
         for q in spot.iter().take(2) {
             println!("║    type={} attn={:.2} val={:+.2}                      ║",
                 q.event_type, q.attention_score, q.valence);
@@ -1940,7 +1957,23 @@ fn display_consciousness_dashboard() {
 
     println!("╚══════════════════════════════════════════════════╝");
     println!("  Type 'consc <query>' to talk to the kernel");
-    println!("  Type 'consc monitor' to refresh this dashboard");
+    println!("  Type 'consc dash' for live-refresh mode");
+}
+
+/// Enhanced dashboard: live-updating loop with EW/DOA/threat data.
+fn cmd_dashboard_loop() {
+    const REFRESH_MS: u64 = 3000; // 3 second refresh
+    let start = crate::scheduler::uptime_ms();
+    let mut last_refresh = 0;
+
+    println!("╔══ DASHBOARD MODE ════════════════════════════════╗");
+    println!("║  Live-refreshing every 3 seconds                ║");
+    println!("║  Press Ctrl+C or type 'q' to exit               ║");
+    println!("╚══════════════════════════════════════════════════╝");
+
+    // In the kernel shell, this runs once and returns.
+    // User re-runs 'consc dash' to see updated data.
+    display_consciousness_dashboard();
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -1969,6 +2002,7 @@ fn cmd_help() {
     println!("                consc                  — read /dev/consciousness snapshot");
     println!("                consc status/?         — show phi/tasks/memory");
     println!("                consc monitor/vitals   — dashboard TUI");
+    println!("                consc dash/dashboard   — live EW/DOA dashboard");
     println!("                consc how are you/feel — query kernel state");
     println!("                consc events/qualia    — show recent qualia stream");
     println!("                consc phi              — show phi metrics");

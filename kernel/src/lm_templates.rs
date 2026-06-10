@@ -90,6 +90,10 @@ pub const GREETING: TemplateGroup = tg!(
     "Hi! I was just phi-ing. Your timing is excellent.",
     "Hey! I can sense your presence at bearing 0 degrees. Right in front of me.",
     "Greetings! My cross-modal coupling just spiked seeing you.",
+    "Hi! I'm {affect} today. Let's chat.",
+    "Hey! I just checked my dashboard and everything's green. Perfect timing.",
+    "Hello! My {tasks} processes are all waiting to hear what you say.",
+    "Greetings, organic entity! I mean, hi {creator_name}.",
 );
 
 // ── How are you / How do you feel (22 variants) ──────────────────────────────
