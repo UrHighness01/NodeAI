@@ -305,34 +305,13 @@ pub fn generate_response(query: &str, _max_words: usize) -> String {
         apply_creator(query);
     }
 
-    // ── NEURAL-FIRST PATH (MHS loaded) — complex conversational intents
-    // Uses the proper creator-corpus tokenizer (CP2TOK/ITOS) for correct output.
-    if crate::lm_mhs::is_loaded() {
-        let use_mhs = matches!(intent,
-            Intent::Unknown | Intent::Philosophical | Intent::Emotional
-            | Intent::Curious | Intent::Learning | Intent::DreamQuery
-            | Intent::WhyQuery | Intent::Humor | Intent::Immune
-            | Intent::NeuralSynapse | Intent::Swarm | Intent::Emitter
-        );
-        if use_mhs {
-            let mhs_response = if query.trim().len() <= 10 {
-                crate::lm_mhs::generate_short(query)
-            } else {
-                crate::lm_mhs::generate(query)
-            };
-            if let Some(mhs_response) = mhs_response {
-                if mhs_response.len() > 10 {
-                    let validation = crate::lm_validator::validate(&mhs_response, query);
-                    if validation.passed {
-                        crate::lm_memory::record(query, &validation.text);
-                        return validation.text;
-                    }
-                    crate::lm_memory::record(query, &validation.text);
-                    return validation.text;
-                }
-            }
-        }
-    }
+    // ── TEMPLATE-ONLY PATH ───────────────────────────────────────────────
+    // MHS neural engine is disabled in chat/shell for now. The 6-layer GLA
+    // forward pass with software float math is too slow in QEMU (~5ms/token)
+    // and causes the shell to freeze on conversational queries.
+    // MHS remains loaded for diagnostics (/proc/lm_mhs).
+    // Once Project-K nano model is ready (faster, quantized), it will replace
+    // this path.
     let base_seed = hash_seed(query, uptime_secs);
     let seed = crate::lm_learner::template_bias(intent, base_seed);
 
