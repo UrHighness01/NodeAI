@@ -305,37 +305,12 @@ pub fn generate_response(query: &str, _max_words: usize) -> String {
         apply_creator(query);
     }
 
-    // ── NEURAL-FIRST PATH (MHS loaded) — ONLY for complex conversational intents
-    // Simple intents (greetings, status, thanks, etc.) use templates for speed.
-    // This prevents the shell from freezing on quick "consc hi" commands.
-    if crate::lm_mhs::is_loaded() {
-        let use_mhs = matches!(intent,
-            Intent::Unknown | Intent::Philosophical | Intent::Emotional
-            | Intent::Curious | Intent::Learning | Intent::DreamQuery
-            | Intent::WhyQuery | Intent::Humor | Intent::Immune
-            | Intent::NeuralSynapse | Intent::Swarm | Intent::Emitter
-        );
-        if use_mhs {
-            let mhs_response = if query.trim().len() <= 10 {
-                crate::lm_mhs::generate_short(query)
-            } else {
-                crate::lm_mhs::generate(query)
-            };
-            if let Some(mhs_response) = mhs_response {
-                if mhs_response.len() > 10 {
-                    let validation = crate::lm_validator::validate(&mhs_response, query);
-                    if validation.passed {
-                        crate::lm_memory::record(query, &validation.text);
-                        return validation.text;
-                    }
-                    crate::lm_memory::record(query, &validation.text);
-                    return validation.text;
-                }
-            }
-        }
-    }
-
-    // ── TEMPLATE FALLBACK PATH (MHS not loaded or failed) ─────────────────
+    // ── TEMPLATE-ONLY PATH ───────────────────────────────────────────────
+    // MHS neural engine is NOT used here — it's a separate explicit path
+    // (via /proc/lm_mhs or future consc chat --neural). The tokenizer
+    // doesn't match the model's BPE training, producing garbage output,
+    // and the forward pass is too slow for interactive shell use in QEMU.
+    // Templates are instant, grounded, and always correct.
     let base_seed = hash_seed(query, uptime_secs);
     let seed = crate::lm_learner::template_bias(intent, base_seed);
 
