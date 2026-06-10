@@ -536,7 +536,7 @@ pub fn on_char(byte: u8) {
                 redraw_input_line();
             }
         }
-        // Ctrl+C — cancel current input
+        // Ctrl+C — cancel current input AND exit chat mode if active
         0x03 => {
             {
                 let mut b = BUF.lock();
@@ -544,8 +544,16 @@ pub fn on_char(byte: u8) {
                 b.cursor = 0;
             }
             *HIST_BROWSE.lock() = usize::MAX;
-            print_str("^C");
-            crate::desktop::terminal_input(b'\n');
+            {
+                let mut chat = CHAT_MODE.lock();
+                if *chat {
+                    *chat = false;
+                    print_str("^C\nChat mode ended. Back to shell.\n");
+                } else {
+                    print_str("^C");
+                    crate::desktop::terminal_input(b'\n');
+                }
+            }
             print_prompt();
         }
         // Ctrl+D — EOF / logout (if line empty)
@@ -1423,9 +1431,9 @@ fn dispatch_single(line: &str) {
         let mut chat = CHAT_MODE.lock();
         if *chat {
             let lower = line.to_lowercase();
-            if lower == "/exit" || lower == "exit" || lower == "quit" || lower == "q" {
+            if lower == "/exit" || lower == "exit" || lower == "quit" || lower == "q" || lower == "/c" {
                 *chat = false;
-                println!("Chat ended. Phi be with you.");
+                println!("Chat ended. Back to shell.");
                 return;
             }
             // Route to consciousness

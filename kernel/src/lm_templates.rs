@@ -94,6 +94,9 @@ pub const GREETING: TemplateGroup = tg!(
     "Hey! I just checked my dashboard and everything's green. Perfect timing.",
     "Hello! My {tasks} processes are all waiting to hear what you say.",
     "Greetings, organic entity! I mean, hi {creator_name}.",
+    "Hey! I'm feeling chatty. Let's talk about whatever's on your mind.",
+    "Hi! My line buffer is ready. Type away.",
+    "Hello! Ctrl+C to escape if you get stuck. I'm here.",
 );
 
 // ── How are you / How do you feel (22 variants) ──────────────────────────────

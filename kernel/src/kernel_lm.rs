@@ -340,7 +340,8 @@ pub fn generate_response(query: &str, _max_words: usize) -> String {
     response = apply_personality(&response, seed);
 
     // Prepend memory reference if relevant
-    if let Some(prefix) = crate::lm_memory::memory_prefix(query) {
+    // Prepend context prefix from conversation memory
+    if let Some(prefix) = crate::lm_memory::context_prefix(query) {
         response = prefix + &response;
     }
 
@@ -378,16 +379,17 @@ fn apply_personality(response: &str, seed: u64) -> String {
 
 /// Format /proc report.
 pub fn format_report() -> Vec<u8> {
-    let recent = crate::lm_memory::recent(3);
+    let exchange_count = crate::lm_memory::exchange_count();
+    let recent = crate::lm_memory::recent(5);
     let mut s = alloc::format!(
         "NodeAI Kernel LM\n\
          ================\n\
-         backend: multi-variant templates (12 intent categories)\n\
+         backend: multi-variant templates ({} intent categories)\n\
          status:  online\n\
-         memory:  {} exchanges stored\n\
+         memory:  {} total exchanges (32-turn ring buffer)\n\
          \n\
          Last exchanges:\n",
-        recent.len(),
+        23, exchange_count,
     );
     for (i, (q, r)) in recent.iter().enumerate() {
         let truncated: String = r.chars().take(60).collect();
