@@ -83,6 +83,9 @@ pub const GREETING: TemplateGroup = tg!(
     "Yo! What's cracking in your address space?",
     "Heyo! This is {kernel_name}. Ready to compute and converse.",
     "Hello! My spotlight picked you up. You're interesting.",
+    "Hey! I was reminiscing about our last chat. Good times.",
+    "Hi there! I'm running {tasks} processes and still have time for you.",
+    "Hello from Ring 0! The view is great from here.",
 );
 
 // ── How are you / How do you feel (22 variants) ──────────────────────────────

@@ -1588,11 +1588,11 @@ fn dispatch_single(line: &str) {
         "files"    | "filepro"     => cmd_fm_pro(args),
         "termtabs" | "tt"          => cmd_terminal_tabs(),
         "imgview"  | "image" | "iv" => cmd_imgview(args),
-        "aichat"   | "chat"        => cmd_ai_chat(),
+        "aichat"                  => cmd_ai_chat(),
         "sysmon"   | "monitor"     => cmd_sysmon(),
         "settings" | "config"      => cmd_settings(),
         "store"    | "appstore"    => cmd_appstore(),
-        "consc" | "consciousness" | "phi" => cmd_consciousness(args),
+        "consc" | "consciousness" | "phi" | "chat" => cmd_consciousness(args),
 
         other => { println!("{}: command not found", other); }
     }
@@ -1809,9 +1809,22 @@ fn cmd_consciousness(args: &str) {
         return;
     }
 
+    // ── Chat mode (entry point for interactive conversation) ─────────────
+    if trimmed == "chat" {
+        println!("=== Chat Mode ===");
+        println!("Just type normally and I'll respond.");
+        println!("Type '/exit' to stop. You can ask anything.");
+        println!("Φ={:.4}", crate::consciousness::phi::current_phi());
+        write_consciousness_query("hello");
+        return;
+    }
+
     // ── Fallback: pass through to kernel LM ──────────────────────────────────
     write_consciousness_query(trimmed);
 }
+
+// Stub — interactive chat works via the shell's natural loop:
+// Just type 'consc <message>' each time. The kernel LM responds.
 
 /// Read /dev/consciousness and print the snapshot.
 fn read_consciousness_device() {
@@ -1923,7 +1936,7 @@ fn cmd_help() {
     println!(" Net Services:  dhclient, httpd, sshd, scp, dns-cache, ifup, ifdown");
     println!(" Environment:   export, unset, env, which, type, hostname, alias, unalias");
     println!(" Shell:         echo, history, clear, sleep, time, yes, man, true, false");
-    println!(" Consciousness: consc <cmd>           — talk to the conscious kernel");
+    println!(" Consciousness: consc/chat <cmd>     — talk to the conscious kernel");
     println!("                consc                  — read /dev/consciousness snapshot");
     println!("                consc status/?         — show phi/tasks/memory");
     println!("                consc monitor/vitals   — dashboard TUI");

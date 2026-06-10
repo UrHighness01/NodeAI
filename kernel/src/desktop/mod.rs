@@ -923,7 +923,7 @@ unsafe fn emit_byte(byte: u8) {
         b'\n' | b'\r' => {
             TERM_COL = 0;
             TERM_ROW += 1;
-            if TERM_ROW >= term_rows() { scroll_terminal(); }
+            if TERM_ROW >= term_rows_clamped() { scroll_terminal(); }
         }
         0x08 | 0x7F => {
             // Backspace: erase the previous character
@@ -1174,6 +1174,10 @@ fn term_cols() -> usize {
 
 fn term_rows() -> usize {
     (fb::height().saturating_sub(TERM_Y + 4)) / FONT_H
+}
+
+fn term_rows_clamped() -> usize {
+    term_rows().min(TERM_ROWS_MAX)
 }
 
 unsafe fn redraw_terminal_line(row: usize) {
