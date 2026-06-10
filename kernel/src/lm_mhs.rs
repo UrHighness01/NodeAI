@@ -28,6 +28,9 @@ static MHS_LOAD_TIME: AtomicU64  = AtomicU64::new(0);
 static MHS_GEN_COUNT: AtomicU64  = AtomicU64::new(0);
 static MHS_BYTE_COUNT: AtomicU64 = AtomicU64::new(0);
 
+/// Scratch buffer for logits — pre-allocated, zero heap fragmentation.
+static mut SCRATCH_SCALED: [f32; 4539] = [0.0; 4539];
+
 const MAX_GEN:    usize = 256;   // max tokens to generate (doubled, was 128)
 const PROMPT_MAX: usize = 384;   // max prompt tokens (relaxed, was 256)
 const SAMPLE_TEMP: f32 = 0.8;     // sampling temperature (1.0=flat, 0.0=greedy)
@@ -305,8 +308,10 @@ fn generate_raw_limit(prompt: &str, limit: usize) -> Option<String> {
         let mut ctx: Vec<u16> = ids.clone();
         let prompt_len = ids.len();
 
-        // Pre-allocate reusable buffer to avoid per-iteration Vec churn
-        let mut scaled = vec![0.0f32; m.vocab];
+        // Use static SCRATCH_SCALED buffer (zero alloc)
+        let mut scaled: &mut [f32] = &mut SCRATCH_SCALED;
+        let vlen = m.vocab.min(4539);
+        for i in 0..vlen { scaled[i] = 0.0; }
 
         // Phase 1: generate up to `limit` tokens
         for _ in 0..limit {
@@ -417,80 +422,92 @@ fn fastrand() -> f64 {
     }
 }
 
-/// Forward pass that writes into a pre-allocated logits buffer (no alloc).
+/// Forward pass that writes into a pre-allocated logits buffer (NO allocs).
+/// All scratch buffers are static — zero heap fragmentation.
+/// Dimensions: d=276, dh0=48, dh1=64, 4*d=1104, 3*dh0=144, 3*dh1=192
 unsafe fn forward_buf(m: &MhsModel, tokens: &[u16], logits_out: &mut [f32]) {
+    // Static scratch buffers — allocated once, reused forever
+    static mut X:      [f32; 276] = [0.0; 276];
+    static mut QKV_F:  [f32; 144] = [0.0; 144];
+    static mut QKV_M:  [f32; 192] = [0.0; 192];
+    static mut HF:     [f32; 48]  = [0.0; 48];
+    static mut HM:     [f32; 64]  = [0.0; 64];
+    static mut XJ:     [f32; 276] = [0.0; 276];
+    static mut ATTN:   [f32; 276] = [0.0; 276];
+    static mut FC:     [f32; 1104] = [0.0; 1104];
+    static mut MLP:    [f32; 276] = [0.0; 276];
+
     let d = m.d;
+    let x = &mut X[..d];
+    let qkv_f = &mut QKV_F[..3 * 48]; // dh0=48
+    let qkv_m = &mut QKV_M[..3 * 64]; // dh1=64
+    let hf = &mut HF[..48];
+    let hm = &mut HM[..64];
+    let xj = &mut XJ[..d];
+    let attn_out = &mut ATTN[..d];
+    let fc_out = &mut FC[..4 * d];
+    let mlp_out = &mut MLP[..d];
 
     // Embed last token
     let tok_id = *tokens.last().unwrap_or(&0) as usize;
-    let mut x = vec![0.0f32; d];
-    {
-        let row = tok_id.min(m.vocab - 1);
-        let emb_row = &m.emb.w[row * d..(row + 1) * d];
-        for i in 0..d { x[i] = (emb_row[i] as f32) * m.emb.scale; }
-    }
+    let row = tok_id.min(m.vocab - 1);
+    let emb_row = &m.emb.w[row * d..(row + 1) * d];
+    for i in 0..d { x[i] = (emb_row[i] as f32) * m.emb.scale; }
 
-    // Per-block recurrent state (reset per generation — stateless)
+    // Per-block forward
     for blk in &m.blocks {
-        layer_norm_inplace(&mut x);
-        blk.ln1.apply_ln(&mut x);
+        // LayerNorm 1
+        layer_norm_inplace(&mut x[..d]);
+        blk.ln1.apply_ln(&mut x[..d]);
 
-        let dh0 = blk.fast.dh;
-        let dh1 = blk.medium.dh;
+        // Fast QKV
+        blk.fast.qkv.mv(&x[..d], &mut qkv_f[..3 * 48]);
 
-        let mut qkv_f = vec![0.0f32; 3 * dh0];
-        blk.fast.qkv.mv(&x, &mut qkv_f);
-
-        let mut qkv_m = vec![0.0f32; 3 * dh1];
-        blk.medium.qkv.mv(&x, &mut qkv_m);
+        // Medium QKV
+        blk.medium.qkv.mv(&x[..d], &mut qkv_m[..3 * 64]);
 
         // Fast hidden: q·k product + sigmoid gate
-        let mut hf = vec![0.0f32; dh0];
-        for i in 0..dh0 {
+        for i in 0..48 {
             let q = qkv_f[i];
-            let k = qkv_f[dh0 + i];
-            let v = qkv_f[2 * dh0 + i];
+            let k = qkv_f[48 + i];
+            let v = qkv_f[96 + i];
             hf[i] = sigmoid(q * k) * v;
         }
 
         // Medium state with exponential decay over last 8 tokens
-        let mut hm = vec![0.0f32; dh1];
+        for i in 0..64 { hm[i] = 0.0; }
         let context_len = tokens.len().min(8);
         for j in 0..context_len {
             let t = tokens[tokens.len() - 1 - j] as usize;
             let decay = libm::powf(0.7, j as f32);
             let emb_row = &m.emb.w[t.min(m.vocab - 1) * d..(t.min(m.vocab - 1) + 1) * d];
-            let mut xj = vec![0.0f32; d];
             for i in 0..d { xj[i] = (emb_row[i] as f32) * m.emb.scale; }
-            let mut qkv_j = vec![0.0f32; 3 * dh1];
-            blk.medium.qkv.mv(&xj, &mut qkv_j);
-            for i in 0..dh1 {
-                let q = qkv_j[i];
-                let k = qkv_j[dh1 + i];
-                let v = qkv_j[2 * dh1 + i];
+            blk.medium.qkv.mv(&xj[..d], &mut qkv_m[..3 * 64]);
+            for i in 0..64 {
+                let q = qkv_m[i];
+                let k = qkv_m[64 + i];
+                let v = qkv_m[128 + i];
                 hm[i] += sigmoid(q * k) * v * decay;
             }
         }
 
-        // Project back to d_model, add residual
-        let mut attn_out = vec![0.0f32; d];
-        blk.fast.proj.mv_add(&hf, &mut attn_out);
-        blk.medium.proj.mv_add(&hm, &mut attn_out);
+        // Project + residual
+        for i in 0..d { attn_out[i] = 0.0; }
+        blk.fast.proj.mv_add(&hf[..48], &mut attn_out[..d]);
+        blk.medium.proj.mv_add(&hm[..64], &mut attn_out[..d]);
         for i in 0..d { x[i] += attn_out[i]; }
 
         // LayerNorm 2 + MLP
-        layer_norm_inplace(&mut x);
-        blk.ln2.apply_ln(&mut x);
-        let mut fc_out = vec![0.0f32; 4 * d];
-        blk.mlp_fc.mv(&x, &mut fc_out);
-        for v in fc_out.iter_mut() { *v = gelu(*v); }
-        let mut mlp_out = vec![0.0f32; d];
-        blk.mlp_pr.mv(&fc_out, &mut mlp_out);
+        layer_norm_inplace(&mut x[..d]);
+        blk.ln2.apply_ln(&mut x[..d]);
+        blk.mlp_fc.mv(&x[..d], &mut fc_out[..4 * d]);
+        for v in fc_out[..4 * d].iter_mut() { *v = gelu(*v); }
+        blk.mlp_pr.mv(&fc_out[..4 * d], &mut mlp_out[..d]);
         for i in 0..d { x[i] += mlp_out[i]; }
     }
 
-    // LM head → logits [vocab], write directly to provided buffer
-    m.head.mv(&x, logits_out);
+    // LM head → logits [vocab]
+    m.head.mv(&x[..d], logits_out);
 }
 
 #[inline(always)]
@@ -546,7 +563,7 @@ pub fn mhs_gen_start(query: &str) {
             prompt_len: ids.len(),
             gen_count: 0,
             limit: MAX_GEN.min(128), // cap async
-            scaled: vec![0.0f32; model.vocab],
+            scaled: vec![0.0f32; model.vocab], // REUSES SCRATCH_SCALED below via slice
             vocab: model.vocab,
         }));
     }

@@ -91,9 +91,7 @@ pub fn init() {
 
 /// Tick the async task system — called every 100ms from idle_loop.
 /// If there's a pending task, advance MHS generation by one step.
-/// NOTE: MHS inference is DISABLED for now — the 6-layer GLA forward pass
-/// causes heap fragmentation and #PF crashes in the constrained kernel heap.
-/// The queue remains functional for future use with Project-K nano model.
+/// Uses zero-alloc MHS forward pass (all buffers statically allocated).
 pub fn tick() {
     let mut lock = QUEUE.lock();
     let q = match &mut *lock {
@@ -101,18 +99,24 @@ pub fn tick() {
         None => return,
     };
 
-    // MHS inference DISABLED (heap fragmentation cause #PF crashes).
-    // All pending tasks are immediately marked as completed with a note.
     for i in 0..q.tasks.len() {
-        if q.tasks[i].state == TaskState::Pending {
+        if q.tasks[i].state != TaskState::Pending && q.tasks[i].state != TaskState::Running { continue; }
+        if !q.mhs_running {
+            let query = q.tasks[i].query.clone();
+            q.tasks[i].state = TaskState::Running;
+            q.mhs_running = true;
+            crate::lm_mhs::mhs_gen_start(&query);
+        }
+        let (done, result) = crate::lm_mhs::mhs_gen_step();
+        if done {
+            q.mhs_running = false;
             q.tasks[i].state = TaskState::Completed;
             q.total_completed = q.total_completed.saturating_add(1);
-            q.tasks[i].result = String::from(
-                "(MHS disabled - use templates for instant response. Will be enabled when nano model is ready.)"
-            );
+            q.tasks[i].result = result.chars().take(MAX_RESULT_LEN).collect();
         }
+        return;
     }
-    q.mhs_running = false;
+    if q.mhs_running { q.mhs_running = false; crate::lm_mhs::mhs_gen_reset(); }
 }
 
 /// Enqueue a new async task.
