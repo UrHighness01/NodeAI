@@ -28,6 +28,10 @@ struct ConscHandle;
 
 static CONSC_INO: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 
+/// Last response text from a command — readable after write.
+use spin::Mutex;
+static LAST_RESPONSE: Mutex<Option<String>> = Mutex::new(None);
+
 /// Register /dev/consciousness in the device filesystem.
 pub fn init() {
     let ino = crate::vfs::alloc_ino();
@@ -78,6 +82,12 @@ fn build_snapshot() -> Vec<u8> {
     let cv = crate::consciousness::deliberation::get_values();
     let _ = writeln!(s, "  values: pres={:.1} eff={:.1} fair={:.1} grow={:.1} auto={:.1}",
         cv.preservation, cv.efficiency, cv.fairness, cv.growth, cv.autonomy);
+
+    // Last response from a write command
+    let last = LAST_RESPONSE.lock();
+    if let Some(ref resp) = *last {
+        let _ = writeln!(s, "  last_response: {}", resp);
+    }
 
     s.into_bytes()
 }
@@ -225,6 +235,11 @@ fn handle_intent(intent: Intent, query: &str) -> String {
     }
 }
 
+/// Store a response string so the next read() can return it.
+fn store_response(response: &str) {
+    *LAST_RESPONSE.lock() = Some(String::from(response));
+}
+
 // ── VfsNode implementation ───────────────────────────────────────────────────
 
 impl crate::vfs::VfsNode for ConscNode {
@@ -256,7 +271,8 @@ impl crate::vfs::FileHandle for ConscHandle {
             let query = alloc::string::String::from(s);
             let intent = parse_intent(&query);
             let response = handle_intent(intent, &query);
-            // Log response to klog so CLI can read it
+            // Store response so shell can read() it back after write()
+            store_response(&response);
             crate::klog!(INFO, "consciousness: {}", response);
         }
         Ok(buf.len())

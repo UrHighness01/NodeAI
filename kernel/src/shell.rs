@@ -1733,7 +1733,7 @@ fn read_consciousness_device() {
     println!("consciousness: /dev/consciousness not found (module not loaded?)");
 }
 
-/// Write a query to /dev/consciousness (response goes to klog).
+/// Write a query to /dev/consciousness and print the response on the terminal.
 fn write_consciousness_query(query: &str) {
     let mut msg = alloc::vec::Vec::from(query.as_bytes());
     msg.push(b'\n');
@@ -1741,7 +1741,22 @@ fn write_consciousness_query(query: &str) {
     if let Ok(node) = vfs::lookup("/dev/consciousness") {
         if let Ok(mut fh) = node.open() {
             let _ = fh.write(&msg);
-            crate::klog!(INFO, "consciousness: query sent — \"{}\"", query);
+            // Read back the response (stored in last_response: field of snapshot)
+            let mut buf = alloc::vec![0u8; 4096];
+            if let Ok(n) = fh.read(&mut buf) {
+                let text = core::str::from_utf8(&buf[..n]).unwrap_or("");
+                // Extract the last_response: line from the snapshot
+                for line in text.lines() {
+                    if let Some(resp) = line.strip_prefix("  last_response: ") {
+                        println!("{}", resp);
+                        return;
+                    }
+                }
+                // Fallback: print whole snapshot
+                if !text.is_empty() {
+                    println!("{}", text);
+                }
+            }
             return;
         }
     }
