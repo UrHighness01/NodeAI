@@ -1631,6 +1631,20 @@ fn dispatch_single(line: &str) {
 fn cmd_consciousness(args: &str) {
     let trimmed = args.trim();
 
+    // ── Async think flag (BYPASSES all other processing, no freeze) ─────
+    if trimmed == "--think" || trimmed.starts_with("--think ") {
+        let query = trimmed.strip_prefix("--think").unwrap_or("").trim();
+        if query.is_empty() {
+            println!("Usage: consc --think <query>");
+        } else {
+            match crate::async_task::enqueue(query, "mhs") {
+                Some(id) => println!("Task #{} enqueued. Check results with 'consc think --poll'.", id),
+                None => println!("Async queue full."),
+            }
+        }
+        return;
+    }
+
     // ── Dashboard / monitor mode ─────────────────────────────────────────────
     if trimmed == "monitor" || trimmed == "vitals" || trimmed == "--monitor" || trimmed == "dash" || trimmed == "dashboard" {
         cmd_dashboard_loop();

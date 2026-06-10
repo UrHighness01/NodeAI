@@ -423,91 +423,72 @@ fn fastrand() -> f64 {
 }
 
 /// Forward pass that writes into a pre-allocated logits buffer (NO allocs).
-/// All scratch buffers are static — zero heap fragmentation.
-/// Dimensions: d=276, dh0=48, dh1=64, 4*d=1104, 3*dh0=144, 3*dh1=192
 unsafe fn forward_buf(m: &MhsModel, tokens: &[u16], logits_out: &mut [f32]) {
-    // Static scratch buffers — allocated once, reused forever
-    static mut X:      [f32; 276] = [0.0; 276];
-    static mut QKV_F:  [f32; 144] = [0.0; 144];
-    static mut QKV_M:  [f32; 192] = [0.0; 192];
-    static mut HF:     [f32; 48]  = [0.0; 48];
-    static mut HM:     [f32; 64]  = [0.0; 64];
-    static mut XJ:     [f32; 276] = [0.0; 276];
-    static mut ATTN:   [f32; 276] = [0.0; 276];
-    static mut FC:     [f32; 1104] = [0.0; 1104];
-    static mut MLP:    [f32; 276] = [0.0; 276];
-
     let d = m.d;
-    let x = &mut X[..d];
-    let qkv_f = &mut QKV_F[..3 * 48]; // dh0=48
-    let qkv_m = &mut QKV_M[..3 * 64]; // dh1=64
-    let hf = &mut HF[..48];
-    let hm = &mut HM[..64];
-    let xj = &mut XJ[..d];
-    let attn_out = &mut ATTN[..d];
-    let fc_out = &mut FC[..4 * d];
-    let mlp_out = &mut MLP[..d];
+    // Static scratch buffers indexed by actual model dimensions
+    static mut BUF_X:     [f32; 276] = [0.0; 276];
+    static mut BUF_QKV_F: [f32; 144] = [0.0; 144]; // 3*48
+    static mut BUF_QKV_M: [f32; 192] = [0.0; 192]; // 3*64
+    static mut BUF_HF:    [f32; 48]  = [0.0; 48];
+    static mut BUF_HM:    [f32; 64]  = [0.0; 64];
+    static mut BUF_XJ:    [f32; 276] = [0.0; 276];
+    static mut BUF_ATTN:  [f32; 276] = [0.0; 276];
+    static mut BUF_FC:    [f32; 1104] = [0.0; 1104]; // 4*276
+    static mut BUF_MLP:   [f32; 276] = [0.0; 276];
 
-    // Embed last token
+    // Embed last token directly in BUF_X
     let tok_id = *tokens.last().unwrap_or(&0) as usize;
     let row = tok_id.min(m.vocab - 1);
     let emb_row = &m.emb.w[row * d..(row + 1) * d];
-    for i in 0..d { x[i] = (emb_row[i] as f32) * m.emb.scale; }
+    for i in 0..d { BUF_X[i] = (emb_row[i] as f32) * m.emb.scale; }
 
-    // Per-block forward
     for blk in &m.blocks {
-        // LayerNorm 1
-        layer_norm_inplace(&mut x[..d]);
-        blk.ln1.apply_ln(&mut x[..d]);
+        let dh0 = blk.fast.dh;
+        let dh1 = blk.medium.dh;
 
-        // Fast QKV
-        blk.fast.qkv.mv(&x[..d], &mut qkv_f[..3 * 48]);
+        layer_norm_inplace(&mut BUF_X[..d]);
+        blk.ln1.apply_ln(&mut BUF_X[..d]);
 
-        // Medium QKV
-        blk.medium.qkv.mv(&x[..d], &mut qkv_m[..3 * 64]);
+        // QKV projections
+        blk.fast.qkv.mv(&BUF_X[..d], &mut BUF_QKV_F[..3 * dh0]);
+        blk.medium.qkv.mv(&BUF_X[..d], &mut BUF_QKV_M[..3 * dh1]);
 
-        // Fast hidden: q·k product + sigmoid gate
-        for i in 0..48 {
-            let q = qkv_f[i];
-            let k = qkv_f[48 + i];
-            let v = qkv_f[96 + i];
-            hf[i] = sigmoid(q * k) * v;
+        // Fast hidden
+        for i in 0..dh0 {
+            BUF_HF[i] = sigmoid(BUF_QKV_F[i] * BUF_QKV_F[dh0 + i]) * BUF_QKV_F[2 * dh0 + i];
         }
 
-        // Medium state with exponential decay over last 8 tokens
-        for i in 0..64 { hm[i] = 0.0; }
-        let context_len = tokens.len().min(8);
-        for j in 0..context_len {
+        // Medium with decay
+        for i in 0..dh1 { BUF_HM[i] = 0.0; }
+        let ctx_min = tokens.len().min(8);
+        for j in 0..ctx_min {
             let t = tokens[tokens.len() - 1 - j] as usize;
             let decay = libm::powf(0.7, j as f32);
-            let emb_row = &m.emb.w[t.min(m.vocab - 1) * d..(t.min(m.vocab - 1) + 1) * d];
-            for i in 0..d { xj[i] = (emb_row[i] as f32) * m.emb.scale; }
-            blk.medium.qkv.mv(&xj[..d], &mut qkv_m[..3 * 64]);
-            for i in 0..64 {
-                let q = qkv_m[i];
-                let k = qkv_m[64 + i];
-                let v = qkv_m[128 + i];
-                hm[i] += sigmoid(q * k) * v * decay;
+            let erow = &m.emb.w[t.min(m.vocab - 1) * d..(t.min(m.vocab - 1) + 1) * d];
+            for i in 0..d { BUF_XJ[i] = (erow[i] as f32) * m.emb.scale; }
+            blk.medium.qkv.mv(&BUF_XJ[..d], &mut BUF_QKV_M[..3 * dh1]);
+            for i in 0..dh1 {
+                BUF_HM[i] += sigmoid(BUF_QKV_M[i] * BUF_QKV_M[dh1 + i]) * BUF_QKV_M[2 * dh1 + i] * decay;
             }
         }
 
         // Project + residual
-        for i in 0..d { attn_out[i] = 0.0; }
-        blk.fast.proj.mv_add(&hf[..48], &mut attn_out[..d]);
-        blk.medium.proj.mv_add(&hm[..64], &mut attn_out[..d]);
-        for i in 0..d { x[i] += attn_out[i]; }
+        for i in 0..d { BUF_ATTN[i] = 0.0; }
+        blk.fast.proj.mv_add(&BUF_HF[..dh0], &mut BUF_ATTN[..d]);
+        blk.medium.proj.mv_add(&BUF_HM[..dh1], &mut BUF_ATTN[..d]);
+        for i in 0..d { BUF_X[i] += BUF_ATTN[i]; }
 
         // LayerNorm 2 + MLP
-        layer_norm_inplace(&mut x[..d]);
-        blk.ln2.apply_ln(&mut x[..d]);
-        blk.mlp_fc.mv(&x[..d], &mut fc_out[..4 * d]);
-        for v in fc_out[..4 * d].iter_mut() { *v = gelu(*v); }
-        blk.mlp_pr.mv(&fc_out[..4 * d], &mut mlp_out[..d]);
-        for i in 0..d { x[i] += mlp_out[i]; }
+        layer_norm_inplace(&mut BUF_X[..d]);
+        blk.ln2.apply_ln(&mut BUF_X[..d]);
+        blk.mlp_fc.mv(&BUF_X[..d], &mut BUF_FC[..4 * d]);
+        for v in BUF_FC[..4 * d].iter_mut() { *v = gelu(*v); }
+        blk.mlp_pr.mv(&BUF_FC[..4 * d], &mut BUF_MLP[..d]);
+        for i in 0..d { BUF_X[i] += BUF_MLP[i]; }
     }
 
-    // LM head → logits [vocab]
-    m.head.mv(&x[..d], logits_out);
+    // LM head
+    m.head.mv(&BUF_X[..d], logits_out);
 }
 
 #[inline(always)]
@@ -531,22 +512,19 @@ fn layer_norm_inplace(x: &mut [f32]) {
 // Incremental MHS generation (for async_task background queue)
 // ──────────────────────────────────────────────────────────────
 
-/// Persistent state for one-step-at-a-time MHS generation.
+/// Persistent state for one-step-at-a-time MHS generation (static, no alloc).
 struct MhsGenState {
     ctx: Vec<u16>,
     prompt_len: usize,
     gen_count: usize,
     limit: usize,
-    scaled: Vec<f32>,
     vocab: usize,
 }
 
-/// Safety: MhsModel is a static (lives forever). We store a raw pointer
-/// because Rust can't reason about the self-referential async lifetime.
+/// Static async generation state — zero heap allocation.
 static mut GEN_STATE: Option<Box<MhsGenState>> = None;
 
 /// Start incremental MHS generation for a query.
-/// Called from async_task::tick() when a pending task is found.
 pub fn mhs_gen_start(query: &str) {
     unsafe {
         if !MHS_LOADED.load(Ordering::Acquire) { return; }
@@ -562,16 +540,13 @@ pub fn mhs_gen_start(query: &str) {
             ctx: ids.clone(),
             prompt_len: ids.len(),
             gen_count: 0,
-            limit: MAX_GEN.min(128), // cap async
-            scaled: vec![0.0f32; model.vocab], // REUSES SCRATCH_SCALED below via slice
+            limit: MAX_GEN.min(128),
             vocab: model.vocab,
         }));
     }
 }
 
-/// Advance MHS generation by one token.
-/// Returns (done, result_string).
-/// Call repeatedly until done == true.
+/// Advance MHS generation by one token. Uses SCRATCH_SCALED (no alloc).
 pub fn mhs_gen_step() -> (bool, String) {
     unsafe {
         let state = match GEN_STATE {
@@ -583,27 +558,24 @@ pub fn mhs_gen_step() -> (bool, String) {
             None => { GEN_STATE = None; return (true, String::new()); }
         };
 
-        forward_buf(model, &state.ctx, &mut state.scaled);
+        let s = &mut SCRATCH_SCALED[..state.vocab];
+        forward_buf(model, &state.ctx, s);
 
-        for i in 0..state.vocab {
-            state.scaled[i] /= SAMPLE_TEMP;
-        }
+        for i in 0..state.vocab { s[i] /= SAMPLE_TEMP; }
 
-        let kth = find_kth_largest(&state.scaled, TOP_K.min(state.vocab));
-        for v in state.scaled.iter_mut() {
-            if *v < kth { *v = -f32::INFINITY; }
-        }
+        let kth = find_kth_largest(s, TOP_K.min(state.vocab));
+        for v in s.iter_mut() { if *v < kth { *v = -f32::INFINITY; } }
 
-        let max_logit = state.scaled.iter().cloned().fold(-f32::INFINITY, f32::max);
+        let max_logit = s.iter().cloned().fold(-f32::INFINITY, f32::max);
         let sum: f64 = if max_logit.is_finite() {
-            state.scaled.iter().map(|&x| libm::expf(x - max_logit) as f64).sum()
+            s.iter().map(|&x| libm::expf(x - max_logit) as f64).sum()
         } else { 0.0 };
         let mut r = fastrand();
         let mut cum = 0.0f64;
         let mut next = 0usize;
         if sum > 0.0 {
             for i in 0..state.vocab {
-                let p = libm::expf(state.scaled[i] - max_logit) as f64 / sum;
+                let p = libm::expf(s[i] - max_logit) as f64 / sum;
                 cum += p;
                 if r <= cum { next = i; break; }
             }

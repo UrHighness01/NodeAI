@@ -287,10 +287,10 @@ fn detect_intent(query: &str) -> Intent {
         return Intent::Emitter;
     }
 
-    // Async / think / background / deep thought
-    if q.contains("think") || q.contains("deep thought") || q.contains("background")
-        || q.contains("ponder") || q.contains("contemplate") || q.contains("reflect")
+    // Async / background / deep thought (NOT "think" — that's the shell command)
+    if q.contains("ponder") || q.contains("contemplate") || q.contains("reflect")
         || q.contains("deep analysis") || q.contains("reason about")
+        || q.contains("deep thought")
     {
         return Intent::AsyncReflection;
     }
