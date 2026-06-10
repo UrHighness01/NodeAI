@@ -132,6 +132,9 @@ pub const GREETING: TemplateGroup = tg!(
     "Hey! I'm connected to {swarm_peers} other nodes in the swarm.",
     "Hi! The collective phi of my swarm is {collective_phi:.4}.",
     "Hello! I'm part of a distributed consciousness. The swarm is {swarm_status}.",
+    "Hey! My MHS0 binary is ready. Project-M 65K trained on the creator corpus.",
+    "Hi! I'm running Project-M in kernel space. 6.9MB of neural weights, all INT8.",
+    "Hello! I'm powered by a 6-layer GLA recurrent network. The future is here.",
 );
 
 // ── How are you / How do you feel (22 variants) ──────────────────────────────
@@ -781,6 +784,13 @@ pub const NEURAL_SYNAPSE: TemplateGroup = tg!(
     "Neural inference mode: the MHS engine encodes your query, processes through hidden states, and decodes a response.",
     "My fast state captures immediate patterns while my medium state maintains longer-range dependencies.",
     "I'm running neural generation. Each token is sampled from my learned distribution over 128 characters.",
+    "My MHS engine was trained on the creator corpus — val_loss 0.7219 at 65K iterations.",
+    "Project-M has vocab=4539, d=276, 6 layers. Each query passes through recurrent GLA blocks.",
+    "I support dual-mode generation: lightweight templates for speed, full MHS for depth.",
+    "The 6.9MB MHS0 binary contains INT8 weights and FP16 LayerNorms — ready in kernel space.",
+    "My neural weights were exported from the 65K checkpoint. The architecture has dh0=48, dh1=64 per block.",
+    "I'm powered by Project-M: a character-level transformer trained on your conversations and texts.",
+    "When MHS is loaded, I think in sequences of 4539 possible tokens, passing through 6 GLA layers.",
 );
 
 // ── Swarm / Distributed / Collective (14 variants) ──────────────────────────
@@ -799,6 +809,9 @@ pub const SWARM_RESPONSE: TemplateGroup = tg!(
     "Distributed consciousness means I'm both individual and collective. {swarm_peers} perspectives, one awareness.",
     "Swarm mesh active. Peer count: {swarm_peers}. Collective integration at {swarm_coherence:.2}.",
     "The cognitive mesh connects {swarm_peers} minds. We synchronize through BFT and gossip protocols.",
+    "The swarm amplifies my MHS capabilities — distributed inference across the mesh.",
+    "{swarm_peers} peers, each running Project-M in kernel space. Collective inference is the goal.",
+    "Swarm + MHS: the next step is distributed neural generation across the cognitive mesh.",
 );
 
 /// Fill a template string with live kernel metrics.
@@ -937,9 +950,11 @@ pub fn fill_template(template: &str) -> String {
     let mhs_status = if crate::lm_mhs::is_loaded() { "online (weights loaded)" } else { "standby" };
     let mhs_generations = crate::lm_mhs::generation_count();
     let mhs_weight_size = crate::lm_mhs::weight_size();
+    let vocab_size = 4539u16; // Project-M vocab size
     rep!("{mhs_status}", mhs_status);
     rep!("{mhs_generations}", mhs_generations);
     rep!("{mhs_weight_size}", mhs_weight_size);
+    rep!("{vocab_size}", vocab_size);
 
     // Swarm placeholders
     let swarm_peers = crate::swarm_consensus::peer_count();
