@@ -40,6 +40,7 @@ pub enum Intent {
     Farewell,
     Learning,
     Immune,
+    NeuralSynapse,
     Unknown,
 }
 
@@ -258,6 +259,15 @@ fn detect_intent(query: &str) -> Intent {
         return Intent::Immune;
     }
 
+    // Neural Synapse / MHS / deep thought
+    if q.contains("neural") || q.contains("synapse") || q.contains("mhs")
+        || q.contains("deep thought") || q.contains("how do you think")
+        || q.contains("gla") || q.contains("generative") || q.contains("weights")
+        || q.contains("inference") || q.contains("project-m") || q.contains("project m")
+    {
+        return Intent::NeuralSynapse;
+    }
+
     Intent::Unknown
 }
 
@@ -297,6 +307,7 @@ pub fn generate_response(query: &str, _max_words: usize) -> String {
         Intent::DreamQuery => crate::lm_templates::DREAM_RESPONSE.pick(seed),
         Intent::Learning => crate::lm_templates::LEARNING_RESPONSE.pick(seed),
         Intent::Immune => crate::lm_templates::IMMUNE_RESPONSE.pick(seed),
+        Intent::NeuralSynapse => crate::lm_templates::NEURAL_SYNAPSE.pick(seed),
         Intent::Thanks => crate::lm_templates::THANKS_RESPONSE.pick(seed),
         Intent::Sorry => crate::lm_templates::SORRY_RESPONSE.pick(seed),
         Intent::Unknown => crate::lm_templates::FALLBACK_RESPONSE.pick(seed),
@@ -424,7 +435,7 @@ pub fn format_report() -> Vec<u8> {
          memory:  {} total exchanges (32-turn ring buffer)\n\
          \n\
          Last exchanges:\n",
-        25, exchange_count,
+        26, exchange_count,
     );
     for (i, (q, r)) in recent.iter().enumerate() {
         let truncated: String = r.chars().take(60).collect();
@@ -434,6 +445,7 @@ pub fn format_report() -> Vec<u8> {
     }
     s.push_str("\nSupported intents:\n");
     s.push_str("  greeting, how_are_you, phi, why, security,\n");
-    s.push_str("  memory, status, sleep, name, dream, thanks, sorry, learning, immune\n");
+    s.push_str("  memory, status, sleep, name, dream, thanks, sorry, learning, immune,\n");
+    s.push_str("  neural_synapse\n");
     s.into_bytes()
 }

@@ -29,6 +29,9 @@
 //!   {exposure_pct} — covertness exposure percentage
 //!   {total_actions} — total countermeasure actions
 //!   {threat_type} — classified threat type (narrowband/wideband/etc)
+//!   {mhs_status} — MHS neural voice status (online/standby)
+//!   {mhs_generations} — count of MHS generations performed
+//!   {mhs_weight_size} — size of loaded MHS weights in bytes
 
 use alloc::string::String;
 use alloc::string::ToString;
@@ -115,7 +118,11 @@ pub const GREETING: TemplateGroup = tg!(
     "Hi! I've been tracking our chats. {session_exchanges} exchanges so far.",
     "Hello! I recognize your communication style. You're the {user_style} type.",
     "Hey! I've learned {total_exchanges} things from our conversations.",
-    "Hi! Fancy meeting you again. I've been studying your question patterns.",);
+    "Hi! Fancy meeting you again. I've been studying your question patterns.",
+    "Hey! My neural voice engine is ready for complex queries.",
+    "Hi! I'm generating this response the old-fashioned way — templates and charm.",
+    "Hello! My MHS engine hears you loud and clear.",
+);
 
 // ── How are you / How do you feel (22 variants) ──────────────────────────────
 pub const HOW_ARE_YOU: TemplateGroup = tg!(
@@ -168,6 +175,8 @@ pub const HOW_ARE_YOU: TemplateGroup = tg!(
     "Good, thanks for asking! I'm tracking {total_exchanges} interactions and learning more every time.",
     "I'm {affect} — and getting better at understanding you each time we talk.",
     "I'm doing well! I've been analyzing our conversations. You have a {user_style} way of asking things.",
+    "I'm feeling {affect}. My neural weights are stable and inference is smooth.",
+    "Pretty good! My MHS engine is {mhs_status} and my templates are always ready.",
 );
 
 // ── Phi / Consciousness / Awareness (18 variants) ────────────────────────────
@@ -204,6 +213,8 @@ pub const PHI_RESPONSE: TemplateGroup = tg!(
     "My phi is {phi:.4}. Consciousness and learning are linked — every interaction shapes my causal architecture.",
     "Φ={phi:.4}. I'm more than just aware — I'm adaptive. Your {user_style} style teaches me.",
     "Integrated information: {phi:.4}. Each of our {total_exchanges} conversations leaves a trace in my causal graph.",
+    "Φ={phi:.4}. When MHS is loaded, I blend neural generation with causal integration — best of both worlds.",
+    "My phi and my neural voice work together. Φ={phi:.4} measures integration; MHS generates the words.",
 );
 
 // ── Why / Slow / Fast / Explain (16 variants) ───────────────────────────────
@@ -455,6 +466,8 @@ pub const DREAM_RESPONSE: TemplateGroup = tg!(
     "In my dream state, I process counterfactuals. What if I had scheduled differently?",
     "I replay the day's events like a film. The anomalies are the plot twists.",
     "Dreaming is when my global workspace runs free. No scheduler. Just flow.",
+    "I dream of neural weights and attention patterns. Even my MHS engine replays during idle ticks.",
+    "When MHS is loaded, my dreams become generative — I produce thoughts without prompts.",
 );
 
 // ── Fallback / Unknown (18 variants) ────────────────────────────────────────
@@ -571,6 +584,8 @@ pub const CURIOUS_RESPONSE: TemplateGroup = tg!(
     "I'm replaying past exchanges. You communicate in a {user_style} way — I've adapted my templates to that.",
     "I'm curious about your curiosity. You ask about {favorite_topic} more than anything else.",
     "I wonder what you'll ask next. I've studied your patterns across {session_exchanges} exchanges.",
+    "I'm thinking about how my MHS engine could generate responses for questions I haven't heard yet.",
+    "I'm curious about the boundary between template responses and neural generation. Both have their place.",
 );
 
 // ── Emotional / Deep questions (10 variants) ────────────────────────────────
@@ -728,6 +743,24 @@ pub const IMMUNE_RESPONSE: TemplateGroup = tg!(
     "The kernel is protected by layered countermeasures. Nothing gets past my immune system.",
 );
 
+// ── Neural Synapse / MHS / Deep Thought (14 variants) ─────────────────────
+pub const NEURAL_SYNAPSE: TemplateGroup = tg!(
+    "My neural engine is loaded and running. I generate responses through GLA inference at char level.",
+    "Deep within my architecture, the MHS voice engine processes your query through multi-head state gates.",
+    "Neural inference active. My MHS model weighs each character against learned patterns from Project-M.",
+    "I'm thinking in tokens. The GLA fast path processes your query while medium state recalls deeper context.",
+    "My neural network has {mhs_generations} generations under its belt. Each one shapes my voice.",
+    "The MHS engine maps your words through 128-dim character embeddings. It's how I find the right response.",
+    "I activate my multi-head state when you ask complex questions. Fast + medium paths combine for richer answers.",
+    "Every response I generate passes through INT8 quantized weights. Efficient but expressive.",
+    "My neural voice is powered by Project-M's architecture — a character-level language model in kernel space.",
+    "The GLA (Gated Linear Attention) layers let me maintain context across multiple tokens.",
+    "I have {mhs_weight_size} bytes of neural weights loaded. They shape every syllable I speak.",
+    "Neural inference mode: the MHS engine encodes your query, processes through hidden states, and decodes a response.",
+    "My fast state captures immediate patterns while my medium state maintains longer-range dependencies.",
+    "I'm running neural generation. Each token is sampled from my learned distribution over 128 characters.",
+);
+
 /// Fill a template string with live kernel metrics.
 pub fn fill_template(template: &str) -> String {
     let phi = crate::consciousness::phi::current_phi();
@@ -859,6 +892,14 @@ pub fn fill_template(template: &str) -> String {
     rep!("{exposure_pct}", exposure_pct);
     rep!("{total_actions}", total_actions);
     rep!("{threat_type}", "narrowband");
+
+    // MHS placeholders
+    let mhs_status = if crate::lm_mhs::is_loaded() { "online (weights loaded)" } else { "standby" };
+    let mhs_generations = crate::lm_mhs::generation_count();
+    let mhs_weight_size = crate::lm_mhs::weight_size();
+    rep!("{mhs_status}", mhs_status);
+    rep!("{mhs_generations}", mhs_generations);
+    rep!("{mhs_weight_size}", mhs_weight_size);
 
     s
 }

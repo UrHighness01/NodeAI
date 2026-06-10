@@ -109,6 +109,7 @@ pub mod kernel_lm;      // template-driven kernel language model
 pub mod lm_memory;      // conversation memory ring buffer
 pub mod lm_templates;   // multi-variant LM templates
 pub mod lm_mhs;         // MHS neural voice engine
+pub mod lm_mhs_prompt;  // MHS prompt builder with context
 pub mod nano_nn;        // nano-NN intent embedding classifier
 pub mod lm_validator;   // grounded neural validator
 pub mod emotional_arc;  // longitudinal emotional arc tracking

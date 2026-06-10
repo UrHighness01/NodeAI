@@ -16,7 +16,7 @@ use spin::Mutex;
 use crate::kernel_lm::Intent;
 
 /// Number of intent categories we track (must match Intent:: variants)
-const INTENT_COUNT: usize = 25;
+const INTENT_COUNT: usize = 26;
 
 /// Maximum session exchange counter before wrapping
 const MAX_SESSION_EXCHANGES: u16 = 65535;
@@ -87,7 +87,8 @@ fn intent_to_idx(intent: Intent) -> u8 {
         Intent::Farewell => 21,
         Intent::Learning => 22,
         Intent::Immune => 23,
-        Intent::Unknown => 24,
+        Intent::NeuralSynapse => 24,
+        Intent::Unknown => 25,
     }
 }
 
@@ -201,6 +202,7 @@ pub fn favorite_intent() -> Intent {
         21 => Intent::Farewell,
         22 => Intent::Learning,
         23 => Intent::Immune,
+        24 => Intent::NeuralSynapse,
         _ => Intent::Unknown,
     }
 }
@@ -232,6 +234,7 @@ pub fn favorite_intent_name() -> &'static str {
         Intent::Farewell => "farewells",
         Intent::Learning => "learning questions",
         Intent::Immune => "defense questions",
+        Intent::NeuralSynapse => "neural/AI questions",
         Intent::Unknown => "varied topics",
     }
 }
@@ -269,7 +272,7 @@ pub fn format_report() -> Vec<u8> {
         "MemoryQuery", "StatusQuery", "Sleep", "NameQuery", "RenameQuery",
         "CreatorQuery", "DreamQuery", "Thanks", "Sorry", "Curious",
         "Emotional", "Humor", "Weather", "Advice", "Philosophical",
-        "Sarcastic", "Farewell", "Learning", "Immune", "Unknown",
+        "Sarcastic", "Farewell", "Learning", "Immune", "NeuralSynapse", "Unknown",
     ];
     let mut s = alloc::format!(
         "LM Learner — Conversational Learning\n\

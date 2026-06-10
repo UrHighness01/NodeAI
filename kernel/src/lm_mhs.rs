@@ -10,10 +10,14 @@
 use alloc::vec::Vec;
 use alloc::vec;
 use alloc::string::String;
-use core::sync::atomic::{AtomicBool, Ordering};
+use alloc::format;
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use spin::Once;
 
 static MHS_LOADED: AtomicBool = AtomicBool::new(false);
+static MHS_LOAD_TIME: AtomicU64 = AtomicU64::new(0);
+static MHS_GEN_COUNT: AtomicU64 = AtomicU64::new(0);
+static MHS_BYTE_COUNT: AtomicU64 = AtomicU64::new(0);
 const MAX_GEN: usize = 128;
 const PROMPT_MAX: usize = 256;
 const VOCAB_SIZE: usize = 128;
@@ -69,16 +73,28 @@ pub fn load_weights(data: &[u8]) -> bool {
         }
     }
     MHS_LOADED.store(true, Ordering::Release);
+    MHS_LOAD_TIME.store(crate::scheduler::uptime_ms(), Ordering::Release);
+    MHS_BYTE_COUNT.store(data.len() as u64, Ordering::Release);
     crate::klog!(INFO, "lm_mhs: loaded {} bytes — MHS neural voice online", data.len());
     true
 }
 
 pub fn generate(query: &str) -> Option<String> {
     if !MHS_LOADED.load(Ordering::Acquire) { return None; }
-    let uptime = crate::scheduler::uptime_ms() / 1000;
-    let phi = crate::consciousness::phi::current_phi();
-    let prompt = alloc::format!("User: {}\nKernel (Phi={:.4}): ", query.trim(), phi);
-    let tokens = tok().encode(&prompt);
+    let (prompt, _) = crate::lm_mhs_prompt::build_prompt(query, true);
+    generate_raw(&prompt)
+}
+
+/// Generate with a minimal prompt (faster, less context).
+pub fn generate_minimal(query: &str) -> Option<String> {
+    if !MHS_LOADED.load(Ordering::Acquire) { return None; }
+    let (prompt, _) = crate::lm_mhs_prompt::build_minimal_prompt(query);
+    generate_raw(&prompt)
+}
+
+/// Core generation function — tokenize, run forward pass, decode.
+fn generate_raw(prompt: &str) -> Option<String> {
+    let tokens = tok().encode(prompt);
     if tokens.len() > PROMPT_MAX { return None; }
     unsafe {
         let model = MHS.as_ref().unwrap();
@@ -92,6 +108,7 @@ pub fn generate(query: &str) -> Option<String> {
             });
             output.push(next);
         }
+        MHS_GEN_COUNT.fetch_add(1, Ordering::Release);
         let response = tok().decode(&output[tokens.len().min(output.len()).saturating_sub(1)..]);
         if response.is_empty() { None } else { Some(response) }
     }
@@ -118,10 +135,40 @@ unsafe fn forward(model: &MhsLM, tokens: &[u8]) -> Vec<f32> {
 
 pub fn is_loaded() -> bool { MHS_LOADED.load(Ordering::Acquire) }
 
+/// Number of generations since weights were loaded.
+pub fn generation_count() -> u64 { MHS_GEN_COUNT.load(Ordering::Acquire) }
+
+/// Byte size of loaded weights.
+pub fn weight_size() -> u64 { MHS_BYTE_COUNT.load(Ordering::Acquire) }
+
+/// Format /proc/lm_mhs report.
 pub fn format_report() -> Vec<u8> {
     let loaded = MHS_LOADED.load(Ordering::Acquire);
-    alloc::format!(
-        "MHS Neural Voice Engine\nstatus: {}\nmodel: GLA-Fast + GLA-Medium\nspeed: ~100 tok/s\n",
-        if loaded { "loaded" } else { "default (untrained)" }
-    ).into_bytes()
+    let gen_count = MHS_GEN_COUNT.load(Ordering::Acquire);
+    let byte_count = MHS_BYTE_COUNT.load(Ordering::Acquire);
+    let load_time_ms = MHS_LOAD_TIME.load(Ordering::Acquire);
+    let uptime = crate::scheduler::uptime_ms();
+    let model_desc = crate::lm_mhs_prompt::model_description();
+    let mut s = format!(
+        "MHS Neural Voice Engine\n\
+         =====================\n\
+         status:       {}\n\
+         model:        {}\n\
+         weights:      {} bytes\n\
+         generations:  {}\n\
+         loaded at:    {}s\n\
+         architecture: GLA Fast(16) + Medium(16, decay=0.5)\n\
+         vocab:        128 chars\n\
+         max gen:      128 tokens\n",
+        if loaded { "online" } else { "standby (weights not loaded)" },
+        model_desc,
+        byte_count,
+        gen_count,
+        load_time_ms / 1000,
+    );
+    if loaded && gen_count > 0 {
+        s.push_str(&format!("avg generation:  {}ms (est)\n",
+            if uptime > load_time_ms && gen_count > 0 { (uptime - load_time_ms) / gen_count / 10 } else { 0 }));
+    }
+    s.into_bytes()
 }
