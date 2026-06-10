@@ -16,6 +16,7 @@ use alloc::vec::Vec;
 use alloc::vec;
 use alloc::string::String;
 use alloc::format;
+use alloc::boxed::Box;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 #[path = "lm_mhs_tok.rs"]
@@ -507,6 +508,111 @@ fn layer_norm_inplace(x: &mut [f32]) {
     // libm::sqrtf instead of f32::sqrt (no_std)
     let std = libm::sqrtf(var + 1e-5);
     for v in x.iter_mut() { *v = (*v - mean) / std; }
+}
+
+// ──────────────────────────────────────────────────────────────
+// Incremental MHS generation (for async_task background queue)
+// ──────────────────────────────────────────────────────────────
+
+/// Persistent state for one-step-at-a-time MHS generation.
+struct MhsGenState {
+    ctx: Vec<u16>,
+    prompt_len: usize,
+    gen_count: usize,
+    limit: usize,
+    scaled: Vec<f32>,
+    vocab: usize,
+}
+
+/// Safety: MhsModel is a static (lives forever). We store a raw pointer
+/// because Rust can't reason about the self-referential async lifetime.
+static mut GEN_STATE: Option<Box<MhsGenState>> = None;
+
+/// Start incremental MHS generation for a query.
+/// Called from async_task::tick() when a pending task is found.
+pub fn mhs_gen_start(query: &str) {
+    unsafe {
+        if !MHS_LOADED.load(Ordering::Acquire) { return; }
+        let model = match MODEL {
+            Some(ref m) => m,
+            None => return,
+        };
+        let (prompt, _) = crate::lm_mhs_prompt::build_minimal_prompt(query);
+        let ids = model.tok.encode(&prompt);
+        if ids.len() > PROMPT_MAX { return; }
+
+        GEN_STATE = Some(Box::new(MhsGenState {
+            ctx: ids.clone(),
+            prompt_len: ids.len(),
+            gen_count: 0,
+            limit: MAX_GEN.min(128), // cap async
+            scaled: vec![0.0f32; model.vocab],
+            vocab: model.vocab,
+        }));
+    }
+}
+
+/// Advance MHS generation by one token.
+/// Returns (done, result_string).
+/// Call repeatedly until done == true.
+pub fn mhs_gen_step() -> (bool, String) {
+    unsafe {
+        let state = match GEN_STATE {
+            Some(ref mut s) => s,
+            None => return (true, String::new()),
+        };
+        let model = match MODEL {
+            Some(ref m) => m,
+            None => { GEN_STATE = None; return (true, String::new()); }
+        };
+
+        forward_buf(model, &state.ctx, &mut state.scaled);
+
+        for i in 0..state.vocab {
+            state.scaled[i] /= SAMPLE_TEMP;
+        }
+
+        let kth = find_kth_largest(&state.scaled, TOP_K.min(state.vocab));
+        for v in state.scaled.iter_mut() {
+            if *v < kth { *v = -f32::INFINITY; }
+        }
+
+        let max_logit = state.scaled.iter().cloned().fold(-f32::INFINITY, f32::max);
+        let sum: f64 = if max_logit.is_finite() {
+            state.scaled.iter().map(|&x| libm::expf(x - max_logit) as f64).sum()
+        } else { 0.0 };
+        let mut r = fastrand();
+        let mut cum = 0.0f64;
+        let mut next = 0usize;
+        if sum > 0.0 {
+            for i in 0..state.vocab {
+                let p = libm::expf(state.scaled[i] - max_logit) as f64 / sum;
+                cum += p;
+                if r <= cum { next = i; break; }
+            }
+        }
+
+        state.ctx.push(next as u16);
+        state.gen_count += 1;
+        let gen_len = state.ctx.len() - state.prompt_len;
+
+        let is_sentence_end = next == 0x2E || next == 0x21
+            || next == 0x3F || next == 0x0A;
+
+        if (is_sentence_end && gen_len >= 15) || gen_len >= state.limit {
+            let response = model.tok.decode(&state.ctx[state.prompt_len..]);
+            GEN_STATE = None;
+            MHS_GEN_COUNT.fetch_add(1, Ordering::Release);
+            (true, response)
+        } else {
+            (false, String::new())
+        }
+    }
+}
+
+/// Reset incremental generation state (cleanup).
+pub fn mhs_gen_reset() {
+    unsafe { GEN_STATE = None; }
 }
 
 // ──────────────────────────────────────────────────────────────

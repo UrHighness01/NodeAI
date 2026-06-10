@@ -1702,6 +1702,54 @@ fn cmd_consciousness(args: &str) {
         return;
     }
 
+    // ── Async / Think ───────────────────────────────────────────────────
+    if trimmed == "think" || trimmed.starts_with("think ") {
+        let rest = trimmed.strip_prefix("think ").unwrap_or("");
+        if rest == "--poll" || rest == "--results" || rest == "-r" {
+            // Poll for completed results
+            let results = crate::async_task::get_new_results();
+            if results.is_empty() {
+                let (_, _, qlen, running) = crate::async_task::stats();
+                if qlen > 0 {
+                    println!("MHS thinking... {} task(s) in queue.{}",
+                        qlen, if running { " (advancing)" } else { "" });
+                } else {
+                    println!("No async results ready. Use 'think <query>' to start.");
+                }
+            } else {
+                for (id, query, result) in &results {
+                    let q_trunc: alloc::string::String = query.chars().take(30).collect();
+                    println!("[#{}] Think \"{}\" → {}", id, q_trunc, result);
+                }
+            }
+        } else if rest == "--queue" || rest == "-q" {
+            let tasks = crate::async_task::get_all_tasks();
+            if tasks.is_empty() {
+                println!("Async queue is empty.");
+            } else {
+                for (id, query, state, _) in &tasks {
+                    let q_trunc: alloc::string::String = query.chars().take(30).collect();
+                    println!("  [#{}] {} — {}", id, q_trunc, state.describe());
+                }
+            }
+        } else if rest == "--help" || rest == "-h" {
+            println!("Async Think Commands:");
+            println!("  think <query>       — enqueue query for MHS background inference");
+            println!("  think --poll/-r     — retrieve completed results");
+            println!("  think --queue/-q    — show queue status");
+            println!("  think --help/-h     — this help");
+        } else if !rest.is_empty() {
+            // Enqueue a query for async inference
+            match crate::async_task::enqueue(rest, "mhs") {
+                Some(id) => println!("Task #{} enqueued. Check results with 'think --poll'.", id),
+                None => println!("Async queue full. Try 'think --poll' first."),
+            }
+        } else {
+            println!("Usage: think <query>  or  think --poll (check results)");
+        }
+        return;
+    }
+
     // ── Conversation memory ─────────────────────────────────────────────
     if trimmed == "memory" || trimmed == "history" || trimmed == "chatlog" {
         let recent = crate::lm_memory::recent(8);
@@ -2020,6 +2068,7 @@ fn cmd_help() {
     println!("                consc doa/direction    — direction finding (MUSIC)");
     println!("                consc nano/nn/intent   — nano-NN classifier");
     println!("                consc mhs/voice/neural — neural voice engine");
+    println!("                consc think <q>       — async MHS inference (background)");
     println!("                consc memory/history   — conversation memory");
     println!("                consc coupling/cross   — cross-modal coupling");
     println!("                consc values/core      — deliberation values");
