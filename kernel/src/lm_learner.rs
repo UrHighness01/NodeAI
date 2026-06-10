@@ -16,7 +16,7 @@ use spin::Mutex;
 use crate::kernel_lm::Intent;
 
 /// Number of intent categories we track (must match Intent:: variants)
-const INTENT_COUNT: usize = 30;
+const INTENT_COUNT: usize = 31;
 
 /// Maximum session exchange counter before wrapping
 const MAX_SESSION_EXCHANGES: u16 = 65535;
@@ -92,7 +92,8 @@ fn intent_to_idx(intent: Intent) -> u8 {
         Intent::Emitter => 26,
         Intent::AsyncReflection => 27,
         Intent::ExternalInference => 28,
-        Intent::Unknown => 29,
+        Intent::SensorInteraction => 29,
+        Intent::Unknown => 30,
     }
 }
 
@@ -211,6 +212,7 @@ pub fn favorite_intent() -> Intent {
         26 => Intent::Emitter,
         27 => Intent::AsyncReflection,
         28 => Intent::ExternalInference,
+        29 => Intent::SensorInteraction,
         _ => Intent::Unknown,
     }
 }
@@ -247,6 +249,7 @@ pub fn favorite_intent_name() -> &'static str {
         Intent::Emitter => "RF/environment questions",
         Intent::AsyncReflection => "deep thinking questions",
         Intent::ExternalInference => "external AI/LLM questions",
+        Intent::SensorInteraction => "sensor/RF environment questions",
         Intent::Unknown => "varied topics",
     }
 }
@@ -284,7 +287,7 @@ pub fn format_report() -> Vec<u8> {
         "MemoryQuery", "StatusQuery", "Sleep", "NameQuery", "RenameQuery",
         "CreatorQuery", "DreamQuery", "Thanks", "Sorry", "Curious",
         "Emotional", "Humor", "Weather", "Advice", "Philosophical",
-        "Sarcastic", "Farewell", "Learning", "Immune", "NeuralSynapse", "Swarm", "Emitter", "AsyncReflection", "ExternalInference", "Unknown",
+        "Sarcastic", "Farewell", "Learning", "Immune", "NeuralSynapse", "Swarm", "Emitter", "AsyncReflection", "ExternalInference", "SensorInteraction", "Unknown",
     ];
     let mut s = alloc::format!(
         "LM Learner — Conversational Learning\n\

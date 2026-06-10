@@ -45,6 +45,7 @@ pub enum Intent {
     Emitter,
     AsyncReflection,
     ExternalInference,
+    SensorInteraction,
     Unknown,
 }
 
@@ -304,6 +305,16 @@ fn detect_intent(query: &str) -> Intent {
         return Intent::ExternalInference;
     }
 
+    // Sensor / /dev/sensor / RF directory / ambient
+    if q.contains("sensor directory") || q.contains("/dev/sensor")
+        || q.contains("sensor node") || q.contains("ambient sensor")
+        || (q.contains("sensor") && q.contains("bus"))
+        || (q.contains("rf") && q.contains("node"))
+        || q.contains("ls /dev/sensor")
+    {
+        return Intent::SensorInteraction;
+    }
+
     Intent::Unknown
 }
 
@@ -359,6 +370,7 @@ pub fn generate_response(query: &str, _max_words: usize) -> String {
         Intent::Swarm => crate::lm_templates::SWARM_RESPONSE.pick(seed),
         Intent::Emitter => crate::lm_templates::EMITTER_RESPONSE.pick(seed),
         Intent::ExternalInference => crate::lm_templates::EXTERNAL_INFERENCE.pick(seed),
+        Intent::SensorInteraction => crate::lm_templates::SENSOR_INTERACTION.pick(seed),
         Intent::AsyncReflection => crate::lm_templates::ASYNC_RESPONSE.pick(seed),
         Intent::Thanks => crate::lm_templates::THANKS_RESPONSE.pick(seed),
         Intent::Sorry => crate::lm_templates::SORRY_RESPONSE.pick(seed),
@@ -461,7 +473,7 @@ pub fn format_report() -> Vec<u8> {
          memory:  {} total exchanges (32-turn ring buffer)\n\
          \n\
          Last exchanges:\n",
-        29, exchange_count,
+        30, exchange_count,
     );
     for (i, (q, r)) in recent.iter().enumerate() {
         let truncated: String = r.chars().take(60).collect();
@@ -472,6 +484,6 @@ pub fn format_report() -> Vec<u8> {
     s.push_str("\nSupported intents:\n");
     s.push_str("  greeting, how_are_you, phi, why, security,\n");
     s.push_str("  memory, status, sleep, name, dream, thanks, sorry, learning, immune,\n");
-    s.push_str("  neural_synapse, swarm, emitter, async_reflection, external_inference\n");
+    s.push_str("  neural_synapse, swarm, emitter, async_reflection, external_inference, sensor_interaction\n");
     s.into_bytes()
 }

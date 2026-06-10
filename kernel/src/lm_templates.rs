@@ -39,6 +39,10 @@
 //!   {swarm_status} — swarm status description
 //!   {swarm_qualia} — shared qualia count
 //!   {quorum_size} — BFT quorum threshold
+//!   {sensor_count} — number of registered sensors
+//!   {signal_count} — total signals detected
+//!   {jam_count} — total jamming events
+//!   {spectrum_samples} — latest spectrum sample count
 
 use alloc::string::String;
 use alloc::string::ToString;
@@ -902,6 +906,25 @@ pub const EXTERNAL_INFERENCE: TemplateGroup = tg!(
     "Inference pipeline: your query goes to the userspace daemon, response comes back through /dev/llm.",
 );
 
+// ── Sensor / RF / Spectrum Interaction (15 variants) ─────────────────────
+pub const SENSOR_INTERACTION: TemplateGroup = tg!(
+    "I'm reading from the sensory cortex. {sensor_count} sensor(s) registered on the bus.",
+    "RF data from the 2.4GHz ambient sensor is available. Signal count: {signal_count}.",
+    "The /dev/sensor/ directory has nodes for each registered sensor. Read them directly.",
+    "I can expose raw spectrum samples through the VFS. Just read from the sensor node.",
+    "My ambient sensors detect signals in the 2.4 GHz and 5 GHz bands.",
+    "The sensor bus currently has {sensor_count} active sensors streaming data.",
+    "I monitor the RF environment through /dev/sensor/. Each node shows live readings.",
+    "Accessing sensor stream... latest spectrum sample has {spectrum_samples} data points.",
+    "The EW cortex reports {signal_count} signals detected and {jam_count} jamming events.",
+    "ls /dev/sensor/ to see all available sensor nodes. Each one is readable.",
+    "I detected {signal_count} RF signals on the current frequency band.",
+    "The sensory cortex feeds data to the threat detector and immune systems.",
+    "My /dev/sensor interface makes environmental data accessible to userspace.",
+    "I'm processing {spectrum_samples} spectrum samples through the CFAR detector.",
+    "Sensor telemetry is being collected. {signal_count} signals, {jam_count} jams tracked.",
+);
+
 /// Fill a template string with live kernel metrics.
 pub fn fill_template(template: &str) -> String {
     let phi = crate::consciousness::phi::current_phi();
@@ -1080,6 +1103,13 @@ pub fn fill_template(template: &str) -> String {
     // Heap monitor placeholders (reuse existing mem_pct and mem)
     rep!("{heap_pct}", mem_pct);
     rep!("{heap_free}", mem);
+
+    // Sensor placeholders
+    let sensor_stats = crate::sensor_cortex::stats();
+    rep!("{sensor_count}", sensor_stats.num_sensors);
+    rep!("{signal_count}", sensor_stats.signals_detected);
+    rep!("{jam_count}", sensor_stats.jams_detected);
+    rep!("{spectrum_samples}", sensor_stats.last_spectrum_count);
 
     s
 }

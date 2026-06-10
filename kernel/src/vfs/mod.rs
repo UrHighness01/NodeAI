@@ -9,6 +9,7 @@ pub mod proc_pid;
 pub mod procfs;
 pub mod ramfs;
 pub mod devfs;
+pub mod sensorfs;
 pub mod blockdev;
 
 use alloc::{boxed::Box, string::String, sync::Arc, vec::Vec};

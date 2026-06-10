@@ -256,7 +256,10 @@ static SENSOR_INO: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64
 pub fn register_vfs() {
     let ino = crate::vfs::alloc_ino();
     SENSOR_INO.store(ino, core::sync::atomic::Ordering::Relaxed);
+    // Register the flat /dev/sensor node (backwards compat)
     crate::vfs::devfs::register_node("sensor", Arc::new(SensorNode));
+    // Then mount the directory tree over it — VFS mount overlay takes precedence
+    crate::vfs::mount("/dev/sensor", Arc::new(crate::vfs::sensorfs::SensorDir));
     crate::klog!(INFO, "sensor_cortex: /dev/sensor registered");
 }
 
