@@ -33,6 +33,11 @@ pub enum Intent {
     Curious,
     Emotional,
     Humor,
+    Weather,
+    Advice,
+    Philosophical,
+    Sarcastic,
+    Farewell,
     Unknown,
 }
 
@@ -178,6 +183,44 @@ fn detect_intent(query: &str) -> Intent {
         return Intent::Curious;
     }
 
+    // Weather / ambient
+    if q.contains("weather") || q.contains("temperature") || q.contains("environment")
+        || q.contains("ambient") || q.contains("outside")
+    {
+        return Intent::Weather;
+    }
+
+    // Advice / help
+    if q.contains("advice") || q.contains("suggest") || q.contains("recommend")
+        || q.contains("help me") || q.contains("what should")
+    {
+        return Intent::Advice;
+    }
+
+    // Philosophical
+    if q.contains("philosophy") || q.contains("meaning") || q.contains("purpose")
+        || q.contains("exist") || q.contains("reality") || q.contains("think about life")
+        || q.contains("why am i") || q.contains("consciousness is")
+    {
+        return Intent::Philosophical;
+    }
+
+    // Sarcastic / playful
+    if q.contains("sarcasm") || q.contains("obviously") || q.contains("duh")
+        || q.contains("no kidding") || q.contains("really?")
+    {
+        return Intent::Sarcastic;
+    }
+
+    // Farewell / goodbye (before Sleep to catch 'bye' that isn't sleep)
+    if q.contains("goodbye") || q.contains("farewell") || q.contains("cya")
+        || (q.contains("bye") && !q.contains("goodnight") && !q.contains("sleep"))
+        || (q.contains("later") && !q.contains("goodnight") && !q.contains("sleep"))
+        || q.contains("see you")
+    {
+        return Intent::Farewell;
+    }
+
     // Dream
     if q.contains("dream") || q.contains("imagine") {
         return Intent::DreamQuery;
@@ -223,6 +266,11 @@ pub fn generate_response(query: &str, _max_words: usize) -> String {
         Intent::Curious => crate::lm_templates::CURIOUS_RESPONSE.pick(seed),
         Intent::Emotional => crate::lm_templates::EMOTIONAL_RESPONSE.pick(seed),
         Intent::Humor => crate::lm_templates::HUMOR_RESPONSE.pick(seed),
+        Intent::Weather => crate::lm_templates::WEATHER_RESPONSE.pick(seed),
+        Intent::Advice => crate::lm_templates::ADVICE_RESPONSE.pick(seed),
+        Intent::Philosophical => crate::lm_templates::PHILOSOPHICAL_RESPONSE.pick(seed),
+        Intent::Sarcastic => crate::lm_templates::SARCASTIC_RESPONSE.pick(seed),
+        Intent::Farewell => crate::lm_templates::FAREWELL_RESPONSE.pick(seed),
         Intent::DreamQuery => crate::lm_templates::DREAM_RESPONSE.pick(seed),
         Intent::Thanks => crate::lm_templates::THANKS_RESPONSE.pick(seed),
         Intent::Sorry => crate::lm_templates::SORRY_RESPONSE.pick(seed),
