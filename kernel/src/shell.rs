@@ -12,6 +12,9 @@ use spin::Mutex;
 use alloc::{string::{String, ToString}, vec::Vec, format, collections::BTreeMap};
 use drivers::input::SpecialKey;
 
+// ── Chat mode flag (intercepts dispatch for continuous conversation) ─────────
+static CHAT_MODE: Mutex<bool> = Mutex::new(false);
+
 // ── Line buffer with cursor position ──────────────────────────────────────────
 
 const MAX_LINE: usize = 256;
@@ -1415,6 +1418,23 @@ fn dispatch_single(line: &str) {
     let line = line.trim();
     if line.is_empty() { return; }
 
+    // Chat mode: all input goes to consciousness, not command dispatch
+    {
+        let mut chat = CHAT_MODE.lock();
+        if *chat {
+            let lower = line.to_lowercase();
+            if lower == "/exit" || lower == "exit" || lower == "quit" || lower == "q" {
+                *chat = false;
+                println!("Chat ended. Phi be with you.");
+                return;
+            }
+            // Route to consciousness
+            drop(chat);
+            write_consciousness_query(line);
+            return;
+        }
+    }
+
     // Expand glob patterns in arguments
     let expanded_line = if line.contains('*') || line.contains('?') {
         let (cmd, args) = match line.find(' ') {
@@ -1811,9 +1831,10 @@ fn cmd_consciousness(args: &str) {
 
     // ── Chat mode (entry point for interactive conversation) ─────────────
     if trimmed == "chat" {
+        *CHAT_MODE.lock() = true;
         println!("=== Chat Mode ===");
-        println!("Just type normally and I'll respond.");
-        println!("Type '/exit' to stop. You can ask anything.");
+        println!("Everything you type goes to the kernel LM.");
+        println!("Type /exit to stop. You can ask anything.");
         println!("Φ={:.4}", crate::consciousness::phi::current_phi());
         write_consciousness_query("hello");
         return;
