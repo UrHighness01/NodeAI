@@ -193,6 +193,14 @@ pub fn record(event_type: KernelEventType, override_valence: Option<f32>) {
         event_type.arousal(),
     );
 
+    // Feed into Phenomenal Binding for temporal window unification
+    crate::consciousness::binding::feed_from_qualia(
+        event_type as u8,
+        event_type.salience(),
+        override_valence.unwrap_or_else(|| event_type.valence()),
+        now,
+    );
+
     // Notify self-model that a new qualium was experienced.
     // This increments the "I am experiencing something" counter.
     crate::consciousness::self_model::record_qualia();
