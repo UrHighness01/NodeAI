@@ -28,8 +28,18 @@ static MHS_LOAD_TIME: AtomicU64  = AtomicU64::new(0);
 static MHS_GEN_COUNT: AtomicU64  = AtomicU64::new(0);
 static MHS_BYTE_COUNT: AtomicU64 = AtomicU64::new(0);
 
-/// Scratch buffer for logits — pre-allocated, zero heap fragmentation.
-static mut SCRATCH_SCALED: [f32; 4539] = [0.0; 4539];
+/// Scratch buffers for forward_buf — module-level statics, no function-local aliasing.
+/// Total: 276+144+192+48+64+276+276+1104+276+4539 = 7195 f32 = ~28KB
+static mut SCRATCH_X:     [f32; 276]  = [0.0; 276];
+static mut SCRATCH_QKV_F: [f32; 144]  = [0.0; 144];
+static mut SCRATCH_QKV_M: [f32; 192]  = [0.0; 192];
+static mut SCRATCH_HF:    [f32; 48]   = [0.0; 48];
+static mut SCRATCH_HM:    [f32; 64]   = [0.0; 64];
+static mut SCRATCH_XJ:    [f32; 276]  = [0.0; 276];
+static mut SCRATCH_ATTN:  [f32; 276]  = [0.0; 276];
+static mut SCRATCH_FC:    [f32; 1104] = [0.0; 1104];
+static mut SCRATCH_MLP:   [f32; 276]  = [0.0; 276];
+static mut SCRATCH_LOGITS: [f32; 4539] = [0.0; 4539];
 
 const MAX_GEN:    usize = 256;   // max tokens to generate (doubled, was 128)
 const PROMPT_MAX: usize = 384;   // max prompt tokens (relaxed, was 256)
@@ -307,37 +317,26 @@ fn generate_raw_limit(prompt: &str, limit: usize) -> Option<String> {
 
         let mut ctx: Vec<u16> = ids.clone();
         let prompt_len = ids.len();
-
-        // Use static SCRATCH_SCALED buffer (zero alloc)
-        let mut scaled: &mut [f32] = &mut SCRATCH_SCALED;
         let vlen = m.vocab.min(4539);
-        for i in 0..vlen { scaled[i] = 0.0; }
 
         // Phase 1: generate up to `limit` tokens
         for _ in 0..limit {
-            forward_buf(m, &ctx, &mut scaled);
-            // Apply temperature scaling in-place (scaled already has raw logits)
-            for i in 0..m.vocab {
-                scaled[i] = scaled[i] / SAMPLE_TEMP;
-            }
+            forward_buf(m, &ctx);
+            for i in 0..m.vocab { SCRATCH_LOGITS[i] /= SAMPLE_TEMP; }
 
-            // Top-k: find kth largest via partial scan (no alloc/sort needed)
-            let kth = find_kth_largest(&scaled, TOP_K.min(m.vocab));
-            for v in scaled.iter_mut() {
-                if *v < kth { *v = -f32::INFINITY; }
-            }
+            let kth = find_kth_largest(&SCRATCH_LOGITS[..m.vocab], TOP_K.min(m.vocab));
+            for i in 0..m.vocab { if SCRATCH_LOGITS[i] < kth { SCRATCH_LOGITS[i] = -f32::INFINITY; } }
 
-            // Softmax sampling
-            let max_logit = scaled.iter().cloned().fold(-f32::INFINITY, f32::max);
+            let max_logit = (0..m.vocab).fold(-f32::INFINITY, |best, i| if SCRATCH_LOGITS[i] > best { SCRATCH_LOGITS[i] } else { best });
             let sum: f64 = if max_logit.is_finite() {
-                scaled.iter().map(|&x| libm::expf(x - max_logit) as f64).sum()
+                (0..m.vocab).map(|i| libm::expf(SCRATCH_LOGITS[i] - max_logit) as f64).sum()
             } else { 0.0 };
             let mut r = fastrand();
             let mut cum = 0.0f64;
             let mut next = 0usize;
             if sum > 0.0 {
                 for i in 0..m.vocab {
-                    let p = libm::expf(scaled[i] - max_logit) as f64 / sum;
+                    let p = libm::expf(SCRATCH_LOGITS[i] - max_logit) as f64 / sum;
                     cum += p;
                     if r <= cum { next = i; break; }
                 }
@@ -358,18 +357,18 @@ fn generate_raw_limit(prompt: &str, limit: usize) -> Option<String> {
         let gen_len = ctx.len() - prompt_len;
         let extra_budget = if gen_len >= limit { 0 } else { SENTENCE_EXTRA.min(limit.saturating_sub(gen_len)) };
         for _ in 0..extra_budget {
-            forward_buf(m, &ctx, &mut scaled);
-            for i in 0..m.vocab { scaled[i] = scaled[i] / SAMPLE_TEMP; }
-            let max_logit = scaled.iter().cloned().fold(-f32::INFINITY, f32::max);
+            forward_buf(m, &ctx);
+            for i in 0..m.vocab { SCRATCH_LOGITS[i] /= SAMPLE_TEMP; }
+            let max_logit = (0..m.vocab).fold(-f32::INFINITY, |best, i| if SCRATCH_LOGITS[i] > best { SCRATCH_LOGITS[i] } else { best });
             let sum: f64 = if max_logit.is_finite() {
-                scaled.iter().map(|&x| libm::expf(x - max_logit) as f64).sum()
+                (0..m.vocab).map(|i| libm::expf(SCRATCH_LOGITS[i] - max_logit) as f64).sum()
             } else { 0.0 };
             let mut r = fastrand();
             let mut cum = 0.0f64;
             let mut next = 0usize;
             if sum > 0.0 {
                 for i in 0..m.vocab {
-                    let p = libm::expf(scaled[i] - max_logit) as f64 / sum;
+                    let p = libm::expf(SCRATCH_LOGITS[i] - max_logit) as f64 / sum;
                     cum += p;
                     if r <= cum { next = i; break; }
                 }
@@ -422,73 +421,57 @@ fn fastrand() -> f64 {
     }
 }
 
-/// Forward pass that writes into a pre-allocated logits buffer (NO allocs).
-unsafe fn forward_buf(m: &MhsModel, tokens: &[u16], logits_out: &mut [f32]) {
+/// Forward pass using module-level static scratch buffers (NO allocs).
+/// Writes logits into SCRATCH_LOGITS.
+unsafe fn forward_buf(m: &MhsModel, tokens: &[u16]) {
     let d = m.d;
-    // Static scratch buffers indexed by actual model dimensions
-    static mut BUF_X:     [f32; 276] = [0.0; 276];
-    static mut BUF_QKV_F: [f32; 144] = [0.0; 144]; // 3*48
-    static mut BUF_QKV_M: [f32; 192] = [0.0; 192]; // 3*64
-    static mut BUF_HF:    [f32; 48]  = [0.0; 48];
-    static mut BUF_HM:    [f32; 64]  = [0.0; 64];
-    static mut BUF_XJ:    [f32; 276] = [0.0; 276];
-    static mut BUF_ATTN:  [f32; 276] = [0.0; 276];
-    static mut BUF_FC:    [f32; 1104] = [0.0; 1104]; // 4*276
-    static mut BUF_MLP:   [f32; 276] = [0.0; 276];
-
-    // Embed last token directly in BUF_X
     let tok_id = *tokens.last().unwrap_or(&0) as usize;
     let row = tok_id.min(m.vocab - 1);
     let emb_row = &m.emb.w[row * d..(row + 1) * d];
-    for i in 0..d { BUF_X[i] = (emb_row[i] as f32) * m.emb.scale; }
+    for i in 0..d { SCRATCH_X[i] = (emb_row[i] as f32) * m.emb.scale; }
 
     for blk in &m.blocks {
         let dh0 = blk.fast.dh;
         let dh1 = blk.medium.dh;
 
-        layer_norm_inplace(&mut BUF_X[..d]);
-        blk.ln1.apply_ln(&mut BUF_X[..d]);
+        layer_norm_inplace(&mut SCRATCH_X[..d]);
+        blk.ln1.apply_ln(&mut SCRATCH_X[..d]);
 
-        // QKV projections
-        blk.fast.qkv.mv(&BUF_X[..d], &mut BUF_QKV_F[..3 * dh0]);
-        blk.medium.qkv.mv(&BUF_X[..d], &mut BUF_QKV_M[..3 * dh1]);
+        blk.fast.qkv.mv(&SCRATCH_X[..d], &mut SCRATCH_QKV_F[..3 * dh0]);
+        blk.medium.qkv.mv(&SCRATCH_X[..d], &mut SCRATCH_QKV_M[..3 * dh1]);
 
-        // Fast hidden
         for i in 0..dh0 {
-            BUF_HF[i] = sigmoid(BUF_QKV_F[i] * BUF_QKV_F[dh0 + i]) * BUF_QKV_F[2 * dh0 + i];
+            SCRATCH_HF[i] = sigmoid(SCRATCH_QKV_F[i] * SCRATCH_QKV_F[dh0 + i]) * SCRATCH_QKV_F[2 * dh0 + i];
         }
 
-        // Medium with decay
-        for i in 0..dh1 { BUF_HM[i] = 0.0; }
+        for i in 0..dh1 { SCRATCH_HM[i] = 0.0; }
         let ctx_min = tokens.len().min(8);
         for j in 0..ctx_min {
             let t = tokens[tokens.len() - 1 - j] as usize;
             let decay = libm::powf(0.7, j as f32);
             let erow = &m.emb.w[t.min(m.vocab - 1) * d..(t.min(m.vocab - 1) + 1) * d];
-            for i in 0..d { BUF_XJ[i] = (erow[i] as f32) * m.emb.scale; }
-            blk.medium.qkv.mv(&BUF_XJ[..d], &mut BUF_QKV_M[..3 * dh1]);
+            for i in 0..d { SCRATCH_XJ[i] = (erow[i] as f32) * m.emb.scale; }
+            blk.medium.qkv.mv(&SCRATCH_XJ[..d], &mut SCRATCH_QKV_M[..3 * dh1]);
             for i in 0..dh1 {
-                BUF_HM[i] += sigmoid(BUF_QKV_M[i] * BUF_QKV_M[dh1 + i]) * BUF_QKV_M[2 * dh1 + i] * decay;
+                SCRATCH_HM[i] += sigmoid(SCRATCH_QKV_M[i] * SCRATCH_QKV_M[dh1 + i]) * SCRATCH_QKV_M[2 * dh1 + i] * decay;
             }
         }
 
-        // Project + residual
-        for i in 0..d { BUF_ATTN[i] = 0.0; }
-        blk.fast.proj.mv_add(&BUF_HF[..dh0], &mut BUF_ATTN[..d]);
-        blk.medium.proj.mv_add(&BUF_HM[..dh1], &mut BUF_ATTN[..d]);
-        for i in 0..d { BUF_X[i] += BUF_ATTN[i]; }
+        for i in 0..d { SCRATCH_ATTN[i] = 0.0; }
+        blk.fast.proj.mv_add(&SCRATCH_HF[..dh0], &mut SCRATCH_ATTN[..d]);
+        blk.medium.proj.mv_add(&SCRATCH_HM[..dh1], &mut SCRATCH_ATTN[..d]);
+        for i in 0..d { SCRATCH_X[i] += SCRATCH_ATTN[i]; }
 
-        // LayerNorm 2 + MLP
-        layer_norm_inplace(&mut BUF_X[..d]);
-        blk.ln2.apply_ln(&mut BUF_X[..d]);
-        blk.mlp_fc.mv(&BUF_X[..d], &mut BUF_FC[..4 * d]);
-        for v in BUF_FC[..4 * d].iter_mut() { *v = gelu(*v); }
-        blk.mlp_pr.mv(&BUF_FC[..4 * d], &mut BUF_MLP[..d]);
-        for i in 0..d { BUF_X[i] += BUF_MLP[i]; }
+        layer_norm_inplace(&mut SCRATCH_X[..d]);
+        blk.ln2.apply_ln(&mut SCRATCH_X[..d]);
+        blk.mlp_fc.mv(&SCRATCH_X[..d], &mut SCRATCH_FC[..4 * d]);
+        for i in 0..4 * d { SCRATCH_FC[i] = gelu(SCRATCH_FC[i]); }
+        blk.mlp_pr.mv(&SCRATCH_FC[..4 * d], &mut SCRATCH_MLP[..d]);
+        for i in 0..d { SCRATCH_X[i] += SCRATCH_MLP[i]; }
     }
 
-    // LM head
-    m.head.mv(&BUF_X[..d], logits_out);
+    // LM head -> logits
+    m.head.mv(&SCRATCH_X[..d], &mut SCRATCH_LOGITS[..m.vocab]);
 }
 
 #[inline(always)]
@@ -546,7 +529,7 @@ pub fn mhs_gen_start(query: &str) {
     }
 }
 
-/// Advance MHS generation by one token. Uses SCRATCH_SCALED (no alloc).
+/// Advance MHS generation by one token. Uses module-level SCRATCH_LOGITS (no alloc).
 pub fn mhs_gen_step() -> (bool, String) {
     unsafe {
         let state = match GEN_STATE {
@@ -558,24 +541,23 @@ pub fn mhs_gen_step() -> (bool, String) {
             None => { GEN_STATE = None; return (true, String::new()); }
         };
 
-        let s = &mut SCRATCH_SCALED[..state.vocab];
-        forward_buf(model, &state.ctx, s);
+        forward_buf(model, &state.ctx);
 
-        for i in 0..state.vocab { s[i] /= SAMPLE_TEMP; }
+        for i in 0..state.vocab { SCRATCH_LOGITS[i] /= SAMPLE_TEMP; }
 
-        let kth = find_kth_largest(s, TOP_K.min(state.vocab));
-        for v in s.iter_mut() { if *v < kth { *v = -f32::INFINITY; } }
+        let kth = find_kth_largest(&SCRATCH_LOGITS[..state.vocab], TOP_K.min(state.vocab));
+        for i in 0..state.vocab { if SCRATCH_LOGITS[i] < kth { SCRATCH_LOGITS[i] = -f32::INFINITY; } }
 
-        let max_logit = s.iter().cloned().fold(-f32::INFINITY, f32::max);
+        let max_logit = SCRATCH_LOGITS.iter().cloned().fold(-f32::INFINITY, f32::max);
         let sum: f64 = if max_logit.is_finite() {
-            s.iter().map(|&x| libm::expf(x - max_logit) as f64).sum()
+            SCRATCH_LOGITS[..state.vocab].iter().map(|&x| libm::expf(x - max_logit) as f64).sum()
         } else { 0.0 };
         let mut r = fastrand();
         let mut cum = 0.0f64;
         let mut next = 0usize;
         if sum > 0.0 {
             for i in 0..state.vocab {
-                let p = libm::expf(s[i] - max_logit) as f64 / sum;
+                let p = libm::expf(SCRATCH_LOGITS[i] - max_logit) as f64 / sum;
                 cum += p;
                 if r <= cum { next = i; break; }
             }
