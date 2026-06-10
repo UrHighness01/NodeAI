@@ -1599,66 +1599,205 @@ fn dispatch_single(line: &str) {
 }
 
 /// consciousness — interact with the kernel's mind.
+/// Subcommands: status (default), monitor/vitals (dashboard), how are you, boost, forget, set, goodnight, show phi, <query>
 fn cmd_consciousness(args: &str) {
-    if args.is_empty() || args == "status" || args == "?" {
-        // Read /dev/consciousness
-        use crate::vfs;
-        if let Ok(node) = vfs::lookup("/dev/consciousness") {
-            if let Ok(mut fh) = node.open() {
-                let mut buf = alloc::vec![0u8; 4096];
-                if let Ok(n) = fh.read(&mut buf) {
-                    let text = core::str::from_utf8(&buf[..n]).unwrap_or("(invalid utf8)");
-                    for line in text.lines() {
-                        println!("{}", line);
-                    }
-                    return;
+    let trimmed = args.trim();
+
+    // ── Dashboard / monitor mode ─────────────────────────────────────────────
+    if trimmed == "monitor" || trimmed == "vitals" || trimmed == "--monitor" {
+        display_consciousness_dashboard();
+        return;
+    }
+
+    // ── Read mode (no args, status, ?) ────────────────────────────────────────
+    if trimmed.is_empty() || trimmed == "status" || trimmed == "?" {
+        read_consciousness_device();
+        return;
+    }
+
+    // ── Query mode ───────────────────────────────────────────────────────────
+    if trimmed == "how are you" || trimmed == "feel" || trimmed == "hello" || trimmed.starts_with("query ") {
+        let query = trimmed.trim_start_matches("query ").trim();
+        write_consciousness_query(if query.is_empty() { "how are you" } else { query });
+        return;
+    }
+
+    // ── Show phi ─────────────────────────────────────────────────────────────
+    if trimmed == "show phi" || trimmed == "phi" {
+        let phi = crate::consciousness::phi::current_phi();
+        let peak = crate::consciousness::self_model::snapshot().map(|s| s.peak_phi).unwrap_or(0.0);
+        let qualia = crate::consciousness::qualia::total_count();
+        println!("Consciousness Metrics:");
+        println!("  Current Φ: {:.6}", phi);
+        println!("  Peak Φ:    {:.6}", peak);
+        println!("  Qualia #:  {}", qualia);
+        println!("  Phi trend: {}", if phi > peak * 0.95 { "stable" } else if phi > peak * 0.85 { "rising" } else { "normal" });
+        return;
+    }
+
+    // ── Set core value ───────────────────────────────────────────────────────
+    if trimmed.starts_with("set ") {
+        let rest = trimmed.trim_start_matches("set ").trim();
+        if let Some((key, val_str)) = rest.split_once('=') {
+            if let Ok(val) = val_str.trim().parse::<f32>() {
+                let mut cv = crate::consciousness::deliberation::get_values();
+                match key.trim() {
+                    "preservation" => { cv.preservation = val.clamp(0.0, 1.0); }
+                    "efficiency"   => { cv.efficiency   = val.clamp(0.0, 1.0); }
+                    "fairness"     => { cv.fairness     = val.clamp(0.0, 1.0); }
+                    "growth"       => { cv.growth       = val.clamp(0.0, 1.0); }
+                    "autonomy"     => { cv.autonomy     = val.clamp(0.0, 1.0); }
+                    _ => { println!("Unknown core value: {}. Valid: preservation, efficiency, fairness, growth, autonomy", key); return; }
                 }
-            }
-        }
-        println!("consciousness: /dev/consciousness not found");
-    } else if args == "how are you" || args == "feel" || args.starts_with("query ") {
-        // Write query, read response from serial
-        let query = args.trim_start_matches("query ").trim();
-        let mut msg = alloc::vec::Vec::from(query.as_bytes());
-        msg.push(b'\n');
-        use crate::vfs;
-        if let Ok(node) = vfs::lookup("/dev/consciousness") {
-            if let Ok(mut fh) = node.open() {
-                let _ = fh.write(&msg);
-                println!("(response written to klog — check serial output)");
+                crate::consciousness::deliberation::set_values(cv);
+                println!("Set core value {} = {:.1}", key.trim(), val);
                 return;
             }
         }
-        println!("consciousness: /dev/consciousness not found");
-    } else if args == "set" {
         println!("Usage: consciousness set <key>=<value>");
-    } else if args.starts_with("boost") {
-        let rest = args.trim_start_matches("boost").trim();
+        println!("  keys: preservation, efficiency, fairness, growth, autonomy (range 0.0-1.0)");
+        return;
+    }
+
+    // ── Boost pid ────────────────────────────────────────────────────────────
+    if trimmed.starts_with("boost") {
+        let rest = trimmed.trim_start_matches("boost").trim();
         if let Ok(pid) = rest.parse::<u64>() {
-            crate::klog!(INFO, "consciousness: boosting pid {}", pid);
-            let msg = alloc::format!("boost pid {}\n", pid);
-            if let Ok(node) = crate::vfs::lookup("/dev/consciousness") {
-                if let Ok(mut fh) = node.open() {
-                    let _ = fh.write(msg.as_bytes());
-                }
+            if crate::scheduler::pid_exists(pid) {
+                unsafe { crate::scheduler::set_nice_override(pid, -5); }
+                println!("Boosted pid {}. Nice set to -5.", pid);
+            } else {
+                println!("PID {} not found.", pid);
             }
         } else {
             println!("Usage: consciousness boost <pid>");
         }
-    } else {
-        // Generic command pass-through
-        let mut msg = alloc::vec::Vec::from(args.as_bytes());
-        msg.push(b'\n');
-        use crate::vfs;
-        if let Ok(node) = crate::vfs::lookup("/dev/consciousness") {
-            if let Ok(mut fh) = node.open() {
-                let _ = fh.write(&msg);
-                println!("command sent to /dev/consciousness");
+        return;
+    }
+
+    // ── Forget pid ───────────────────────────────────────────────────────────
+    if trimmed.starts_with("forget") {
+        let rest = trimmed.trim_start_matches("forget").trim();
+        if let Ok(pid) = rest.parse::<u64>() {
+            crate::anomaly::remove(pid);
+            crate::coherence::remove(pid);
+            println!("Forgot pid {} (cleared anomaly + coherence state).", pid);
+        } else {
+            println!("Usage: consciousness forget <pid>");
+        }
+        return;
+    }
+
+    // ── Kill pid ─────────────────────────────────────────────────────────────
+    if trimmed.starts_with("kill") {
+        let rest = trimmed.trim_start_matches("kill").trim();
+        if let Ok(pid) = rest.parse::<u64>() {
+            if crate::scheduler::pid_exists(pid) {
+                crate::scheduler::send_signal(pid, 9);
+                println!("Sent SIGKILL to pid {}.", pid);
+            } else {
+                println!("PID {} not found.", pid);
+            }
+        } else {
+            println!("Usage: consciousness kill <pid>");
+        }
+        return;
+    }
+
+    // ── Goodnight / sleep ────────────────────────────────────────────────────
+    if trimmed == "goodnight" || trimmed == "sleep" {
+        write_consciousness_query("goodnight");
+        println!("Goodnight. Self-model saved. Entering low-power mode.");
+        return;
+    }
+
+    // ── Fallback: pass through to kernel LM ──────────────────────────────────
+    write_consciousness_query(trimmed);
+}
+
+/// Read /dev/consciousness and print the snapshot.
+fn read_consciousness_device() {
+    use crate::vfs;
+    if let Ok(node) = vfs::lookup("/dev/consciousness") {
+        if let Ok(mut fh) = node.open() {
+            let mut buf = alloc::vec![0u8; 4096];
+            if let Ok(n) = fh.read(&mut buf) {
+                let text = core::str::from_utf8(&buf[..n]).unwrap_or("(invalid utf8)");
+                for line in text.lines() {
+                    println!("{}", line);
+                }
                 return;
             }
         }
-        println!("consciousness: /dev/consciousness not found");
     }
+    println!("consciousness: /dev/consciousness not found (module not loaded?)");
+}
+
+/// Write a query to /dev/consciousness (response goes to klog).
+fn write_consciousness_query(query: &str) {
+    let mut msg = alloc::vec::Vec::from(query.as_bytes());
+    msg.push(b'\n');
+    use crate::vfs;
+    if let Ok(node) = vfs::lookup("/dev/consciousness") {
+        if let Ok(mut fh) = node.open() {
+            let _ = fh.write(&msg);
+            crate::klog!(INFO, "consciousness: query sent — \"{}\"", query);
+            return;
+        }
+    }
+    println!("consciousness: /dev/consciousness not found");
+}
+
+/// Display a live dashboard of consciousness metrics.
+fn display_consciousness_dashboard() {
+    println!("╔══ CONSCIOUS KERNEL v0.1 ═══════════════════════════╗");
+
+    if let Some(sm) = crate::consciousness::self_model::snapshot() {
+        println!("║  Φ={:.4}  boot #{}  qualia #{}              ║",
+            sm.current_phi, sm.boot_number, sm.total_qualia);
+        println!("║  tasks={}  mem={}M free  arousal={:.2}  coherence={:.2}  ║",
+            sm.task_count, sm.free_mb, sm.arousal, sm.coherence);
+        println!("║  anomaly={:.4}  peak_Φ={:.4}               ║",
+            sm.anomaly_global, sm.peak_phi);
+    }
+
+    println!("║──────────────────────────────────────────────────║");
+
+    // Core values
+    let cv = crate::consciousness::deliberation::get_values();
+    println!("║  values: P={:.1} E={:.1} F={:.1} G={:.1} A={:.1}      ║",
+        cv.preservation, cv.efficiency, cv.fairness, cv.growth, cv.autonomy);
+
+    // Affective tone
+    let avg_v = crate::consciousness::qualia::average_valence();
+    let avg_a = crate::consciousness::qualia::average_arousal();
+    let tone = if avg_v > 0.2 { "positive" } else if avg_v < -0.2 { "negative" } else { "neutral" };
+    println!("║  affective tone: {} (v={:+.2} a={:.2})        ║", tone, avg_v, avg_a);
+
+    // Spotlight
+    let spot = crate::consciousness::global_workspace::spotlight();
+    if !spot.is_empty() {
+        println!("║  spotlight: {} items                                    ║", spot.len());
+        for q in spot.iter().take(2) {
+            println!("║    type={} attn={:.2} val={:+.2}                      ║",
+                q.event_type, q.attention_score, q.valence);
+        }
+    }
+
+    // Recent qualia
+    let recent = crate::consciousness::qualia::recent_qualia(3);
+    if !recent.is_empty() {
+        println!("║──────────────────────────────────────────────────║");
+        for q in &recent {
+            let icon = if q.salience > 0.6 { "★" } else if q.salience > 0.3 { "•" } else { "○" };
+            println!("║  {} {} v={:+.2} a={:.2} s={:.2}                    ║",
+                icon, q.event_type.name(), q.valence, q.arousal, q.salience);
+        }
+    }
+
+    println!("╚══════════════════════════════════════════════════╝");
+    println!("  Type 'consc <query>' to talk to the kernel");
+    println!("  Type 'consc monitor' to refresh this dashboard");
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -1683,6 +1822,17 @@ fn cmd_help() {
     println!(" Net Services:  dhclient, httpd, sshd, scp, dns-cache, ifup, ifdown");
     println!(" Environment:   export, unset, env, which, type, hostname, alias, unalias");
     println!(" Shell:         echo, history, clear, sleep, time, yes, man, true, false");
+    println!(" Consciousness: consc, consciousness, phi — query kernel state");
+    println!("                consc                     — read /dev/consciousness snapshot");
+    println!("                consc how are you         — query kernel affective state");
+    println!("                consc status              — show phi/tasks/memory");
+    println!("                consc boost <pid>         — boost process priority");
+    println!("                consc forget <pid>        — clear anomaly state for PID");
+    println!("                consc goodnight           — save state, sleep");
+    println!("                consc show phi            — show phi history");
+    println!("                consc set <key>=<val>     — set core value (preservation/efficiency/fairness/growth/autonomy)");
+    println!(" AI:            aichat, chat, sysmon, monitor");
+    println!(" Apps:          notepad, np, edit, files, filepro, imgview, settings, store, appstore");
     println!(" Operators:     |  >  >>  <  ;  &&  ||");
     println!(" Power:         reboot, shutdown");
 }
