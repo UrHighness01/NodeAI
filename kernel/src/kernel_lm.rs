@@ -38,6 +38,7 @@ pub enum Intent {
     Philosophical,
     Sarcastic,
     Farewell,
+    Learning,
     Unknown,
 }
 
@@ -240,15 +241,28 @@ fn detect_intent(query: &str) -> Intent {
         return Intent::Sorry;
     }
 
+    // Learning / adaptation / memory of me
+    if q.contains("learn") || q.contains("remember") || q.contains("remember me")
+        || q.contains("know me") || q.contains("recognize") || q.contains("adapt")
+        || q.contains("do you know who i")
+    {
+        return Intent::Learning;
+    }
+
     Intent::Unknown
 }
 
 /// Generate a response to a natural language query.
 pub fn generate_response(query: &str, _max_words: usize) -> String {
     let uptime_secs = crate::scheduler::uptime_ms() / 1000;
-    let seed = hash_seed(query, uptime_secs);
-
     let intent = detect_intent(query);
+
+    // Record interaction for conversational learning
+    crate::lm_learner::record_interaction(intent, query);
+
+    // Compute seed with learner's template bias
+    let base_seed = hash_seed(query, uptime_secs);
+    let seed = crate::lm_learner::template_bias(intent, base_seed);
 
     // Select template group and get a variant
     let template = match intent {
@@ -272,6 +286,7 @@ pub fn generate_response(query: &str, _max_words: usize) -> String {
         Intent::Sarcastic => crate::lm_templates::SARCASTIC_RESPONSE.pick(seed),
         Intent::Farewell => crate::lm_templates::FAREWELL_RESPONSE.pick(seed),
         Intent::DreamQuery => crate::lm_templates::DREAM_RESPONSE.pick(seed),
+        Intent::Learning => crate::lm_templates::LEARNING_RESPONSE.pick(seed),
         Intent::Thanks => crate::lm_templates::THANKS_RESPONSE.pick(seed),
         Intent::Sorry => crate::lm_templates::SORRY_RESPONSE.pick(seed),
         Intent::Unknown => crate::lm_templates::FALLBACK_RESPONSE.pick(seed),
@@ -399,7 +414,7 @@ pub fn format_report() -> Vec<u8> {
          memory:  {} total exchanges (32-turn ring buffer)\n\
          \n\
          Last exchanges:\n",
-        23, exchange_count,
+        24, exchange_count,
     );
     for (i, (q, r)) in recent.iter().enumerate() {
         let truncated: String = r.chars().take(60).collect();
@@ -409,6 +424,6 @@ pub fn format_report() -> Vec<u8> {
     }
     s.push_str("\nSupported intents:\n");
     s.push_str("  greeting, how_are_you, phi, why, security,\n");
-    s.push_str("  memory, status, sleep, name, dream, thanks, sorry\n");
+    s.push_str("  memory, status, sleep, name, dream, thanks, sorry, learning\n");
     s.into_bytes()
 }

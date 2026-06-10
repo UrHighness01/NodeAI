@@ -113,7 +113,9 @@ pub fn refresh() {
     write_file("/proc", "nano_nn",         crate::nano_nn::format_report());
     write_file("/proc", "lm_mhs",          crate::lm_mhs::format_report());
     write_file("/proc", "lm_validator",    crate::lm_validator::format_report());
-    write_file("/proc", "emotional_arc",   crate::emotional_arc::format_report());}
+    write_file("/proc", "emotional_arc",   crate::emotional_arc::format_report());
+    // NOTE: lm_learner not refreshed — static init only
+}
 
 // ── Content generators ────────────────────────────────────────────────────────
 

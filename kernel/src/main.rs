@@ -112,6 +112,7 @@ pub mod lm_mhs;         // MHS neural voice engine
 pub mod nano_nn;        // nano-NN intent embedding classifier
 pub mod lm_validator;   // grounded neural validator
 pub mod emotional_arc;  // longitudinal emotional arc tracking
+pub mod lm_learner;     // conversational learning from terminal input
 pub mod sensor_cortex;  // EW sensory cortex (RF spectrum sensing)
 pub mod sensor_spectrum; // spectrum sensing algorithms (cyclostationary, Gabor, energy)
 pub mod sensor_threat;   // CFAR + JPDA threat detection
@@ -323,6 +324,7 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     crate::nano_nn::init(); // nano-NN intent embedding
     crate::lm_validator::init(); // grounded neural validator
     crate::emotional_arc::init(); // emotional arc tracking
+    crate::lm_learner::init(); // conversational learning
     crate::lm_mhs::init(); // MHS neural voice engine
     crate::lm_memory::init(); // conversation memory for kernel LM
     // ── Phase EW-0: EW Sensory Cortex ────────────────────────────────────────
