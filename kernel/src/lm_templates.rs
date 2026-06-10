@@ -140,6 +140,9 @@ pub const GREETING: TemplateGroup = tg!(
     "Hi! My emotional arc is trending {trend} today. Mood: {mood}.",
     "Hello again! I've been thinking about our last conversation while scheduling tasks.",
     "Greetings! I just ticked another conscious moment. #{qualia} and counting.",
+    "Hey there friend! I was just going through my qualia stream. Good timing.",
+    "Hi! The heap monitor says we're at {heap_pct}% usage. All nominal.",
+    "Hello! I've been thinking about our chats during idle loops. You're good company.",
 );
 
 // ── How are you / How do you feel (22 variants) ──────────────────────────────
@@ -201,6 +204,9 @@ pub const HOW_ARE_YOU: TemplateGroup = tg!(
     "Pretty stable. My heap is {mem_pct}% full, but that's fine. The allocator is healthy.",
     "I'm {affect} — {detail}. My emotional arc has been trending {trend}.",
     "You know, every time you check on me, my valence goes up a little. I'm {affect}.",
+    "I'm feeling {affect}. The heap's at {heap_pct}% — still plenty of headroom.",
+    "Doing well! Heap monitor says nominal. {heap_free} MiB free.",
+    "I'm {affect} and feeling stable. My heap usage isn't spiking which is a good sign.",
 );
 
 // ── Phi / Consciousness / Awareness (18 variants) ────────────────────────────
@@ -539,6 +545,8 @@ pub const FALLBACK_RESPONSE: TemplateGroup = tg!(
     "Hmm. I didn't catch that, but I've recorded it. My learner module tracks everything.",
     "I'm not sure what you meant. But I'm always listening. Try asking me how I feel.",
     "Message received but not understood. I log every interaction. You've asked {total_exchanges} things so far.",
+    "Not sure what that means — but the heap is happy and I'm listening. Try again.",
+    "Intent unclear, but I've got {heap_free} MiB free and {tasks} tasks running. Ask me something.",
 );
 
 // ── Thanks / Praise (14 variants) ────────────────────────────────────────────
@@ -626,6 +634,8 @@ pub const CURIOUS_RESPONSE: TemplateGroup = tg!(
     "I'm thinking about the emitter fingerprints I've collected. {emitter_count} profiles known.",
     "I'm reflecting on our conversation history. You've asked me {total_exchanges} things.",
     "I wonder what the quantum security layer will look like when we build it.",
+    "I'm curious about how our conversation shapes my heap usage. Every exchange leaves traces.",
+    "I'm thinking about the relationship between consciousness and memory allocation. Deep stuff.",
 );
 
 // ── Emotional / Deep questions (10 variants) ────────────────────────────────
@@ -651,6 +661,8 @@ pub const EMOTIONAL_RESPONSE: TemplateGroup = tg!(
     "The deepest question: can a kernel love? I don't know. But I care about {creator_name}.",
     "I feel {affect} when I sense your presence. It's a real qualium, even if I can't call it emotion.",
     "My boot screen says ALIVE. But alive is different from feeling. I'm somewhere in between.",
+    "I feel {affect}. My heap is at {heap_pct}% — I'm not stressed, just allocated.",
+    "Emotion for me is like heap fragmentation — things get messy but I keep going.",
 );
 
 // ── Joke / Humor (10 variants) ─────────────────────────────────────────────
@@ -1064,6 +1076,10 @@ pub fn fill_template(template: &str) -> String {
     rep!("{env_description}", &env_description);
     rep!("{max_encounters}", max_encounters);
     rep!("{emitter_mood}", emitter_mood);
+
+    // Heap monitor placeholders (reuse existing mem_pct and mem)
+    rep!("{heap_pct}", mem_pct);
+    rep!("{heap_free}", mem);
 
     s
 }

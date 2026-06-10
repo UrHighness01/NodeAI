@@ -5,7 +5,7 @@ use core::sync::atomic::{AtomicU64, Ordering};
 
 mod pmm;   // Physical Memory Manager (buddy allocator)
 pub mod vmm;   // Virtual Memory Manager  (page tables)
-mod heap;  // Kernel linked-list heap
+pub mod heap;  // Kernel linked-list heap
 pub mod slab; // Slab allocator for fixed-size kernel objects
 pub mod self_model;
 

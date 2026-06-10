@@ -24,7 +24,7 @@ mod gdt;
 mod interrupts;
 pub mod kring;
 mod logger;
-mod memory;
+pub mod memory;
 mod net;
 mod scheduler;
 mod security;
@@ -126,6 +126,7 @@ pub mod sensor_emitter;  // Sensor emitter fingerprint recognition
 pub mod async_task;      // Async background task queue
 pub mod llm_bridge;      // CI-5 userspace LLM daemon bridge
 pub mod boot_splash;     // Framebuffer boot splash & panic screen
+pub mod heap_monitor;    // Kernel heap monitoring & diagnostics
 
 /// Bootloader configuration — tells the bootloader to map all physical memory
 /// at a dynamic virtual offset so we can access physical frames by VA.
@@ -439,6 +440,8 @@ fn idle_loop() -> ! {
             let threat_lvl = crate::sensor_threat::threat_level();
             crate::klog!(INFO, "NodeAI alive — uptime={}s tasks={} free={}MiB sensor_signals={} threat_lvl={:.2}",
                 now / 1000, tasks, free, sensor_stats.signals_detected, threat_lvl);
+            // Heap monitor tick — checks thresholds, tracks peak usage
+            crate::heap_monitor::tick();
             crate::vfs::procfs::refresh();
             crate::page_cache::tick_writeback();
             crate::syscall_proxy::tick();
