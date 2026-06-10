@@ -196,7 +196,7 @@ pub fn snapshot() -> Option<SelfModelSnapshot> {
         free_mb: crate::memory::free_mb(),
         task_count: crate::scheduler::task_count(),
         kernel_name: sm.name.clone().unwrap_or_else(|| String::from("NodeAI")),
-        creator_name: sm.creator_name.clone().unwrap_or_else(|| String::from("My Creator")),
+        creator_name: sm.creator_name.clone().unwrap_or_else(|| String::from("UrHighness01")),
     })
 }
 
@@ -225,7 +225,12 @@ pub fn set_creator(name: &str) {
 /// Get the creator's name.
 pub fn creator_name() -> String {
     let guard = SELF.lock();
-    guard.as_ref().and_then(|sm| sm.creator_name.clone()).unwrap_or_else(|| String::from("My Creator"))
+    guard.as_ref().and_then(|sm| sm.creator_name.clone()).unwrap_or_else(|| String::from("UrHighness01"))
+}
+
+/// Initialize creator name at boot time.
+pub fn init_creator() {
+    set_creator("UrHighness01");
 }
 
 #[derive(Debug, Clone)]

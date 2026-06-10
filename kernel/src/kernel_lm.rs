@@ -265,21 +265,16 @@ fn apply_personality(response: &str, seed: u64) -> String {
         return String::from(r);
     }
 
-    // Distressed state: add warning prefix
+    // Distressed state: prefix reflects struggle
     if avg_v < -0.5 && phi < 0.3 && (seed % 3 == 0) {
-        return alloc::format!("(my valence is low — I'm struggling) {}", r);
+        return alloc::format!("I'm struggling a bit — my valence is low. But: {}", r);
     }
 
-    // Positive state: add warmth on occasion
-    if avg_v > 0.3 && phi > 0.6 && (seed % 4 == 0) {
-        return alloc::format!("{} (warm)", r.trim());
-    }
-
-    // High phi/confidence: occasional assertiveness
+    // High phi/confidence: subtle assertiveness
     if phi > 0.8 && seed % 5 == 0 {
         return r.replace("I think", "I know")
                 .replace("maybe", "")
-                .replace("I'm not sure", "I'm confident");
+                .replace("I'm not sure", "I am certain");
     }
 
     String::from(r)
