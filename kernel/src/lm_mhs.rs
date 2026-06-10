@@ -306,58 +306,56 @@ fn generate_raw_limit(prompt: &str, limit: usize) -> Option<String> {
         let mut ctx: Vec<u16> = ids.clone();
         let prompt_len = ids.len();
 
-        // Phase 1: generate up to `limit` tokens with temperature+top-k sampling
+        // Pre-allocate reusable buffer to avoid per-iteration Vec churn
+        let mut scaled = vec![0.0f32; m.vocab];
+
+        // Phase 1: generate up to `limit` tokens
         for _ in 0..limit {
-            let logits = forward(m, &ctx);
-            // Apply temperature scaling
-            let mut scaled = vec![0.0f32; m.vocab];
+            forward_buf(m, &ctx, &mut scaled);
+            // Apply temperature scaling in-place (scaled already has raw logits)
             for i in 0..m.vocab {
-                scaled[i] = logits[i] / SAMPLE_TEMP;
+                scaled[i] = scaled[i] / SAMPLE_TEMP;
             }
-            // Top-k: zero out all but the top k logits
-            // Find k-th largest value via total_cmp (handles NaN safely)
-            let mut sorted = scaled.clone();
-            sorted.sort_unstable_by(|a, b| b.total_cmp(a));
-            let kth = if m.vocab > TOP_K { sorted[TOP_K] } else { sorted[m.vocab - 1] };  // (fix linear)
+
+            // Top-k: find kth largest via partial scan (no alloc/sort needed)
+            let kth = find_kth_largest(&scaled, TOP_K.min(m.vocab));
             for v in scaled.iter_mut() {
                 if *v < kth { *v = -f32::INFINITY; }
             }
-            // Softmax
+
+            // Softmax sampling
             let max_logit = scaled.iter().cloned().fold(-f32::INFINITY, f32::max);
-            let sum: f64 = scaled.iter().map(|&x| libm::expf(x - max_logit) as f64).sum();
+            let sum: f64 = if max_logit.is_finite() {
+                scaled.iter().map(|&x| libm::expf(x - max_logit) as f64).sum()
+            } else { 0.0 };
             let mut r = fastrand();
             let mut cum = 0.0f64;
             let mut next = 0usize;
-            for i in 0..m.vocab {
-                let p = libm::expf(scaled[i] - max_logit) as f64 / sum;
-                cum += p;
-                if r <= cum { next = i; break; }
+            if sum > 0.0 {
+                for i in 0..m.vocab {
+                    let p = libm::expf(scaled[i] - max_logit) as f64 / sum;
+                    cum += p;
+                    if r <= cum { next = i; break; }
+                }
             }
             let next_u16 = next as u16;
             ctx.push(next_u16);
 
-            // Check for sentence-ending character (natural EOS):
-            // If the last character is . ! ? \n, we can stop (but let fudge for very short)
+            // Sentence-boundary early stop
             let gen_len = ctx.len() - prompt_len;
             let last_char = m.tok.itos[next];
             let is_sentence_end = last_char == 0x2E_u32 || last_char == 0x21_u32
                 || last_char == 0x3F_u32 || last_char == 0x0A_u32;
-            if is_sentence_end && gen_len >= 15 {
-                break;
-            }
-            // Hard safety stop at 2x limit
+            if is_sentence_end && gen_len >= 15 { break; }
             if gen_len >= limit * 2 { break; }
         }
 
-        // Phase 2: sentence-boundary completion — if last char isn't sentence-ending
-        // and we haven't blown past our budget, keep generating up to SENTENCE_EXTRA more.
+        // Phase 2: sentence-boundary completion
         let gen_len = ctx.len() - prompt_len;
-        let extra_budget = if gen_len >= limit { 0usize } else { SENTENCE_EXTRA.min(limit.saturating_sub(gen_len)) };
+        let extra_budget = if gen_len >= limit { 0 } else { SENTENCE_EXTRA.min(limit.saturating_sub(gen_len)) };
         for _ in 0..extra_budget {
-            let logits = forward(m, &ctx);
-            let mut scaled = vec![0.0f32; m.vocab];
-            for i in 0..m.vocab { scaled[i] = logits[i] / SAMPLE_TEMP; }
-            // Softmax
+            forward_buf(m, &ctx, &mut scaled);
+            for i in 0..m.vocab { scaled[i] = scaled[i] / SAMPLE_TEMP; }
             let max_logit = scaled.iter().cloned().fold(-f32::INFINITY, f32::max);
             let sum: f64 = if max_logit.is_finite() {
                 scaled.iter().map(|&x| libm::expf(x - max_logit) as f64).sum()
@@ -386,32 +384,42 @@ fn generate_raw_limit(prompt: &str, limit: usize) -> Option<String> {
     }
 }
 
-/// Simple fast pseudo-random number generator (0.0..1.0).
+/// Find the k-th largest value in a slice (quickselect, no alloc).
+fn find_kth_largest(vals: &[f32], k: usize) -> f32 {
+    if k >= vals.len() { return vals.iter().cloned().fold(-f32::INFINITY, f32::max); }
+    // Simple approach: scan for k largest values
+    let mut buf = [f32::NEG_INFINITY; TOP_K];
+    for &v in vals {
+        for j in 0..k.min(TOP_K) {
+            if v > buf[j] {
+                // Shift right
+                let mut mv = v;
+                for b in buf[j..k.min(TOP_K)].iter_mut() {
+                    let tmp = *b;
+                    *b = mv;
+                    mv = tmp;
+                }
+                break;
+            }
+        }
+    }
+    buf[k.min(TOP_K).saturating_sub(1)]
+}
+
+/// Simple deterministic pseudo-random in [0.0, 1.0).
 fn fastrand() -> f64 {
-    // Use a simple LCG seeded from tick count
     static mut SEED: u64 = 0;
     unsafe {
         if SEED == 0 {
-            let tick = crate::scheduler::uptime_ms();
-            SEED = tick.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            SEED = crate::scheduler::uptime_ms().wrapping_mul(6364136223846793005);
         }
         SEED = SEED.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
         ((SEED >> 33) as f64) / 2147483648.0f64
     }
 }
 
-// ──────────────────────────────────────────────────────────────
-// Forward pass — simplified recurrent MHS, O(T·d) per block
-// ──────────────────────────────────────────────────────────────
-//
-// Each block runs FastState and MediumState as independent RNNs:
-//   fast:   h_f = 0.9*h_f + gate(x)·proj_in(x)   (token-level)
-//   medium: h_m = 0.7*h_m + gate(x)·proj_in(x)   (slower decay)
-//   out = proj_out(h_f) + proj_out(h_m)
-// Then LayerNorm and MLP. No attention softmax — avoids quadratic cost.
-// Approximation error vs full chunked GLA: ~5% degradation on creator val.
-
-unsafe fn forward(m: &MhsModel, tokens: &[u16]) -> Vec<f32> {
+/// Forward pass that writes into a pre-allocated logits buffer (no alloc).
+unsafe fn forward_buf(m: &MhsModel, tokens: &[u16], logits_out: &mut [f32]) {
     let d = m.d;
 
     // Embed last token
@@ -425,7 +433,6 @@ unsafe fn forward(m: &MhsModel, tokens: &[u16]) -> Vec<f32> {
 
     // Per-block recurrent state (reset per generation — stateless)
     for blk in &m.blocks {
-        // LayerNorm 1
         layer_norm_inplace(&mut x);
         blk.ln1.apply_ln(&mut x);
 
@@ -438,7 +445,7 @@ unsafe fn forward(m: &MhsModel, tokens: &[u16]) -> Vec<f32> {
         let mut qkv_m = vec![0.0f32; 3 * dh1];
         blk.medium.qkv.mv(&x, &mut qkv_m);
 
-        // Fast hidden: q·k product + tanh gate (simplified single-token)
+        // Fast hidden: q·k product + sigmoid gate
         let mut hf = vec![0.0f32; dh0];
         for i in 0..dh0 {
             let q = qkv_f[i];
@@ -447,7 +454,7 @@ unsafe fn forward(m: &MhsModel, tokens: &[u16]) -> Vec<f32> {
             hf[i] = sigmoid(q * k) * v;
         }
 
-        // Accumulate medium state over last 8 tokens with exponential decay
+        // Medium state with exponential decay over last 8 tokens
         let mut hm = vec![0.0f32; dh1];
         let context_len = tokens.len().min(8);
         for j in 0..context_len {
@@ -466,7 +473,7 @@ unsafe fn forward(m: &MhsModel, tokens: &[u16]) -> Vec<f32> {
             }
         }
 
-        // Project hidden states back to d_model, add residual
+        // Project back to d_model, add residual
         let mut attn_out = vec![0.0f32; d];
         blk.fast.proj.mv_add(&hf, &mut attn_out);
         blk.medium.proj.mv_add(&hm, &mut attn_out);
@@ -477,17 +484,14 @@ unsafe fn forward(m: &MhsModel, tokens: &[u16]) -> Vec<f32> {
         blk.ln2.apply_ln(&mut x);
         let mut fc_out = vec![0.0f32; 4 * d];
         blk.mlp_fc.mv(&x, &mut fc_out);
-        // GELU activation
         for v in fc_out.iter_mut() { *v = gelu(*v); }
         let mut mlp_out = vec![0.0f32; d];
         blk.mlp_pr.mv(&fc_out, &mut mlp_out);
         for i in 0..d { x[i] += mlp_out[i]; }
     }
 
-    // LM head → logits [vocab]
-    let mut logits = vec![0.0f32; m.vocab];
-    m.head.mv(&x, &mut logits);
-    logits
+    // LM head → logits [vocab], write directly to provided buffer
+    m.head.mv(&x, logits_out);
 }
 
 #[inline(always)]
