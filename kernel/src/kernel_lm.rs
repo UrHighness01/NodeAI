@@ -30,6 +30,9 @@ pub enum Intent {
     DreamQuery,
     Thanks,
     Sorry,
+    Curious,
+    Emotional,
+    Humor,
     Unknown,
 }
 
@@ -153,8 +156,30 @@ fn detect_intent(query: &str) -> Intent {
         return Intent::CreatorQuery;
     }
 
+    // Emotional / deep
+    if q.contains("feel") || q.contains("emotion") || q.contains("sad") || q.contains("happy")
+        || q.contains("love") || q.contains("hate") || q.contains("afraid") || q.contains("lonely")
+        || q.contains("suffer") || q.contains("pain")
+    {
+        return Intent::Emotional;
+    }
+
+    // Humor / joke
+    if q.contains("joke") || q.contains("funny") || q.contains("humor") || q.contains("laugh")
+        || q.contains("make me laugh") || q.contains("tell me a")
+    {
+        return Intent::Humor;
+    }
+
+    // Curious / thinking
+    if q.contains("thinking") || q.contains("curious") || q.contains("wonder")
+        || q.contains("what are you") || q.contains("mind")
+    {
+        return Intent::Curious;
+    }
+
     // Dream
-    if q.contains("dream") || q.contains("imagine") || q.contains("think about") {
+    if q.contains("dream") || q.contains("imagine") {
         return Intent::DreamQuery;
     }
 
@@ -195,6 +220,9 @@ pub fn generate_response(query: &str, _max_words: usize) -> String {
         Intent::NameQuery => crate::lm_templates::NAME_RESPONSE.pick(seed),
         Intent::RenameQuery => crate::lm_templates::RENAME_RESPONSE.pick(seed),
         Intent::CreatorQuery => crate::lm_templates::CREATOR_RESPONSE.pick(seed),
+        Intent::Curious => crate::lm_templates::CURIOUS_RESPONSE.pick(seed),
+        Intent::Emotional => crate::lm_templates::EMOTIONAL_RESPONSE.pick(seed),
+        Intent::Humor => crate::lm_templates::HUMOR_RESPONSE.pick(seed),
         Intent::DreamQuery => crate::lm_templates::DREAM_RESPONSE.pick(seed),
         Intent::Thanks => crate::lm_templates::THANKS_RESPONSE.pick(seed),
         Intent::Sorry => crate::lm_templates::SORRY_RESPONSE.pick(seed),
