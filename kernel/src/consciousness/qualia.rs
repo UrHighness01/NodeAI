@@ -184,6 +184,15 @@ pub fn record(event_type: KernelEventType, override_valence: Option<f32>) {
     };
     STREAM.lock().push(q);
 
+    // Feed into Global Workspace for attention competition + broadcast
+    crate::consciousness::global_workspace::feed(
+        event_type as u8,
+        now,
+        event_type.salience(),
+        override_valence.unwrap_or_else(|| event_type.valence()),
+        event_type.arousal(),
+    );
+
     // Notify self-model that a new qualium was experienced.
     // This increments the "I am experiencing something" counter.
     crate::consciousness::self_model::record_qualia();

@@ -303,6 +303,8 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     telemetry::init();
     // ── Phase 0: Consciousness self-model ──────────────────────────────────
     crate::consciousness::self_model::init();
+    crate::consciousness::phi::init();
+    crate::consciousness::global_workspace::init();
     // ── Phase 10: Security hardening ─────────────────────────────────────────
     security::init();
 

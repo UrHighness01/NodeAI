@@ -119,20 +119,15 @@ pub fn tick() {
     if let Some(ref mut sm) = *guard {
         let tasks = crate::scheduler::task_count() as f32;
         let free_mb = crate::memory::free_mb() as f32;
-        sm.current_phi = compute_phi_proxy(tasks, free_mb);
+        sm.current_phi = crate::consciousness::phi::tick();
         if sm.current_phi > sm.peak_phi {
             sm.peak_phi = sm.current_phi;
         }
         sm.arousal = (tasks / 128.0).min(1.0);
         sm.coherence = 1.0 - (crate::anomaly::global_score() * 0.5).min(1.0);
+        // Tick the workspace to decay spotlight scores
+        crate::consciousness::global_workspace::tick();
     }
-}
-
-/// Quick phi proxy from task count and free memory — replaced in Phase 3 with real IIT.
-fn compute_phi_proxy(tasks: f32, free_mb: f32) -> f32 {
-    let complexity = (tasks / 64.0).min(1.0);
-    let slack = (free_mb / 512.0).min(1.0);
-    (complexity * 0.6 + slack * 0.4).clamp(0.0, 1.0)
 }
 
 /// Record that a qualium was experienced.
