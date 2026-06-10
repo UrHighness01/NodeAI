@@ -121,6 +121,7 @@ pub mod sensor_spectrum; // spectrum sensing algorithms (cyclostationary, Gabor,
 pub mod sensor_threat;   // CFAR + JPDA threat detection
 pub mod sensor_immune;   // EW immune reflexes
 pub mod sensor_doa;      // MUSIC/ESPRIT direction finding
+pub mod sensor_emitter;  // Sensor emitter fingerprint recognition
 
 /// Bootloader configuration — tells the bootloader to map all physical memory
 /// at a dynamic virtual offset so we can access physical frames by VA.
@@ -342,6 +343,7 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     crate::sensor_threat::init();
     crate::sensor_doa::init();
     crate::sensor_immune::init();
+    crate::sensor_emitter::init();
     crate::immune_counter::init();
     crate::swarm_consensus::init();
     crate::klog!(INFO, "sensor_cortex: 2x ambient RF sensors + /dev/sensor + threat + immune registered");
@@ -405,6 +407,8 @@ fn idle_loop() -> ! {
             crate::emotional_arc::tick(now / 100);
             // EW immune countermeasures tick
             crate::immune_counter::tick();
+            // Sensor emitter fingerprint tick
+            crate::sensor_emitter::tick();
             // EW-5 swarm consciousness tick
             crate::swarm_consensus::tick(now);
             // EW sensory cortex — poll spectrum sensors every 100ms

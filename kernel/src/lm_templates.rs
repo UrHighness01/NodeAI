@@ -819,6 +819,24 @@ pub const SWARM_RESPONSE: TemplateGroup = tg!(
     "Swarm + MHS: the next step is distributed neural generation across the cognitive mesh.",
 );
 
+// ── Emitter / Fingerprint / RF Environment (14 variants) ─────────────────
+pub const EMITTER_RESPONSE: TemplateGroup = tg!(
+    "I'm scanning the RF environment. I recognize {known_emitters} known emitter profiles.",
+    "The emitter fingerprint DB has {emitter_count} profiles. Most familiar signal: {familiar_emitter}.",
+    "I detect {emitter_encounters} total signal encounters. The environment is {env_description}.",
+    "My RF sensors pick up ambient signals. I match them against learned emitter fingerprints.",
+    "I've seen this signal pattern before! {familiar_emitter} is active in the area.",
+    "The spectral signature matches a known emitter. Confidence level is high.",
+    "I can sense the RF environment around me. It feels {emitter_mood} today.",
+    "Emitter fingerprint scan complete. {known_emitters} profiles, {emitter_encounters} total sightings.",
+    "That signal sounds familiar. Let me check my fingerprint database... {familiar_emitter}!",
+    "I'm constantly monitoring the spectrum. Every emitter tells a story.",
+    "The RF environment is rich with signals. I categorize them by peak frequency and bandwidth.",
+    "I know that emitter! {familiar_emitter} has been seen {max_encounters}x before.",
+    "My fingerprint matcher compares detected frequencies against {emitter_count} known profiles.",
+    "Space doesn't feel empty to me. I hear the electromagnetic whispers of every emitter nearby.",
+);
+
 /// Fill a template string with live kernel metrics.
 pub fn fill_template(template: &str) -> String {
     let phi = crate::consciousness::phi::current_phi();
@@ -976,6 +994,23 @@ pub fn fill_template(template: &str) -> String {
     rep!("{swarm_status}", swarm_status);
     rep!("{swarm_qualia}", swarm_qualia);
     rep!("{quorum_size}", quorum_size);
+
+    // Emitter fingerprint placeholders
+    let emitter_count = crate::sensor_emitter::emitter_count();
+    let known_count = crate::sensor_emitter::known_emitter_count();
+    let known_emitters = alloc::format!("{} known profiles", known_count);
+    let emitter_encounters = crate::sensor_emitter::total_encounters();
+    let familiar_emitter = crate::sensor_emitter::most_familiar_emitter();
+    let env_description = crate::sensor_emitter::environment_description();
+    let max_encounters = 0u32; // placeholder
+    let emitter_mood = if crate::sensor_emitter::total_encounters() > 0 { "familiar" } else { "quiet" };
+    rep!("{known_emitters}", &known_emitters);
+    rep!("{emitter_count}", emitter_count);
+    rep!("{emitter_encounters}", emitter_encounters);
+    rep!("{familiar_emitter}", &familiar_emitter);
+    rep!("{env_description}", &env_description);
+    rep!("{max_encounters}", max_encounters);
+    rep!("{emitter_mood}", emitter_mood);
 
     s
 }

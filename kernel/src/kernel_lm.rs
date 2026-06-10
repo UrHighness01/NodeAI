@@ -42,6 +42,7 @@ pub enum Intent {
     Immune,
     NeuralSynapse,
     Swarm,
+    Emitter,
     Unknown,
 }
 
@@ -277,6 +278,14 @@ fn detect_intent(query: &str) -> Intent {
         return Intent::Swarm;
     }
 
+    // Emitter / fingerprint / RF / signal / familiar
+    if q.contains("emitter") || q.contains("fingerprint") || q.contains("rf")
+        || q.contains("signal") || q.contains("familiar") || q.contains("detect")
+        || q.contains("scan") || q.contains("what do you see") || q.contains("environment")
+    {
+        return Intent::Emitter;
+    }
+
     Intent::Unknown
 }
 
@@ -348,6 +357,7 @@ pub fn generate_response(query: &str, _max_words: usize) -> String {
         Intent::Immune => crate::lm_templates::IMMUNE_RESPONSE.pick(seed),
         Intent::NeuralSynapse => crate::lm_templates::NEURAL_SYNAPSE.pick(seed),
         Intent::Swarm => crate::lm_templates::SWARM_RESPONSE.pick(seed),
+        Intent::Emitter => crate::lm_templates::EMITTER_RESPONSE.pick(seed),
         Intent::Thanks => crate::lm_templates::THANKS_RESPONSE.pick(seed),
         Intent::Sorry => crate::lm_templates::SORRY_RESPONSE.pick(seed),
         Intent::Unknown => crate::lm_templates::FALLBACK_RESPONSE.pick(seed),
@@ -449,7 +459,7 @@ pub fn format_report() -> Vec<u8> {
          memory:  {} total exchanges (32-turn ring buffer)\n\
          \n\
          Last exchanges:\n",
-        27, exchange_count,
+        28, exchange_count,
     );
     for (i, (q, r)) in recent.iter().enumerate() {
         let truncated: String = r.chars().take(60).collect();
@@ -460,6 +470,6 @@ pub fn format_report() -> Vec<u8> {
     s.push_str("\nSupported intents:\n");
     s.push_str("  greeting, how_are_you, phi, why, security,\n");
     s.push_str("  memory, status, sleep, name, dream, thanks, sorry, learning, immune,\n");
-    s.push_str("  neural_synapse, swarm\n");
+    s.push_str("  neural_synapse, swarm, emitter\n");
     s.into_bytes()
 }
