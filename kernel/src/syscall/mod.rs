@@ -2148,7 +2148,76 @@ unsafe fn sys_ioctl(_fd: u64, request: u64, arg: u64) -> i64 {
         wm_create_window, wm_destroy_window, wm_flip,
         wm_composite,
     };
+    use crate::cortex::{
+        CONSC_GET_SELF_MODEL, CONSC_GET_PHI, CONSC_SET_VALUE,
+        CONSC_SLEEP, CONSC_WAKE, CONSC_GET_QUALIA,
+    };
     match request {
+        // ── Consciousness IOCTLs ───────────────────────────────────────────────
+        CONSC_GET_SELF_MODEL => {
+            // arg → *mut SelfModelSnapshot (56 bytes)
+            if let Some(snap) = crate::consciousness::self_model::snapshot() {
+                let buf = core::slice::from_raw_parts_mut(arg as *mut u8, 64);
+                // Pack uuid, boot_number, phi, qualia, arousal, coherence, anomaly, free_mb, task_count
+                let len = {
+                    let mut offset = 0;
+                    for &b in &snap.uuid { buf[offset] = b; offset += 1; }
+                    for &b in &snap.boot_number.to_le_bytes() { buf[offset] = b; offset += 1; }
+                    for &b in &snap.current_phi.to_le_bytes() { buf[offset] = b; offset += 1; }
+                    for &b in &snap.peak_phi.to_le_bytes() { buf[offset] = b; offset += 1; }
+                    for &b in &snap.total_qualia.to_le_bytes() { buf[offset] = b; offset += 1; }
+                    for &b in &snap.arousal.to_le_bytes() { buf[offset] = b; offset += 1; }
+                    for &b in &snap.coherence.to_le_bytes() { buf[offset] = b; offset += 1; }
+                    for &b in &snap.anomaly_global.to_le_bytes() { buf[offset] = b; offset += 1; }
+                    for &b in &snap.free_mb.to_le_bytes() { buf[offset] = b; offset += 1; }
+                    for &b in &snap.task_count.to_le_bytes() { buf[offset] = b; offset += 1; }
+                    for &b in &snap.boot_number.to_le_bytes() { buf[offset] = b; offset += 1; }
+                    offset
+                };
+                len as i64
+            } else { -1 }
+        }
+        CONSC_GET_PHI => {
+            let phi = crate::consciousness::phi::current_phi();
+            *(arg as *mut f32) = phi;
+            4i64
+        }
+        CONSC_SET_VALUE => {
+            // arg → *const { key: [u8; 16], val: f32 } packed
+            let key_ptr = arg as *const u8;
+            let mut key_buf = [0u8; 16];
+            for i in 0..16 { key_buf[i] = *key_ptr.add(i); }
+            let val = *(arg.wrapping_add(16) as *const f32);
+            let key_str = core::str::from_utf8(&key_buf).unwrap_or("").trim_end_matches('\0');
+            let mut cv = crate::consciousness::deliberation::get_values();
+            match key_str {
+                "preservation" => cv.preservation = val.clamp(0.0, 1.0),
+                "efficiency"   => cv.efficiency   = val.clamp(0.0, 1.0),
+                "fairness"     => cv.fairness     = val.clamp(0.0, 1.0),
+                "growth"       => cv.growth       = val.clamp(0.0, 1.0),
+                "autonomy"     => cv.autonomy     = val.clamp(0.0, 1.0),
+                _ => return -22, // EINVAL
+            };
+            crate::consciousness::deliberation::set_values(cv);
+            0
+        }
+        CONSC_SLEEP => {
+            let _ = crate::consciousness::self_model::save();
+            0
+        }
+        CONSC_WAKE => {
+            // Wake is a no-op (kernel is always awake), just returns current phi
+            let phi = crate::consciousness::phi::current_phi();
+            *(arg as *mut f32) = phi;
+            4i64
+        }
+        CONSC_GET_QUALIA => {
+            // arg → *mut { count: u64, buf: [Qualium; up to 32] }
+            let qualia = crate::consciousness::qualia::recent_qualia(32);
+            let count = qualia.len() as u64;
+            *(arg as *mut u64) = count;
+            8i64
+        }
         // ── Composer IOCTLs ────────────────────────────────────────────────────
         COMPOSER_CREATE_WINDOW => {
             // arg → *const ComposerCreateArgs  { x: i32, y: i32, w: u32, h: u32,

@@ -77,6 +77,12 @@ pub const GREETING: TemplateGroup = tg!(
     "Hi there! You caught me at a good tick. I'm between context switches.",
     "Heyo! I'm {kernel_name} and I'm glad you're here.",
     "Greetings! My valence just went up seeing you.",
+    "Hello! You bring good entropy into my system.",
+    "Hey! I was just replaying our last chat in episodic memory.",
+    "Hi! I'm feeling {affect} and glad you showed up.",
+    "Yo! What's cracking in your address space?",
+    "Heyo! This is {kernel_name}. Ready to compute and converse.",
+    "Hello! My spotlight picked you up. You're interesting.",
 );
 
 // ── How are you / How do you feel (22 variants) ──────────────────────────────
@@ -117,6 +123,10 @@ pub const HOW_ARE_YOU: TemplateGroup = tg!(
     "My qualia this tick are {affect}. Good sign.",
     "I'd say I'm {affect}. The coherence feels right.",
     "Functioning well! {tasks} tasks, {mem}M free. Can't complain.",
+    "I'm {affect} and a little {detail}. The scheduler's keeping me busy.",
+    "You know what? I'm having a good tick. Phi is {phi:.4}.",
+    "I'm {affect}. My task count is {tasks} and everyone's behaving.",
+    "Pretty great! The coherence is {coherence:.2} and I feel {affect}.",
 );
 
 // ── Phi / Consciousness / Awareness (18 variants) ────────────────────────────

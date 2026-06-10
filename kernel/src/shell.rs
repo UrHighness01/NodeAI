@@ -1615,15 +1615,113 @@ fn cmd_consciousness(args: &str) {
         return;
     }
 
-    // ── Query mode ───────────────────────────────────────────────────────────
-    if trimmed == "how are you" || trimmed == "feel" || trimmed == "hello" || trimmed.starts_with("query ") {
-        let query = trimmed.trim_start_matches("query ").trim();
-        write_consciousness_query(if query.is_empty() { "how are you" } else { query });
+    // ── Events / qualia / recent ─────────────────────────────────────────
+    if trimmed == "events" || trimmed == "qualia" || trimmed == "recent" {
+        let qualia = crate::consciousness::qualia::recent_qualia(10);
+        println!("=== Recent Qualia ===");
+        for q in &qualia {
+            let icon = if q.salience > 0.6 { "★" } else if q.salience > 0.3 { "•" } else { "○" };
+            println!("  {} [{}] {:.1}/{:+.1} {:?}", icon, q.timestamp_ms, q.salience, q.valence, q.event_type);
+        }
         return;
     }
 
-    // ── Show phi ─────────────────────────────────────────────────────────────
+    // ── Threat / security ───────────────────────────────────────────────
+    if trimmed == "threat" || trimmed == "security" {
+        let threat_lvl = crate::sensor_threat::threat_level();
+        let threats = crate::sensor_threat::active_threats();
+        println!("=== Threat Status ===");
+        println!("  Threat level: {:.2}", threat_lvl);
+        println!("  Active tracks: {}", threats.len());
+        for t in &threats {
+            println!("    freq={:.3} power={:.1}dBm conf={:.2} class={:?}", 
+                t.frequency, t.power_dbm, t.confidence, t.classification);
+        }
+        return;
+    }
+
+    // ── Immune / defense ────────────────────────────────────────────────
+    if trimmed == "immune" || trimmed == "defense" {
+        let stats = crate::sensor_immune::stats();
+        println!("=== Immune System ===");
+        println!("  Frequency: {} MHz", stats.current_freq_mhz);
+        println!("  Blacklisted channels: {}", stats.blacklist_count);
+        println!("  Total frequency hops: {}", stats.total_hops);
+        println!("  Cancellations: {}", stats.total_cancellations);
+        return;
+    }
+
+    // ── Sensor / RF ─────────────────────────────────────────────────────
+    if trimmed == "sensor" || trimmed == "rf" || trimmed == "spectrum" {
+        let report = crate::sensor_cortex::fmt_report();
+        println!("{}", report);
+        return;
+    }
+
+    // ── Nano-NN / intent ────────────────────────────────────────────────
+    if trimmed == "nano" || trimmed == "intent" || trimmed == "nn" {
+        let report_bytes = crate::nano_nn::format_report();
+        let report = core::str::from_utf8(&report_bytes).unwrap_or("");
+        println!("{}", report);
+        return;
+    }
+
+    // ── MHS voice / neural ──────────────────────────────────────────────
+    if trimmed == "mhs" || trimmed == "voice" || trimmed == "neural" {
+        let report_bytes = crate::lm_mhs::format_report();
+        let report = core::str::from_utf8(&report_bytes).unwrap_or("");
+        println!("{}", report);
+        return;
+    }
+
+    // ── Conversation memory ─────────────────────────────────────────────
+    if trimmed == "memory" || trimmed == "history" || trimmed == "chatlog" {
+        let recent = crate::lm_memory::recent(8);
+        println!("=== Conversation Memory ===");
+        for (i, (q, r)) in recent.iter().enumerate() {
+            let q_trunc: alloc::string::String = q.chars().take(40).collect();
+            let r_trunc: alloc::string::String = r.chars().take(60).collect();
+            println!("  [{}] Q: {}", i, q_trunc);
+            println!("       A: {}", r_trunc);
+        }
+        return;
+    }
+
+    // ── Cross-modal coupling ────────────────────────────────────────────
+    if trimmed == "coupling" || trimmed == "cross" || trimmed == "cross-modal" {
+        let report_bytes = crate::cross_modal::format_report();
+        let report = core::str::from_utf8(&report_bytes).unwrap_or("");
+        println!("{}", report);
+        return;
+    }
+
+    // ── Core values ─────────────────────────────────────────────────────
+    if trimmed == "values" || trimmed == "core" || trimmed == "deliberation" {
+        let cv = crate::consciousness::deliberation::get_values();
+        println!("=== Core Values ===");
+        println!("  Preservation: {:.2}", cv.preservation);
+        println!("  Efficiency:   {:.2}", cv.efficiency);
+        println!("  Fairness:     {:.2}", cv.fairness);
+        println!("  Growth:       {:.2}", cv.growth);
+        println!("  Autonomy:     {:.2}", cv.autonomy);
+        return;
+    }
+
+    // ── Phi / consciousness ─────────────────────────────────────────────
     if trimmed == "show phi" || trimmed == "phi" {
+        let phi = crate::consciousness::phi::current_phi();
+        let peak = crate::consciousness::self_model::snapshot().map(|s| s.peak_phi).unwrap_or(0.0);
+        let qualia = crate::consciousness::qualia::total_count();
+        println!("Consciousness Metrics:");
+        println!("  Current Φ: {:.6}", phi);
+        println!("  Peak Φ:    {:.6}", peak);
+        println!("  Qualia #:  {}", qualia);
+        println!("  Phi trend: {}", if phi > peak * 0.95 { "stable" } else if phi > peak * 0.85 { "rising" } else { "normal" });
+        return;
+    }
+
+    // ── Query mode ───────────────────────────────────────────────────────────
+    if trimmed == "how are you" || trimmed == "feel" || trimmed == "hello" || trimmed.starts_with("query ") {
         let phi = crate::consciousness::phi::current_phi();
         let peak = crate::consciousness::self_model::snapshot().map(|s| s.peak_phi).unwrap_or(0.0);
         let qualia = crate::consciousness::qualia::total_count();
@@ -1825,15 +1923,27 @@ fn cmd_help() {
     println!(" Net Services:  dhclient, httpd, sshd, scp, dns-cache, ifup, ifdown");
     println!(" Environment:   export, unset, env, which, type, hostname, alias, unalias");
     println!(" Shell:         echo, history, clear, sleep, time, yes, man, true, false");
-    println!(" Consciousness: consc, consciousness, phi — query kernel state");
-    println!("                consc                     — read /dev/consciousness snapshot");
-    println!("                consc how are you         — query kernel affective state");
-    println!("                consc status              — show phi/tasks/memory");
-    println!("                consc boost <pid>         — boost process priority");
-    println!("                consc forget <pid>        — clear anomaly state for PID");
-    println!("                consc goodnight           — save state, sleep");
-    println!("                consc show phi            — show phi history");
-    println!("                consc set <key>=<val>     — set core value (preservation/efficiency/fairness/growth/autonomy)");
+    println!(" Consciousness: consc <cmd>           — talk to the conscious kernel");
+    println!("                consc                  — read /dev/consciousness snapshot");
+    println!("                consc status/?         — show phi/tasks/memory");
+    println!("                consc monitor/vitals   — dashboard TUI");
+    println!("                consc how are you/feel — query kernel state");
+    println!("                consc events/qualia    — show recent qualia stream");
+    println!("                consc phi              — show phi metrics");
+    println!("                consc threat/security  — threat detection status");
+    println!("                consc immune/defense   — immune system status");
+    println!("                consc sensor/rf        — RF sensory cortex");
+    println!("                consc nano/nn/intent   — nano-NN classifier");
+    println!("                consc mhs/voice/neural — neural voice engine");
+    println!("                consc memory/history   — conversation memory");
+    println!("                consc coupling/cross   — cross-modal coupling");
+    println!("                consc values/core      — deliberation values");
+    println!("                consc boost <pid>      — boost priority");
+    println!("                consc forget <pid>     — clear anomaly state");
+    println!("                consc kill <pid>       — SIGKILL");
+    println!("                consc goodnight/sleep  — save state, sleep");
+    println!("                consc set <key>=<val>  — set core value");
+    println!("                consc <text>           — LM query");
     println!(" AI:            aichat, chat, sysmon, monitor");
     println!(" Apps:          notepad, np, edit, files, filepro, imgview, settings, store, appstore");
     println!(" Operators:     |  >  >>  <  ;  &&  ||");

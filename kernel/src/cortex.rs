@@ -23,6 +23,14 @@ use alloc::boxed::Box;
 use alloc::format;
 use core::fmt::Write;
 
+/// ioctl command codes for consciousness control plane.
+pub const CONSC_GET_SELF_MODEL: u64 = 0x434F4E01;
+pub const CONSC_GET_PHI: u64       = 0x434F4E02;
+pub const CONSC_SET_VALUE: u64     = 0x434F4E03;
+pub const CONSC_SLEEP: u64         = 0x434F4E04;
+pub const CONSC_WAKE: u64          = 0x434F4E05;
+pub const CONSC_GET_QUALIA: u64    = 0x434F4E06;
+
 struct ConscNode;
 struct ConscHandle;
 
