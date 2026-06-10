@@ -110,6 +110,7 @@ pub mod lm_memory;      // conversation memory ring buffer
 pub mod lm_templates;   // multi-variant LM templates
 pub mod lm_mhs;         // MHS neural voice engine
 pub mod lm_mhs_prompt;  // MHS prompt builder with context
+pub mod swarm_consensus; // EW-5 swarm consciousness
 pub mod nano_nn;        // nano-NN intent embedding classifier
 pub mod lm_validator;   // grounded neural validator
 pub mod emotional_arc;  // longitudinal emotional arc tracking
@@ -342,6 +343,7 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     crate::sensor_doa::init();
     crate::sensor_immune::init();
     crate::immune_counter::init();
+    crate::swarm_consensus::init();
     crate::klog!(INFO, "sensor_cortex: 2x ambient RF sensors + /dev/sensor + threat + immune registered");
     // ── Phase 10: Security hardening ─────────────────────────────────────────
     security::init();
@@ -403,6 +405,8 @@ fn idle_loop() -> ! {
             crate::emotional_arc::tick(now / 100);
             // EW immune countermeasures tick
             crate::immune_counter::tick();
+            // EW-5 swarm consciousness tick
+            crate::swarm_consensus::tick(now);
             // EW sensory cortex — poll spectrum sensors every 100ms
             crate::sensor_cortex::tick(now);
         }

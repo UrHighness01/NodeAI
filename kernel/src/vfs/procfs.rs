@@ -115,6 +115,7 @@ pub fn refresh() {
     write_file("/proc", "lm_mhs",          crate::lm_mhs::format_report());
     write_file("/proc", "lm_validator",    crate::lm_validator::format_report());
     write_file("/proc", "countermeasures", crate::immune_counter::format_report());
+    write_file("/proc", "swarm",           crate::swarm_consensus::format_report());
     write_file("/proc", "emotional_arc",   crate::emotional_arc::format_report());
     // NOTE: lm_learner not refreshed — static init only
 }
