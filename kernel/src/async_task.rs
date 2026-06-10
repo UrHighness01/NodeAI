@@ -91,6 +91,9 @@ pub fn init() {
 
 /// Tick the async task system — called every 100ms from idle_loop.
 /// If there's a pending task, advance MHS generation by one step.
+/// NOTE: MHS inference is DISABLED for now — the 6-layer GLA forward pass
+/// causes heap fragmentation and #PF crashes in the constrained kernel heap.
+/// The queue remains functional for future use with Project-K nano model.
 pub fn tick() {
     let mut lock = QUEUE.lock();
     let q = match &mut *lock {
@@ -98,43 +101,18 @@ pub fn tick() {
         None => return,
     };
 
-    // Find first pending or running task
+    // MHS inference DISABLED (heap fragmentation cause #PF crashes).
+    // All pending tasks are immediately marked as completed with a note.
     for i in 0..q.tasks.len() {
-        let task = &q.tasks[i];
-        if task.state != TaskState::Pending && task.state != TaskState::Running {
-            continue;
-        }
-        drop(task); // release borrow before mutating MHS state
-
-        if !q.mhs_running {
-            // Start MHS generation for this task
-            let query = q.tasks[i].query.clone();
-            q.tasks[i].state = TaskState::Running;
-            q.mhs_running = true;
-            crate::lm_mhs::mhs_gen_start(&query);
-        }
-
-        // Advance MHS by one step
-        let (done, result) = crate::lm_mhs::mhs_gen_step();
-        if done {
-            q.mhs_running = false;
+        if q.tasks[i].state == TaskState::Pending {
             q.tasks[i].state = TaskState::Completed;
             q.total_completed = q.total_completed.saturating_add(1);
-            let truncated: String = result.chars().take(MAX_RESULT_LEN).collect();
-            q.tasks[i].result = if truncated.is_empty() {
-                String::from("(no output)")
-            } else {
-                truncated
-            };
+            q.tasks[i].result = String::from(
+                "(MHS disabled - use templates for instant response. Will be enabled when nano model is ready.)"
+            );
         }
-        return; // Only process one task per tick
     }
-
-    // No pending/running tasks — ensure MHS generator is cleaned up
-    if q.mhs_running {
-        q.mhs_running = false;
-        crate::lm_mhs::mhs_gen_reset();
-    }
+    q.mhs_running = false;
 }
 
 /// Enqueue a new async task.
