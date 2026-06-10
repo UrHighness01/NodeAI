@@ -375,12 +375,8 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
         crate::consciousness::qualia::KernelEventType::BootComplete, None);
 
     crate::boot_splash::draw_subsystem("Boot → idle loop", true);
-    // Draw boot complete screen once (not in heartbeat loop — avoids flicker)
-    let tasks = crate::scheduler::task_count();
-    let free = crate::memory::free_mb();
-    crate::boot_splash::draw_heap_status(free, 64);
-    crate::boot_splash::draw_phi(crate::consciousness::phi::current_phi());
-    crate::boot_splash::draw_boot_complete(0, tasks, free);
+    // Boot overlay elements (ALIVE box, phi, heap) are hidden by default.
+    // Use 'consc splash' at the shell to show them.
 
     // All subsystems initialized — enable hardware interrupts now so the
     // APIC timer can fire safely (scheduler, AI engine, telemetry all ready).

@@ -1645,6 +1645,18 @@ fn cmd_consciousness(args: &str) {
         return;
     }
 
+    // ── Splash overlay toggle (framebuffer) ──────────────────────────────
+    if trimmed == "splash" || trimmed == "overlay" || trimmed == "hud" {
+        if crate::boot_splash::is_visible() {
+            crate::boot_splash::hide();
+            println!("Splash overlay hidden.");
+        } else {
+            crate::boot_splash::show();
+            println!("Splash overlay shown.");
+        }
+        return;
+    }
+
     // ── Dashboard / monitor mode ─────────────────────────────────────────────
     if trimmed == "monitor" || trimmed == "vitals" || trimmed == "--monitor" || trimmed == "dash" || trimmed == "dashboard" {
         cmd_dashboard_loop();
@@ -2123,6 +2135,7 @@ fn cmd_help() {
     println!("                consc think --poll    — check async results");
     println!("                consc llm <q>         — send query to LLM daemon (/dev/llm)");
     println!("                consc llm --poll      — get LLM daemon response");
+    println!("                consc splash/hud      — toggle framebuffer overlay");
     println!("                consc memory/history   — conversation memory");
     println!("                consc coupling/cross   — cross-modal coupling");
     println!("                consc values/core      — deliberation values");
