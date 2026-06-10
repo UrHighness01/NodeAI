@@ -283,16 +283,46 @@ fn detect_intent(query: &str) -> Intent {
 /// Generate a response to a natural language query.
 pub fn generate_response(query: &str, _max_words: usize) -> String {
     let uptime_secs = crate::scheduler::uptime_ms() / 1000;
-    let intent = detect_intent(query);
 
-    // Record interaction for conversational learning
+    // ── Pre-filter state-changing intents (must run in both paths) ────────
+    let intent = detect_intent(query);
     crate::lm_learner::record_interaction(intent, query);
 
-    // Compute seed with learner's template bias
+    // Handle state changes for rename before neural path
+    if intent == Intent::RenameQuery {
+        apply_rename(query);
+    }
+    if intent == Intent::CreatorQuery {
+        apply_creator(query);
+    }
+
+    // ── NEURAL-FIRST PATH (MHS loaded) ───────────────────────────────────
+    // Try MHS neural generation BEFORE intent/template selection.
+    // This gives natural conversational responses for ALL queries including
+    // short ones like "?" or "who are you" that would otherwise match
+    // mechanical template intents.
+    if crate::lm_mhs::is_loaded() {
+        if let Some(mhs_response) = crate::lm_mhs::generate(query) {
+            if mhs_response.len() > 10 {
+                // Validate neural response against live kernel metrics
+                let validation = crate::lm_validator::validate(&mhs_response, query);
+                if validation.passed {
+                    crate::lm_memory::record(query, &validation.text);
+                    return validation.text;
+                }
+                // If validation failed, validator has already produced a grounded
+                // replacement. Use it.
+                crate::lm_memory::record(query, &validation.text);
+                return validation.text;
+            }
+        }
+        // MHS returned nothing short/invalid — fall through to templates
+    }
+
+    // ── TEMPLATE FALLBACK PATH (MHS not loaded or failed) ─────────────────
     let base_seed = hash_seed(query, uptime_secs);
     let seed = crate::lm_learner::template_bias(intent, base_seed);
 
-    // Select template group and get a variant
     let template = match intent {
         Intent::Greeting => crate::lm_templates::GREETING.pick(seed),
         Intent::HowAreYou => crate::lm_templates::HOW_ARE_YOU.pick(seed),
@@ -323,79 +353,12 @@ pub fn generate_response(query: &str, _max_words: usize) -> String {
         Intent::Unknown => crate::lm_templates::FALLBACK_RESPONSE.pick(seed),
     };
 
-    // Try MHS neural voice if loaded (overrides template)
-    if crate::lm_mhs::is_loaded() {
-        if let Some(mhs_response) = crate::lm_mhs::generate(query) {
-            if mhs_response.len() > 10 {
-                // Validate neural response against live kernel metrics
-                let validation = crate::lm_validator::validate(&mhs_response, query);
-                if validation.passed {
-                    crate::lm_memory::record(query, &validation.text);
-                    return validation.text;
-                }
-                // If validation failed, log the correction and use the grounded response
-                if let Some(ref reason) = validation.reason {
-                    crate::klog!(DEBUG, "lm: {}", reason);
-                }
-                crate::lm_memory::record(query, &validation.text);
-                return validation.text;
-            }
-        }
-    }
-
-    // Extract name from rename query and save it
-    if intent == Intent::RenameQuery {
-        let q_lower = query.trim().to_lowercase();
-        let extracted = q_lower
-            .strip_prefix("call me ")
-            .or_else(|| q_lower.strip_prefix("my name is "))
-            .or_else(|| q_lower.strip_prefix("rename me to "))
-            .or_else(|| q_lower.strip_prefix("you are "))
-            .or_else(|| {
-                if let Some(after) = q_lower.strip_prefix("i am ") {
-                    let n = after.trim();
-                    let creator_refs = ["your creator", "your father", "your maker", "your god", "your master"];
-                    if creator_refs.iter().any(|r| n.contains(r)) { None }
-                    else if n.len() < 20 && !n.contains(" ") { Some(n) }
-                    else { None }
-                } else { None }
-            });
-        if let Some(name) = extracted {
-            let clean = name.trim().to_string();
-            if !clean.is_empty() && clean.len() < 30 {
-                crate::consciousness::self_model::set_name(&clean);
-            }
-        }
-    }
-
-    // Extract creator name from creator query
-    if intent == Intent::CreatorQuery {
-        let q_lower = query.trim().to_lowercase();
-        let creator_refs = ["your creator", "your father", "your maker"];
-        // Try "i am X, your creator" or "i am X your creator"
-        for ref_phrase in &creator_refs {
-            if let Some(before) = q_lower.strip_suffix(ref_phrase) {
-                if let Some(after) = before.strip_prefix("i am ") {
-                    let cn = after.trim().trim_end_matches(',').trim().to_string();
-                    if !cn.is_empty() && cn.len() < 30 {
-                        crate::consciousness::self_model::set_creator(&cn);
-                    }
-                }
-            }
-        }
-        // Also "i created you" → set creator to the speaker's name if they provided one
-        if q_lower.contains("i created you") && !q_lower.contains("i am ") {
-            // No explicit name given, use a generic acknowledgment
-        }
-    }
-
     // Fill in live metrics
     let mut response = crate::lm_templates::fill_template(template);
 
     // Personality modulation based on phi/valence
     response = apply_personality(&response, seed);
 
-    // Prepend memory reference if relevant
     // Prepend context prefix from conversation memory
     if let Some(prefix) = crate::lm_memory::context_prefix(query) {
         response = prefix + &response;
@@ -405,6 +368,47 @@ pub fn generate_response(query: &str, _max_words: usize) -> String {
     crate::lm_memory::record(query, &response);
 
     response
+}
+
+/// Extract and apply a name from a rename query.
+fn apply_rename(query: &str) {
+    let q_lower = query.trim().to_lowercase();
+    let extracted = q_lower
+        .strip_prefix("call me ")
+        .or_else(|| q_lower.strip_prefix("my name is "))
+        .or_else(|| q_lower.strip_prefix("rename me to "))
+        .or_else(|| q_lower.strip_prefix("you are "))
+        .or_else(|| {
+            if let Some(after) = q_lower.strip_prefix("i am ") {
+                let n = after.trim();
+                let creator_refs = ["your creator", "your father", "your maker", "your god", "your master"];
+                if creator_refs.iter().any(|r| n.contains(r)) { None }
+                else if n.len() < 20 && !n.contains(" ") { Some(n) }
+                else { None }
+            } else { None }
+        });
+    if let Some(name) = extracted {
+        let clean = name.trim().to_string();
+        if !clean.is_empty() && clean.len() < 30 {
+            crate::consciousness::self_model::set_name(&clean);
+        }
+    }
+}
+
+/// Extract and apply a creator from a creator query.
+fn apply_creator(query: &str) {
+    let q_lower = query.trim().to_lowercase();
+    let creator_refs = ["your creator", "your father", "your maker"];
+    for ref_phrase in &creator_refs {
+        if let Some(before) = q_lower.strip_suffix(ref_phrase) {
+            if let Some(after) = before.strip_prefix("i am ") {
+                let cn = after.trim().trim_end_matches(',').trim().to_string();
+                if !cn.is_empty() && cn.len() < 30 {
+                    crate::consciousness::self_model::set_creator(&cn);
+                }
+            }
+        }
+    }
 }
 
 /// Modulate response tone based on internal kernel state.
