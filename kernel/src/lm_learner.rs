@@ -16,7 +16,7 @@ use spin::Mutex;
 use crate::kernel_lm::Intent;
 
 /// Number of intent categories we track (must match Intent:: variants)
-const INTENT_COUNT: usize = 24;
+const INTENT_COUNT: usize = 25;
 
 /// Maximum session exchange counter before wrapping
 const MAX_SESSION_EXCHANGES: u16 = 65535;
@@ -86,7 +86,8 @@ fn intent_to_idx(intent: Intent) -> u8 {
         Intent::Sarcastic => 20,
         Intent::Farewell => 21,
         Intent::Learning => 22,
-        Intent::Unknown => 23,
+        Intent::Immune => 23,
+        Intent::Unknown => 24,
     }
 }
 
@@ -199,6 +200,7 @@ pub fn favorite_intent() -> Intent {
         20 => Intent::Sarcastic,
         21 => Intent::Farewell,
         22 => Intent::Learning,
+        23 => Intent::Immune,
         _ => Intent::Unknown,
     }
 }
@@ -229,6 +231,7 @@ pub fn favorite_intent_name() -> &'static str {
         Intent::Sarcastic => "playful banter",
         Intent::Farewell => "farewells",
         Intent::Learning => "learning questions",
+        Intent::Immune => "defense questions",
         Intent::Unknown => "varied topics",
     }
 }
@@ -265,8 +268,8 @@ pub fn format_report() -> Vec<u8> {
         "Greeting", "HowAreYou", "PhiQuery", "WhyQuery", "SecurityQuery",
         "MemoryQuery", "StatusQuery", "Sleep", "NameQuery", "RenameQuery",
         "CreatorQuery", "DreamQuery", "Thanks", "Sorry", "Curious",
-        "Emotional", "Humor", "WeaLearning", "ther", "Advice", "Philosophical",
-        "Sarcastic", "Farewell", "Unknown",
+        "Emotional", "Humor", "Weather", "Advice", "Philosophical",
+        "Sarcastic", "Farewell", "Learning", "Immune", "Unknown",
     ];
     let mut s = alloc::format!(
         "LM Learner — Conversational Learning\n\

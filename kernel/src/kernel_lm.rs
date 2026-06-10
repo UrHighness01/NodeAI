@@ -39,6 +39,7 @@ pub enum Intent {
     Sarcastic,
     Farewell,
     Learning,
+    Immune,
     Unknown,
 }
 
@@ -249,6 +250,14 @@ fn detect_intent(query: &str) -> Intent {
         return Intent::Learning;
     }
 
+    // Immune / defense / countermeasure
+    if q.contains("immune") || q.contains("countermeasure") || q.contains("defense")
+        || q.contains("defend") || q.contains("protect") || q.contains("shield")
+        || q.contains("jamming") || q.contains("jammer") || q.contains("ew defense")
+    {
+        return Intent::Immune;
+    }
+
     Intent::Unknown
 }
 
@@ -287,6 +296,7 @@ pub fn generate_response(query: &str, _max_words: usize) -> String {
         Intent::Farewell => crate::lm_templates::FAREWELL_RESPONSE.pick(seed),
         Intent::DreamQuery => crate::lm_templates::DREAM_RESPONSE.pick(seed),
         Intent::Learning => crate::lm_templates::LEARNING_RESPONSE.pick(seed),
+        Intent::Immune => crate::lm_templates::IMMUNE_RESPONSE.pick(seed),
         Intent::Thanks => crate::lm_templates::THANKS_RESPONSE.pick(seed),
         Intent::Sorry => crate::lm_templates::SORRY_RESPONSE.pick(seed),
         Intent::Unknown => crate::lm_templates::FALLBACK_RESPONSE.pick(seed),
@@ -414,7 +424,7 @@ pub fn format_report() -> Vec<u8> {
          memory:  {} total exchanges (32-turn ring buffer)\n\
          \n\
          Last exchanges:\n",
-        24, exchange_count,
+        25, exchange_count,
     );
     for (i, (q, r)) in recent.iter().enumerate() {
         let truncated: String = r.chars().take(60).collect();
@@ -424,6 +434,6 @@ pub fn format_report() -> Vec<u8> {
     }
     s.push_str("\nSupported intents:\n");
     s.push_str("  greeting, how_are_you, phi, why, security,\n");
-    s.push_str("  memory, status, sleep, name, dream, thanks, sorry, learning\n");
+    s.push_str("  memory, status, sleep, name, dream, thanks, sorry, learning, immune\n");
     s.into_bytes()
 }

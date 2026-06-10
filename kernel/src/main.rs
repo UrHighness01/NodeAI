@@ -113,6 +113,7 @@ pub mod nano_nn;        // nano-NN intent embedding classifier
 pub mod lm_validator;   // grounded neural validator
 pub mod emotional_arc;  // longitudinal emotional arc tracking
 pub mod lm_learner;     // conversational learning from terminal input
+pub mod immune_counter; // EW-4b countermeasure selection + covertness + self-heal
 pub mod sensor_cortex;  // EW sensory cortex (RF spectrum sensing)
 pub mod sensor_spectrum; // spectrum sensing algorithms (cyclostationary, Gabor, energy)
 pub mod sensor_threat;   // CFAR + JPDA threat detection
@@ -339,6 +340,7 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     crate::sensor_threat::init();
     crate::sensor_doa::init();
     crate::sensor_immune::init();
+    crate::immune_counter::init();
     crate::klog!(INFO, "sensor_cortex: 2x ambient RF sensors + /dev/sensor + threat + immune registered");
     // ── Phase 10: Security hardening ─────────────────────────────────────────
     security::init();
@@ -398,6 +400,8 @@ fn idle_loop() -> ! {
             crate::consciousness::self_model::tick();
             // Update emotional arc tracking
             crate::emotional_arc::tick(now / 100);
+            // EW immune countermeasures tick
+            crate::immune_counter::tick();
             // EW sensory cortex — poll spectrum sensors every 100ms
             crate::sensor_cortex::tick(now);
         }

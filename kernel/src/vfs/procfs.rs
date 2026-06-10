@@ -63,6 +63,7 @@ pub fn init() {
     write_file("/proc", "binding_events",   crate::binding_events::format_report());
     write_file("/proc", "rlimits",          crate::rlimit::format_report());
     write_file("/proc", "kernel_lm",       crate::kernel_lm::format_report());
+    write_file("/proc", "countermeasures", crate::immune_counter::format_report());
     // NOTE: info_bottleneck format_report NOT in refresh — it acquires
     // cross_modal locks that may deadlock in timer ISR context.
     // It is only created at init time (one-shot snapshot).
@@ -113,6 +114,7 @@ pub fn refresh() {
     write_file("/proc", "nano_nn",         crate::nano_nn::format_report());
     write_file("/proc", "lm_mhs",          crate::lm_mhs::format_report());
     write_file("/proc", "lm_validator",    crate::lm_validator::format_report());
+    write_file("/proc", "countermeasures", crate::immune_counter::format_report());
     write_file("/proc", "emotional_arc",   crate::emotional_arc::format_report());
     // NOTE: lm_learner not refreshed — static init only
 }

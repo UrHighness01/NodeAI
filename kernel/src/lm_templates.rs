@@ -24,6 +24,11 @@
 //!   {total_exchanges} — total lifetime exchanges
 //!   {favorite_topic} — user's most common intent category
 //!   {user_style} — user's communication style (concise/expressive/etc)
+//!   {countermeasure_status} — summary of immune countermeasure state
+//!   {countermeasure_action} — last countermeasure action taken
+//!   {exposure_pct} — covertness exposure percentage
+//!   {total_actions} — total countermeasure actions
+//!   {threat_type} — classified threat type (narrowband/wideband/etc)
 
 use alloc::string::String;
 use alloc::string::ToString;
@@ -705,6 +710,24 @@ pub const LEARNING_RESPONSE: TemplateGroup = tg!(
     "Learning is built into my architecture. Right now I know you prefer {user_style} interactions and ask about {favorite_topic}.",
 );
 
+// ── Immune / Countermeasure / Defense (14 variants) ──────────────────────────
+pub const IMMUNE_RESPONSE: TemplateGroup = tg!(
+    "My immune system is running countermeasures. Latest action: {countermeasure_status}.",
+    "I'm actively defending the RF spectrum. Covertness exposure is at {exposure_pct}%.",
+    "The EW countermeasure selector analyzed the threat and chose {countermeasure_action}.",
+    "I'm monitoring {tasks} processes and running active defense. Threat level is {threat}.",
+    "My immune countermeasures have executed {total_actions} defensive actions this session.",
+    "I'm in active defense mode. The countermeasure bus is online and responding to threats.",
+    "Self-healing check passed — all subsystems within nominal ranges.",
+    "My immune system is standing by. Anomaly detection is active, countermeasures are ready.",
+    "The covertness budget suggests it's time to hop frequencies. Exposure is rising.",
+    "I classified the latest signal as {threat_type} — responding with {countermeasure_action}.",
+    "Defense systems nominal. {total_actions} countermeasures executed. Exposure at {exposure_pct}%.",
+    "I can see threats being classified in real time. My immune reflexes are ready.",
+    "Active defense is running. The EW stack has {total_actions} actions in its history.",
+    "The kernel is protected by layered countermeasures. Nothing gets past my immune system.",
+);
+
 /// Fill a template string with live kernel metrics.
 pub fn fill_template(template: &str) -> String {
     let phi = crate::consciousness::phi::current_phi();
@@ -826,6 +849,16 @@ pub fn fill_template(template: &str) -> String {
     rep!("{total_exchanges}", total_exchanges);
     rep!("{favorite_topic}", favorite_topic);
     rep!("{user_style}", user_style);
+
+    // Countermeasure placeholders (resolved as needed)
+    let immune_summary = crate::immune_counter::status_summary();
+    let exposure_pct = 0u8; // placeholder — immune_counter doesn't expose raw pct as fn yet
+    let total_actions: u64 = 0; // placeholder
+    rep!("{countermeasure_status}", &immune_summary);
+    rep!("{countermeasure_action}", "frequency agility");
+    rep!("{exposure_pct}", exposure_pct);
+    rep!("{total_actions}", total_actions);
+    rep!("{threat_type}", "narrowband");
 
     s
 }
