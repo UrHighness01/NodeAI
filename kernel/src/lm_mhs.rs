@@ -182,9 +182,19 @@ fn read_mat_f16(data: &[u8], off: &mut usize, len: usize) -> MatF16 {
 // Public API
 // ──────────────────────────────────────────────────────────────
 
+/// Embedded MHS0 binary (6.6MB, Project-M 65K checkpoint)
+/// Exported from export_kernel_weights.py — trained on creator corpus.
+/// Placed in kernel/src/ so include_bytes! works at compile time.
+const MHS_EMBEDDED_WEIGHTS: &[u8] = include_bytes!("mhs_kernel.bin");
+
 pub fn init() {
-    // Allocate empty placeholder — real model loaded via load_weights()
-    crate::klog!(INFO, "lm_mhs: engine standby (awaiting weight binary)");
+    // Try to auto-load the embedded binary at boot
+    if load_weights(MHS_EMBEDDED_WEIGHTS) {
+        crate::klog!(INFO, "lm_mhs: Project-M 65K online — embedded weights loaded ({} KB)",
+            MHS_EMBEDDED_WEIGHTS.len() / 1024);
+    } else {
+        crate::klog!(WARN, "lm_mhs: embedded weight load failed — template fallback active");
+    }
 }
 
 /// Parse the 6.9MB binary exported by export_kernel_weights.py and load the
@@ -248,7 +258,8 @@ pub fn load_weights(data: &[u8]) -> bool {
     MHS_LOADED.store(true, Ordering::Release);
     MHS_LOAD_TIME.store(crate::scheduler::uptime_ms(), Ordering::Release);
     MHS_BYTE_COUNT.store(data.len() as u64, Ordering::Release);
-    crate::klog!(INFO, "lm_mhs: {} bytes loaded — Project-M 65K online", data.len());
+    crate::klog!(INFO, "lm_mhs: loaded {} bytes — Project-M 65K vocab={} d={} layers={}",
+        data.len(), vocab, d, n_lay);
     true
 }
 
