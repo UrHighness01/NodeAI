@@ -1199,8 +1199,8 @@ unsafe fn redraw_terminal_line(row: usize) {
 }
 
 unsafe fn scroll_terminal() {
-    // Shift buffer rows up by one
-    let rows = TERM_ROWS_MAX - 1;
+    let clamped = term_rows_clamped();
+    let rows = clamped - 1;
     for r in 0..rows {
         TERM_BUF[r]   = TERM_BUF[r + 1];
         TERM_COLOR[r] = TERM_COLOR[r + 1];
@@ -1210,12 +1210,10 @@ unsafe fn scroll_terminal() {
     TERM_ROW = rows;
     TERM_COL = 0;
 
-    // Repaint all terminal lines in ONE fb::with — redraw_terminal_line also calls
-    // fb::with internally, so we must NOT nest it inside another fb::with.
     let cols = term_cols();
     let w    = fb::width();
     fb::with(|f| {
-        for r in 0..TERM_ROWS_MAX {
+        for r in 0..clamped {
             let y = TERM_Y + 4 + r * FONT_H;
             f.fill_rect(0, y, w, FONT_H, TERM_BG_C.0, TERM_BG_C.1, TERM_BG_C.2);
             let mut x = 4usize;
