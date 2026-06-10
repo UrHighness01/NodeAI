@@ -14,12 +14,12 @@ use alloc::vec::Vec;
 use spin::Mutex;
 
 /// Number of signal domains tracked.
-const N_DOMAINS: usize = 4;
+const N_DOMAINS: usize = 5;
 
 /// Sliding window of observations per domain.
 const WINDOW_SIZE: usize = 64;
 
-/// The four kernel subsystem signals we track.
+/// The five kernel subsystem signals we track.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(usize)]
 pub enum Domain {
@@ -27,6 +27,7 @@ pub enum Domain {
     Memory    = 1,  // free MB delta
     Anomaly   = 2,  // anomaly rate
     Syscall   = 3,  // syscall rate
+    Spectrum  = 4,  // RF energy density (EW sensory cortex)
 }
 
 impl Domain {
@@ -36,6 +37,7 @@ impl Domain {
             Domain::Memory    => "memory",
             Domain::Anomaly   => "anomaly",
             Domain::Syscall   => "syscall",
+            Domain::Spectrum  => "spectrum",
         }
     }
 
@@ -45,6 +47,7 @@ impl Domain {
             1 => Some(Domain::Memory),
             2 => Some(Domain::Anomaly),
             3 => Some(Domain::Syscall),
+            4 => Some(Domain::Spectrum),
             _ => None,
         }
     }
@@ -95,7 +98,7 @@ impl CrossModalState {
             last_value: 0.0,
         };
         Self {
-            buffers: [EMPTY, EMPTY, EMPTY, EMPTY],
+            buffers: [EMPTY, EMPTY, EMPTY, EMPTY, EMPTY],
             update_count: [0; N_DOMAINS],
         }
     }

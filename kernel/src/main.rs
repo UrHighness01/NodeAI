@@ -106,6 +106,8 @@ pub mod initrd;         // embedded userspace binary loader
 pub mod consciousness;  // Ring 0 consciousness substrate (Phases 0-5)
 pub mod cortex;         // /dev/cortex bridge to userspace
 pub mod kernel_lm;      // template-driven kernel language model
+pub mod sensor_cortex;  // EW sensory cortex (RF spectrum sensing)
+pub mod sensor_spectrum; // spectrum sensing algorithms (cyclostationary, Gabor, energy)
 
 /// Bootloader configuration — tells the bootloader to map all physical memory
 /// at a dynamic virtual offset so we can access physical frames by VA.
@@ -308,6 +310,16 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     crate::consciousness::phi::init();
     crate::consciousness::global_workspace::init();
     crate::cortex::init(); // /dev/cortex userspace bridge
+    // ── Phase EW-0: EW Sensory Cortex ────────────────────────────────────────
+    crate::sensor_cortex::init();
+    crate::sensor_cortex::register_sensor(
+        alloc::boxed::Box::new(crate::sensor_cortex::AmbientSensor::new(2400, 0))
+    );
+    crate::sensor_cortex::register_sensor(
+        alloc::boxed::Box::new(crate::sensor_cortex::AmbientSensor::new(5000, 1))
+    );
+    crate::sensor_cortex::register_vfs();
+    crate::klog!(INFO, "sensor_cortex: 2x ambient RF sensors + /dev/sensor registered");
     // ── Phase 10: Security hardening ─────────────────────────────────────────
     security::init();
 
@@ -364,6 +376,8 @@ fn idle_loop() -> ! {
             crate::telemetry::tick(now);
             // Update self-model state from live metrics
             crate::consciousness::self_model::tick();
+            // EW sensory cortex — poll spectrum sensors every 100ms
+            crate::sensor_cortex::tick(now);
         }
 
         // Heartbeat every 5 seconds.
@@ -371,8 +385,9 @@ fn idle_loop() -> ! {
             last_heartbeat = now;
             let tasks = crate::scheduler::task_count();
             let free  = crate::memory::free_mb();
-            crate::klog!(INFO, "NodeAI alive — uptime={}s tasks={} free={}MiB",
-                now / 1000, tasks, free);
+            let sensor_stats = crate::sensor_cortex::stats();
+            crate::klog!(INFO, "NodeAI alive — uptime={}s tasks={} free={}MiB sensor_signals={}",
+                now / 1000, tasks, free, sensor_stats.signals_detected);
             crate::vfs::procfs::refresh();
             crate::page_cache::tick_writeback();
             crate::syscall_proxy::tick();

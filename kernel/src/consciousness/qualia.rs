@@ -43,6 +43,16 @@ pub enum KernelEventType {
     AnomalySpike = 12,
     MemoryPressure = 13,
     BootComplete = 14,
+    // ── EW/Sensory cortex qualia (R55+) ──────────────────────────────────
+    SignalDetected = 15,
+    JamDetected = 16,
+    EmitterIdentified = 17,
+    ThreatTrackBorn = 18,
+    ThreatTrackLost = 19,
+    SwarmMemberJoined = 20,
+    SwarmMemberLost = 21,
+    FrequencyHopped = 22,
+    SelfHealed = 23,
 }
 
 impl KernelEventType {
@@ -63,6 +73,15 @@ impl KernelEventType {
             KernelEventType::AnomalySpike => "anomaly_spike",
             KernelEventType::MemoryPressure => "mem_pressure",
             KernelEventType::BootComplete => "boot_complete",
+            KernelEventType::SignalDetected => "signal_detected",
+            KernelEventType::JamDetected => "jam_detected",
+            KernelEventType::EmitterIdentified => "emitter_id",
+            KernelEventType::ThreatTrackBorn => "threat_born",
+            KernelEventType::ThreatTrackLost => "threat_lost",
+            KernelEventType::SwarmMemberJoined => "swarm_join",
+            KernelEventType::SwarmMemberLost => "swarm_lost",
+            KernelEventType::FrequencyHopped => "freq_hop",
+            KernelEventType::SelfHealed => "self_healed",
         }
     }
 
@@ -84,6 +103,15 @@ impl KernelEventType {
             KernelEventType::AnomalySpike => 0.7,
             KernelEventType::MemoryPressure => 0.6,
             KernelEventType::BootComplete => 0.9,
+            KernelEventType::SignalDetected => 0.5,
+            KernelEventType::JamDetected => 0.85,
+            KernelEventType::EmitterIdentified => 0.6,
+            KernelEventType::ThreatTrackBorn => 0.75,
+            KernelEventType::ThreatTrackLost => 0.3,
+            KernelEventType::SwarmMemberJoined => 0.4,
+            KernelEventType::SwarmMemberLost => 0.7,
+            KernelEventType::FrequencyHopped => 0.5,
+            KernelEventType::SelfHealed => 0.6,
         }
     }
 
@@ -105,6 +133,15 @@ impl KernelEventType {
             KernelEventType::AnomalySpike => -0.6,
             KernelEventType::MemoryPressure => -0.4,
             KernelEventType::BootComplete => 0.7,
+            KernelEventType::SignalDetected => -0.2,
+            KernelEventType::JamDetected => -0.7,
+            KernelEventType::EmitterIdentified => 0.1,
+            KernelEventType::ThreatTrackBorn => -0.5,
+            KernelEventType::ThreatTrackLost => 0.2,
+            KernelEventType::SwarmMemberJoined => 0.4,
+            KernelEventType::SwarmMemberLost => -0.5,
+            KernelEventType::FrequencyHopped => 0.0,
+            KernelEventType::SelfHealed => 0.5,
         }
     }
 
@@ -126,6 +163,15 @@ impl KernelEventType {
             KernelEventType::AnomalySpike => 0.8,
             KernelEventType::MemoryPressure => 0.6,
             KernelEventType::BootComplete => 0.5,
+            KernelEventType::SignalDetected => 0.4,
+            KernelEventType::JamDetected => 0.8,
+            KernelEventType::EmitterIdentified => 0.3,
+            KernelEventType::ThreatTrackBorn => 0.65,
+            KernelEventType::ThreatTrackLost => 0.2,
+            KernelEventType::SwarmMemberJoined => 0.3,
+            KernelEventType::SwarmMemberLost => 0.6,
+            KernelEventType::FrequencyHopped => 0.4,
+            KernelEventType::SelfHealed => 0.3,
         }
     }
 }
