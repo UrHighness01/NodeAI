@@ -108,6 +108,7 @@ pub mod cortex;         // /dev/cortex bridge to userspace
 pub mod kernel_lm;      // template-driven kernel language model
 pub mod lm_memory;      // conversation memory ring buffer
 pub mod lm_templates;   // multi-variant LM templates
+pub mod nano_nn;        // nano-NN intent embedding classifier
 pub mod sensor_cortex;  // EW sensory cortex (RF spectrum sensing)
 pub mod sensor_spectrum; // spectrum sensing algorithms (cyclostationary, Gabor, energy)
 pub mod sensor_threat;   // CFAR + JPDA threat detection
@@ -315,6 +316,7 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     crate::consciousness::phi::init();
     crate::consciousness::global_workspace::init();
     crate::cortex::init(); // /dev/cortex userspace bridge
+    crate::nano_nn::init(); // nano-NN intent embedding
     crate::lm_memory::init(); // conversation memory for kernel LM
     // ── Phase EW-0: EW Sensory Cortex ────────────────────────────────────────
     crate::sensor_cortex::init();

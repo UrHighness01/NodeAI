@@ -44,7 +44,17 @@ fn hash_seed(query: &str, uptime_secs: u64) -> u64 {
 }
 
 /// Detect intent from a natural language query.
+/// First tries nano-NN (if loaded), then falls back to keyword matching.
 fn detect_intent(query: &str) -> Intent {
+    // Try nano-NN first for learned intent classification
+    if crate::nano_nn::is_loaded() {
+        let (idx, confidence) = crate::nano_nn::classify(query);
+        if confidence > 0.4 {
+            return crate::nano_nn::index_to_intent(idx);
+        }
+    }
+    
+    // Fallback: keyword matching
     let q = query.trim().to_lowercase();
     let words: Vec<&str> = q.split_whitespace().collect();
 

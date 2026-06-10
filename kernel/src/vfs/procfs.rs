@@ -108,7 +108,8 @@ pub fn refresh() {
     write_file("/proc", "cross_modal",     crate::cross_modal::format_report());
     write_file("/proc", "sensor",          crate::sensor_cortex::fmt_report().into_bytes());
     write_file("/proc", "threat",          crate::sensor_threat::format_report());
-    write_file("/proc", "immune",          crate::sensor_immune::format_report());}
+    write_file("/proc", "immune",          crate::sensor_immune::format_report());
+    write_file("/proc", "nano_nn",         crate::nano_nn::format_report());}
 
 // ── Content generators ────────────────────────────────────────────────────────
 
