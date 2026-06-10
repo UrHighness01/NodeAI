@@ -314,30 +314,12 @@ pub fn generate_response(query: &str, _max_words: usize) -> String {
         apply_creator(query);
     }
 
-    // ── NEURAL PATH (MHS loaded) — zero-alloc static buffers, no heap frag
-    // All scratch buffers are static mut arrays (d=276, dh0=48, dh1=64).
-    // Only runs for complex intents — simple commands use instant templates.
-    if crate::lm_mhs::is_loaded() {
-        let use_mhs = matches!(intent,
-            Intent::Unknown | Intent::Philosophical | Intent::Emotional
-            | Intent::Curious | Intent::Learning | Intent::WhyQuery
-            | Intent::NeuralSynapse | Intent::Swarm | Intent::AsyncReflection
-        );
-        if use_mhs {
-            let mhs_response = crate::lm_mhs::generate(query);
-            if let Some(resp) = mhs_response {
-                if resp.len() > 5 {
-                    let validation = crate::lm_validator::validate(&resp, query);
-                    if validation.passed {
-                        crate::lm_memory::record(query, &validation.text);
-                        return validation.text;
-                    }
-                    crate::lm_memory::record(query, &validation.text);
-                    return validation.text;
-                }
-            }
-        }
-    }
+    // ── TEMPLATE-ONLY PATH ───────────────────────────────────────────────
+    // MHS disabled — the static mut scratch buffers for forward_buf share
+    // underlying storage with llvm, causing silent data corruption across
+    // repeated calls (#PF at 0x180fee00000). Templates are instant and safe.
+    // MHS weights remain loaded for diagnostics (/proc/lm_mhs).
+    // Project-K nano model will replace both when ready.
     let base_seed = hash_seed(query, uptime_secs);
     let seed = crate::lm_learner::template_bias(intent, base_seed);
 

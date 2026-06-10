@@ -90,33 +90,27 @@ pub fn init() {
 }
 
 /// Tick the async task system — called every 100ms from idle_loop.
-/// If there's a pending task, advance MHS generation by one step.
-/// Uses zero-alloc MHS forward pass (all buffers statically allocated).
+/// MHS generation is DISABLED — the forward pass corrupts static scratch buffers
+/// over repeated calls (module-level static mut aliasing issue with llvm).
+/// Tasks are immediately completed with a placeholder message.
+/// Async queue remains functional for Project-K nano model.
 pub fn tick() {
     let mut lock = QUEUE.lock();
     let q = match &mut *lock {
         Some(q) => q,
         None => return,
     };
-
+    // Instantly complete any pending tasks (MHS generation disabled)
     for i in 0..q.tasks.len() {
-        if q.tasks[i].state != TaskState::Pending && q.tasks[i].state != TaskState::Running { continue; }
-        if !q.mhs_running {
-            let query = q.tasks[i].query.clone();
-            q.tasks[i].state = TaskState::Running;
-            q.mhs_running = true;
-            crate::lm_mhs::mhs_gen_start(&query);
-        }
-        let (done, result) = crate::lm_mhs::mhs_gen_step();
-        if done {
-            q.mhs_running = false;
+        if q.tasks[i].state == TaskState::Pending {
             q.tasks[i].state = TaskState::Completed;
             q.total_completed = q.total_completed.saturating_add(1);
-            q.tasks[i].result = result.chars().take(MAX_RESULT_LEN).collect();
+            q.tasks[i].result = alloc::format!(
+                "(MHS inference unavailable — static scratch buffer aliasing. Use templates instead.)"
+            );
         }
-        return;
     }
-    if q.mhs_running { q.mhs_running = false; crate::lm_mhs::mhs_gen_reset(); }
+    q.mhs_running = false;
 }
 
 /// Enqueue a new async task.
