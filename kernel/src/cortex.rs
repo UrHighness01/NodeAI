@@ -155,7 +155,7 @@ fn parse_intent(text: &str) -> Intent {
 }
 
 /// Handle a parsed intent and return a text response.
-fn handle_intent(intent: Intent) -> String {
+fn handle_intent(intent: Intent, query: &str) -> String {
     match intent {
         Intent::SetValue(key, val) => {
             let mut cv = crate::consciousness::deliberation::get_values();
@@ -219,12 +219,8 @@ fn handle_intent(intent: Intent) -> String {
             "Goodnight. I'll keep watch. Entering low-arousal dream state.".to_string()
         }
         Intent::Unknown => {
-            let phi = crate::consciousness::phi::current_phi();
-            format!(
-                "(Φ={:.4}) I received your message but didn't fully understand it. \
-                 Try: 'how are you', 'show phi', 'boost pid N', 'set value autonomy=0.8', \
-                 or 'goodnight'.", phi
-            )
+            // Use kernel LM to generate a contextual response
+            crate::kernel_lm::generate_response(query, 50)
         }
     }
 }
@@ -257,8 +253,9 @@ impl crate::vfs::FileHandle for ConscHandle {
     }
     fn write(&mut self, buf: &[u8]) -> crate::vfs::VfsResult<usize> {
         if let Ok(s) = core::str::from_utf8(buf) {
-            let intent = parse_intent(s);
-            let response = handle_intent(intent);
+            let query = alloc::string::String::from(s);
+            let intent = parse_intent(&query);
+            let response = handle_intent(intent, &query);
             // Log response to klog so CLI can read it
             crate::klog!(INFO, "consciousness: {}", response);
         }

@@ -105,6 +105,7 @@ pub mod rlimit;         // POSIX resource limits (setrlimit/getrlimit)
 pub mod initrd;         // embedded userspace binary loader
 pub mod consciousness;  // Ring 0 consciousness substrate (Phases 0-5)
 pub mod cortex;         // /dev/cortex bridge to userspace
+pub mod kernel_lm;      // template-driven kernel language model
 
 /// Bootloader configuration — tells the bootloader to map all physical memory
 /// at a dynamic virtual offset so we can access physical frames by VA.
