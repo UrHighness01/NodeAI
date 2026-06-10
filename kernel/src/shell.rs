@@ -1592,8 +1592,72 @@ fn dispatch_single(line: &str) {
         "sysmon"   | "monitor"     => cmd_sysmon(),
         "settings" | "config"      => cmd_settings(),
         "store"    | "appstore"    => cmd_appstore(),
+        "consc" | "consciousness" | "phi" => cmd_consciousness(args),
 
         other => { println!("{}: command not found", other); }
+    }
+}
+
+/// consciousness — interact with the kernel's mind.
+fn cmd_consciousness(args: &str) {
+    if args.is_empty() || args == "status" || args == "?" {
+        // Read /dev/consciousness
+        use crate::vfs;
+        if let Ok(node) = vfs::lookup("/dev/consciousness") {
+            if let Ok(mut fh) = node.open() {
+                let mut buf = alloc::vec![0u8; 4096];
+                if let Ok(n) = fh.read(&mut buf) {
+                    let text = core::str::from_utf8(&buf[..n]).unwrap_or("(invalid utf8)");
+                    for line in text.lines() {
+                        println!("{}", line);
+                    }
+                    return;
+                }
+            }
+        }
+        println!("consciousness: /dev/consciousness not found");
+    } else if args == "how are you" || args == "feel" || args.starts_with("query ") {
+        // Write query, read response from serial
+        let query = args.trim_start_matches("query ").trim();
+        let mut msg = alloc::vec::Vec::from(query.as_bytes());
+        msg.push(b'\n');
+        use crate::vfs;
+        if let Ok(node) = vfs::lookup("/dev/consciousness") {
+            if let Ok(mut fh) = node.open() {
+                let _ = fh.write(&msg);
+                println!("(response written to klog — check serial output)");
+                return;
+            }
+        }
+        println!("consciousness: /dev/consciousness not found");
+    } else if args == "set" {
+        println!("Usage: consciousness set <key>=<value>");
+    } else if args.starts_with("boost") {
+        let rest = args.trim_start_matches("boost").trim();
+        if let Ok(pid) = rest.parse::<u64>() {
+            crate::klog!(INFO, "consciousness: boosting pid {}", pid);
+            let msg = alloc::format!("boost pid {}\n", pid);
+            if let Ok(node) = crate::vfs::lookup("/dev/consciousness") {
+                if let Ok(mut fh) = node.open() {
+                    let _ = fh.write(msg.as_bytes());
+                }
+            }
+        } else {
+            println!("Usage: consciousness boost <pid>");
+        }
+    } else {
+        // Generic command pass-through
+        let mut msg = alloc::vec::Vec::from(args.as_bytes());
+        msg.push(b'\n');
+        use crate::vfs;
+        if let Ok(node) = crate::vfs::lookup("/dev/consciousness") {
+            if let Ok(mut fh) = node.open() {
+                let _ = fh.write(&msg);
+                println!("command sent to /dev/consciousness");
+                return;
+            }
+        }
+        println!("consciousness: /dev/consciousness not found");
     }
 }
 
