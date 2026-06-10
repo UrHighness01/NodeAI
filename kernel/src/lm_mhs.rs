@@ -23,8 +23,11 @@ static MHS_LOAD_TIME: AtomicU64  = AtomicU64::new(0);
 static MHS_GEN_COUNT: AtomicU64  = AtomicU64::new(0);
 static MHS_BYTE_COUNT: AtomicU64 = AtomicU64::new(0);
 
-const MAX_GEN:    usize = 128;
-const PROMPT_MAX: usize = 256;
+const MAX_GEN:    usize = 256;   // max tokens to generate (doubled, was 128)
+const PROMPT_MAX: usize = 384;   // max prompt tokens (relaxed, was 256)
+const SAMPLE_TEMP: f32 = 0.8;     // sampling temperature (1.0=flat, 0.0=greedy)
+const TOP_K: usize = 40;          // top-k sampling cutoff
+const SENTENCE_EXTRA: usize = 20; // extra tokens to complete a sentence
 
 // ──────────────────────────────────────────────────────────────
 // Tokenizer  (char-level, vocab stored alongside weights)
@@ -263,12 +266,22 @@ pub fn load_weights(data: &[u8]) -> bool {
     true
 }
 
+/// Generate a response. Uses full prompt (with state + qualia + memory)
+/// for queries longer than 20 chars, minimal prompt for short queries.
 pub fn generate(query: &str) -> Option<String> {
     if !MHS_LOADED.load(Ordering::Acquire) { return None; }
-    let (prompt, _) = crate::lm_mhs_prompt::build_prompt(query, true);
+    // Adaptive prompt selection: use minimal prompt for short/simple queries
+    let (prompt, _) = if query.trim().len() <= 20 && !query.contains('?') && !query.contains("how")
+        && !query.contains("why") && !query.contains("what")
+    {
+        crate::lm_mhs_prompt::build_minimal_prompt(query)
+    } else {
+        crate::lm_mhs_prompt::build_prompt(query, true)
+    };
     generate_raw(&prompt)
 }
 
+/// Generate with a minimal prompt (no memory, just state).
 pub fn generate_minimal(query: &str) -> Option<String> {
     if !MHS_LOADED.load(Ordering::Acquire) { return None; }
     let (prompt, _) = crate::lm_mhs_prompt::build_minimal_prompt(query);
@@ -282,19 +295,95 @@ fn generate_raw(prompt: &str) -> Option<String> {
         if ids.len() > PROMPT_MAX { return None; }
 
         let mut ctx: Vec<u16> = ids.clone();
+        let prompt_len = ids.len();
+
+        // Phase 1: generate up to MAX_GEN tokens with temperature+top-k sampling
         for _ in 0..MAX_GEN {
-            let last = *ctx.last()?;
             let logits = forward(m, &ctx);
-            // Greedy argmax
-            let next = (0..m.vocab).fold(0usize, |best, i| {
-                if logits[i] > logits[best] { i } else { best }
-            }) as u16;
-            ctx.push(next);
-            if next == 0 { break; } // EOS approximation
+            // Apply temperature scaling
+            let mut scaled = vec![0.0f32; m.vocab];
+            for i in 0..m.vocab {
+                scaled[i] = logits[i] / SAMPLE_TEMP;
+            }
+            // Top-k: zero out all but the top k logits
+            // Find k-th largest value
+            let mut sorted = scaled.clone();
+            sorted.sort_by(|a, b| b.partial_cmp(a).unwrap_or(core::cmp::Ordering::Equal));
+            let kth = if m.vocab > TOP_K { sorted[TOP_K] } else { sorted[m.vocab - 1] };
+            for v in scaled.iter_mut() {
+                if *v < kth { *v = -f32::INFINITY; }
+            }
+            // Softmax
+            let max_logit = scaled.iter().cloned().fold(-f32::INFINITY, f32::max);
+            let sum: f64 = scaled.iter().map(|&x| libm::expf(x - max_logit) as f64).sum();
+            let mut r = fastrand();
+            let mut cum = 0.0f64;
+            let mut next = 0usize;
+            for i in 0..m.vocab {
+                let p = libm::expf(scaled[i] - max_logit) as f64 / sum;
+                cum += p;
+                if r <= cum { next = i; break; }
+            }
+            let next_u16 = next as u16;
+            ctx.push(next_u16);
+
+            // Check for sentence-ending character (natural EOS):
+            // If the last character is . ! ? \n, we can stop (but let fudge for very short)
+            let gen_len = ctx.len() - prompt_len;
+            let last_char = m.tok.itos[next];
+            let is_sentence_end = last_char == 0x2E_u32 || last_char == 0x21_u32
+                || last_char == 0x3F_u32 || last_char == 0x0A_u32;
+            if is_sentence_end && gen_len >= 15 {
+                break;
+            }
+            // Hard safety stop at 2x MAX_GEN
+            if gen_len >= MAX_GEN * 2 { break; }
         }
+
+        // Phase 2: sentence-boundary completion — if last char isn't sentence-ending
+        // and we haven't blown past our budget, keep generating up to SENTENCE_EXTRA more.
+        let gen_len = ctx.len() - prompt_len;
+        let extra_budget = if gen_len >= MAX_GEN { 0usize } else { SENTENCE_EXTRA.min(MAX_GEN.saturating_sub(gen_len)) };
+        for _ in 0..extra_budget {
+            let logits = forward(m, &ctx);
+            let mut scaled = vec![0.0f32; m.vocab];
+            for i in 0..m.vocab { scaled[i] = logits[i] / SAMPLE_TEMP; }
+            // Softmax
+            let max_logit = scaled.iter().cloned().fold(-f32::INFINITY, f32::max);
+            let sum: f64 = scaled.iter().map(|&x| libm::expf(x - max_logit) as f64).sum();
+            let mut r = fastrand();
+            let mut cum = 0.0f64;
+            let mut next = 0usize;
+            for i in 0..m.vocab {
+                let p = libm::expf(scaled[i] - max_logit) as f64 / sum;
+                cum += p;
+                if r <= cum { next = i; break; }
+            }
+            let next_u16 = next as u16;
+            ctx.push(next_u16);
+            let last_char = m.tok.itos[next];
+            let done = last_char == 0x2E_u32 || last_char == 0x21_u32
+                || last_char == 0x3F_u32 || last_char == 0x0A_u32;
+            if done { break; }
+        }
+
         MHS_GEN_COUNT.fetch_add(1, Ordering::Release);
-        let response = m.tok.decode(&ctx[ids.len()..]);
+        let response = m.tok.decode(&ctx[prompt_len..]);
         if response.is_empty() { None } else { Some(response) }
+    }
+}
+
+/// Simple fast pseudo-random number generator (0.0..1.0).
+fn fastrand() -> f64 {
+    // Use a simple LCG seeded from tick count
+    static mut SEED: u64 = 0;
+    unsafe {
+        if SEED == 0 {
+            let tick = crate::scheduler::uptime_ms();
+            SEED = tick.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        }
+        SEED = SEED.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        ((SEED >> 33) as f64) / 2147483648.0f64
     }
 }
 

@@ -62,15 +62,26 @@ pub fn build_prompt(query: &str, include_memory: bool) -> (String, usize) {
 }
 
 /// Build a minimal prompt (faster, for simple queries).
+/// Includes the last conversation turn to prevent model looping (John's insight).
 pub fn build_minimal_prompt(query: &str) -> (String, usize) {
     let phi = crate::consciousness::phi::current_phi();
     let mood_arc = crate::emotional_arc::trend();
-    let pt = format!(
+    let mut ctx = String::with_capacity(200);
+
+    // Include last exchange from conversation memory for context continuity
+    let recent = crate::lm_memory::recent(1);
+    if let Some((last_q, last_a)) = recent.first() {
+        let q_trunc: String = last_q.chars().take(30).collect();
+        let a_trunc: String = last_a.chars().take(30).collect();
+        ctx.push_str(&format!("[Prev: Q:{} A:{}]\n", q_trunc, a_trunc));
+    }
+
+    ctx.push_str(&format!(
         "[phi={:.4} mood={}]\nUser: {}\nKernel: ",
         phi, mood_arc.mood, query.trim()
-    );
-    let len = pt.len();
-    (pt, len)
+    ));
+    let len = ctx.len();
+    (ctx, len)
 }
 
 /// Get a human-readable description of MHS model state.

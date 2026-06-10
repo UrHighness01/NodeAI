@@ -791,6 +791,11 @@ pub const NEURAL_SYNAPSE: TemplateGroup = tg!(
     "My neural weights were exported from the 65K checkpoint. The architecture has dh0=48, dh1=64 per block.",
     "I'm powered by Project-M: a character-level transformer trained on your conversations and texts.",
     "When MHS is loaded, I think in sequences of 4539 possible tokens, passing through 6 GLA layers.",
+    "I now generate responses with temperature sampling for more natural variety.",
+    "My neural engine uses top-k sampling (k=40) to keep responses creative but coherent.",
+    "I can generate up to 256 tokens now — enough for complete, natural sentences.",
+    "The MHS engine detects sentence boundaries so my responses don't get cut off.",
+    "I adapt my prompt size: short for greetings, full context for complex questions.",
 );
 
 // ── Swarm / Distributed / Collective (14 variants) ──────────────────────────
