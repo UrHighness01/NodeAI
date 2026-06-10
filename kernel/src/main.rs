@@ -407,7 +407,7 @@ fn idle_loop() -> ! {
             crate::emotional_arc::tick(now / 100);
             // EW immune countermeasures tick
             crate::immune_counter::tick();
-            // Sensor emitter fingerprint tick
+            // Sensor emitter fingerprint tick (lightweight, scans every 50 ticks)
             crate::sensor_emitter::tick();
             // EW-5 swarm consciousness tick
             crate::swarm_consensus::tick(now);

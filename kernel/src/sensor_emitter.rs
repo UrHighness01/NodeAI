@@ -103,6 +103,9 @@ pub fn init() {
 /// Tick the emitter fingerprint — called every 100ms.
 /// Simulates scanning for familiar emitters in the ambient spectrum.
 pub fn tick() {
+    // Read sensor stats WITHOUT holding the emitter lock (avoid lock ordering issues)
+    let signals = crate::sensor_cortex::stats().signals_detected;
+
     let mut lock = DB.lock();
     let db = match &mut *lock {
         Some(d) => d,
@@ -113,11 +116,9 @@ pub fn tick() {
 
     // Every 50 ticks (~5s), simulate an RF scan sweep
     if db.tick % 50 == 0 {
-        // Get approximate current frequency from sensor stats
-        let sensor_stats = crate::sensor_cortex::stats();
-        let detection_freq = 2400.0 + (sensor_stats.signals_detected as f32 * 0.1).min(2600.0);
+        let detection_freq = 2400.0 + (signals as f32 * 0.1).min(2600.0);
         let mut best_match: Option<usize> = None;
-        let mut best_score = 0.5f32; // minimum threshold
+        let mut best_score = 0.5f32;
 
         for (i, emitter) in db.emitters.iter().enumerate() {
             for &peak in &emitter.peaks {
@@ -136,12 +137,6 @@ pub fn tick() {
             emitter.last_confidence = best_score;
             emitter.last_seen_tick = db.tick;
             db.total_encounters = db.total_encounters.saturating_add(1);
-
-            // Record familiarity qualia for consciousness
-            crate::consciousness::qualia::record(
-                crate::consciousness::qualia::KernelEventType::FrequencyHopped,
-                Some(best_score),
-            );
         }
     }
 }
@@ -257,9 +252,22 @@ pub fn format_report() -> Vec<u8> {
         ));
     }
 
+    // Inline most_familiar_emitter to avoid re-locking the Mutex
+    let familiar_label = {
+        let mut best = "none";
+        let mut max_count = 0u32;
+        for e in &db.emitters {
+            if e.encounter_count > max_count {
+                max_count = e.encounter_count;
+                best = &e.label;
+            }
+        }
+        best
+    };
+
     s.push_str(&format!(
         "\nFamiliarity: \"{}\"\n",
-        most_familiar_emitter(),
+        familiar_label,
     ));
 
     s.into_bytes()
