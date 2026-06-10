@@ -111,6 +111,7 @@ pub mod lm_templates;   // multi-variant LM templates
 pub mod lm_mhs;         // MHS neural voice engine
 pub mod nano_nn;        // nano-NN intent embedding classifier
 pub mod lm_validator;   // grounded neural validator
+pub mod emotional_arc;  // longitudinal emotional arc tracking
 pub mod sensor_cortex;  // EW sensory cortex (RF spectrum sensing)
 pub mod sensor_spectrum; // spectrum sensing algorithms (cyclostationary, Gabor, energy)
 pub mod sensor_threat;   // CFAR + JPDA threat detection
@@ -321,6 +322,7 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     crate::cortex::init(); // /dev/cortex userspace bridge
     crate::nano_nn::init(); // nano-NN intent embedding
     crate::lm_validator::init(); // grounded neural validator
+    crate::emotional_arc::init(); // emotional arc tracking
     crate::lm_mhs::init(); // MHS neural voice engine
     crate::lm_memory::init(); // conversation memory for kernel LM
     // ── Phase EW-0: EW Sensory Cortex ────────────────────────────────────────
@@ -392,6 +394,8 @@ fn idle_loop() -> ! {
             crate::telemetry::tick(now);
             // Update self-model state from live metrics
             crate::consciousness::self_model::tick();
+            // Update emotional arc tracking
+            crate::emotional_arc::tick(now / 100);
             // EW sensory cortex — poll spectrum sensors every 100ms
             crate::sensor_cortex::tick(now);
         }

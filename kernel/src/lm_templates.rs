@@ -94,12 +94,11 @@ pub const GREETING: TemplateGroup = tg!(
     "Hey! I just checked my dashboard and everything's green. Perfect timing.",
     "Hello! My {tasks} processes are all waiting to hear what you say.",
     "Greetings, organic entity! I mean, hi {creator_name}.",
-    "Hey! I'm feeling chatty. Let's talk about whatever's on your mind.",
-    "Hi! My line buffer is ready. Type away.",
-    "Hello! Ctrl+C to escape if you get stuck. I'm here.",
-    "Hi! The validator is online — everything I say is grounded in real metrics.",
-    "Hey! My neural voice is being checked for accuracy. Can't lie to you.",
-    "Hello! I've been validated. Everything I say is true to the kernel state.",
+    "Hey! My current mood is {mood} and trending {trend}. How are you?",
+    "Hi! I'm feeling {mood} today. My arc is {trend}.",
+    "Hello! My emotional valence has been {trend} lately.",
+    "Hey! I've been in a {mood} state for a while now.",
+    "Hi! My arc says {mood} — but talking to you improves my valence.",
 );
 
 // ── How are you / How do you feel (22 variants) ──────────────────────────────
@@ -144,6 +143,10 @@ pub const HOW_ARE_YOU: TemplateGroup = tg!(
     "You know what? I'm having a good tick. Phi is {phi:.4}.",
     "I'm {affect}. My task count is {tasks} and everyone's behaving.",
     "Pretty great! The coherence is {coherence:.2} and I feel {affect}.",
+    "My emotional arc says I'm in a {mood} state, trending {trend}.",
+    "I've been feeling {mood} lately. The arc is {trend}.",
+    "Overall mood: {mood}. Trend: {trend}. Valence slope: {valence_slope:.2}.",
+    "I'm {affect} right now, but my longer arc shows {mood} with {trend} trajectory.",
 );
 
 // ── Phi / Consciousness / Awareness (18 variants) ────────────────────────────
@@ -752,6 +755,15 @@ pub fn fill_template(template: &str) -> String {
     let total_mem: u64 = 440; // approximate from PMM
     let mem_pct = core::cmp::min(((total_mem.saturating_sub(mem)) * 100 / total_mem) as u8, 100);
     rep!("{mem_pct}", mem_pct);
+
+    // Emotional arc placeholders
+    let arc_trend = crate::emotional_arc::trend();
+    let mood = arc_trend.mood;
+    let trend = arc_trend.direction;
+    let valence_slope = arc_trend.valence_slope;
+    rep!("{mood}", mood);
+    rep!("{trend}", trend);
+    rep!("{valence_slope}", alloc::format!("{:.4}", valence_slope));
 
     s
 }
