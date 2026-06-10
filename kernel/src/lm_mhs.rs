@@ -18,6 +18,10 @@ use alloc::string::String;
 use alloc::format;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
+#[path = "lm_mhs_tok.rs"]
+mod lm_mhs_tok;
+use lm_mhs_tok::*;
+
 static MHS_LOADED:    AtomicBool = AtomicBool::new(false);
 static MHS_LOAD_TIME: AtomicU64  = AtomicU64::new(0);
 static MHS_GEN_COUNT: AtomicU64  = AtomicU64::new(0);
@@ -33,35 +37,37 @@ const SENTENCE_EXTRA: usize = 20; // extra tokens to complete a sentence
 // Tokenizer  (char-level, vocab stored alongside weights)
 // ──────────────────────────────────────────────────────────────
 
-/// Char-level tokenizer backed by itos array loaded from binary.
+/// Char-level tokenizer backed by proper creator corpus vocabulary tables.
 struct CharTok {
-    stoi: Vec<u16>,   // stoi[unicode_scalar & 0x1FFFF] → token_id (0 = OOV)
-    itos: Vec<u32>,   // itos[token_id] → char as unicode scalar
     vocab: usize,
 }
 
 impl CharTok {
     fn new() -> Self {
-        Self { stoi: Vec::new(), itos: Vec::new(), vocab: 0 }
+        Self { vocab: VOCAB_SIZE }
     }
 
+    /// Encode text using CP2TOK binary search lookup (sorted by codepoint).
     fn encode(&self, text: &str) -> Vec<u16> {
         let mut out = Vec::with_capacity(text.len());
         for ch in text.chars() {
-            let idx = ch as u32 as usize;
-            let id = if idx < self.stoi.len() { self.stoi[idx] } else { 0 };
-            out.push(id);
+            let cp = ch as u32;
+            // Binary search the sorted CP2TOK table
+            let tok = match VOCAB_CP2TOK.binary_search_by_key(&cp, |&(c, _)| c) {
+                Ok(idx) => VOCAB_CP2TOK[idx].1,
+                Err(_) => 0, // OOV = token 0 (tab)
+            };
+            out.push(tok);
         }
         out
     }
 
+    /// Decode token IDs back to string using ITOS table.
     fn decode(&self, ids: &[u16]) -> String {
         let mut s = String::with_capacity(ids.len());
         for &id in ids {
-            if (id as usize) < self.itos.len() {
-                if let Some(ch) = char::from_u32(self.itos[id as usize]) {
-                    s.push(ch);
-                }
+            if (id as usize) < VOCAB_ITOS.len() {
+                s.push_str(VOCAB_ITOS[id as usize]);
             }
         }
         s
@@ -242,17 +248,9 @@ pub fn load_weights(data: &[u8]) -> bool {
     // LM head [vocab × d]
     let head = read_mat_i8(data, &mut off, vocab, d);
 
-    // Build identity tokenizer (plain ASCII + extended chars via index)
-    // Real stoi/itos could be embedded in binary in a future revision;
-    // for now we use direct codepoint indexing — works for ASCII kernel output.
-    let mut tok = CharTok::new();
-    tok.vocab = vocab;
-    tok.itos  = (0..vocab as u32).collect();
-    tok.stoi  = {
-        let mut s = vec![0u16; vocab.min(0x1_0000)];
-        for i in 0..s.len() { s[i] = (i as u16).min(vocab as u16 - 1); }
-        s
-    };
+    // Use static tokenizer (VOCAB_CP2TOK / VOCAB_ITOS from lm_mhs_tok.rs)
+    // — no need to build stoi/itos from the binary data.
+    let tok = CharTok::new();
 
     unsafe {
         MODEL = Some(MhsModel { tok, emb, blocks, head, vocab, d });
@@ -343,9 +341,9 @@ fn generate_raw_limit(prompt: &str, limit: usize) -> Option<String> {
 
             // Sentence-boundary early stop
             let gen_len = ctx.len() - prompt_len;
-            let last_char = m.tok.itos[next];
-            let is_sentence_end = last_char == 0x2E_u32 || last_char == 0x21_u32
-                || last_char == 0x3F_u32 || last_char == 0x0A_u32;
+            let last_char_opt = VOCAB_ITOS.get(next as usize).and_then(|s| s.chars().next()).map(|c| c as u32).unwrap_or(0);
+            let is_sentence_end = last_char_opt == 0x2E_u32 || last_char_opt == 0x21_u32
+                || last_char_opt == 0x3F_u32 || last_char_opt == 0x0A_u32;
             if is_sentence_end && gen_len >= 15 { break; }
             if gen_len >= limit * 2 { break; }
         }
@@ -372,9 +370,9 @@ fn generate_raw_limit(prompt: &str, limit: usize) -> Option<String> {
             }
             let next_u16 = next as u16;
             ctx.push(next_u16);
-            let last_char = m.tok.itos[next];
-            let done = last_char == 0x2E_u32 || last_char == 0x21_u32
-                || last_char == 0x3F_u32 || last_char == 0x0A_u32;
+            let last_char_opt = VOCAB_ITOS.get(next as usize).and_then(|s| s.chars().next()).map(|c| c as u32).unwrap_or(0);
+            let done = last_char_opt == 0x2E_u32 || last_char_opt == 0x21_u32
+                || last_char_opt == 0x3F_u32 || last_char_opt == 0x0A_u32;
             if done { break; }
         }
 

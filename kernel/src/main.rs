@@ -110,6 +110,7 @@ pub mod lm_memory;      // conversation memory ring buffer
 pub mod lm_templates;   // multi-variant LM templates
 pub mod lm_mhs;         // MHS neural voice engine
 pub mod lm_mhs_prompt;  // MHS prompt builder with context
+// lm_mhs_tok is a child module of lm_mhs (accessed via lm_mhs_tok.rs in same dir)
 pub mod swarm_consensus; // EW-5 swarm consciousness
 pub mod nano_nn;        // nano-NN intent embedding classifier
 pub mod lm_validator;   // grounded neural validator
