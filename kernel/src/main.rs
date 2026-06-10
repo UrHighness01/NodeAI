@@ -375,6 +375,12 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
         crate::consciousness::qualia::KernelEventType::BootComplete, None);
 
     crate::boot_splash::draw_subsystem("Boot → idle loop", true);
+    // Draw boot complete screen once (not in heartbeat loop — avoids flicker)
+    let tasks = crate::scheduler::task_count();
+    let free = crate::memory::free_mb();
+    crate::boot_splash::draw_heap_status(free, 64);
+    crate::boot_splash::draw_phi(crate::consciousness::phi::current_phi());
+    crate::boot_splash::draw_boot_complete(0, tasks, free);
 
     // All subsystems initialized — enable hardware interrupts now so the
     // APIC timer can fire safely (scheduler, AI engine, telemetry all ready).
@@ -437,10 +443,6 @@ fn idle_loop() -> ! {
             let threat_lvl = crate::sensor_threat::threat_level();
             crate::klog!(INFO, "NodeAI alive — uptime={}s tasks={} free={}MiB sensor_signals={} threat_lvl={:.2}",
                 now / 1000, tasks, free, sensor_stats.signals_detected, threat_lvl);
-            // Update boot splash with live metrics on first heartbeat
-            crate::boot_splash::draw_boot_complete(now / 1000, tasks, free);
-            crate::boot_splash::draw_heap_status(free, 64);
-            crate::boot_splash::draw_phi(crate::consciousness::phi::current_phi());
             crate::vfs::procfs::refresh();
             crate::page_cache::tick_writeback();
             crate::syscall_proxy::tick();
