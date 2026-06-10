@@ -124,6 +124,7 @@ pub mod sensor_immune;   // EW immune reflexes
 pub mod sensor_doa;      // MUSIC/ESPRIT direction finding
 pub mod sensor_emitter;  // Sensor emitter fingerprint recognition
 pub mod async_task;      // Async background task queue
+pub mod llm_bridge;      // CI-5 userspace LLM daemon bridge
 
 /// Bootloader configuration — tells the bootloader to map all physical memory
 /// at a dynamic virtual offset so we can access physical frames by VA.
@@ -327,6 +328,7 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     crate::consciousness::phi::init();
     crate::consciousness::global_workspace::init();
     crate::cortex::init(); // /dev/cortex userspace bridge
+    crate::llm_bridge::init(); // /dev/llm userspace LLM bridge
     crate::nano_nn::init(); // nano-NN intent embedding
     crate::lm_validator::init(); // grounded neural validator
     crate::emotional_arc::init(); // emotional arc tracking

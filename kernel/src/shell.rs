@@ -1764,6 +1764,43 @@ fn cmd_consciousness(args: &str) {
         return;
     }
 
+    // ── LLM / Neural daemon bridge ──────────────────────────────────────
+    if trimmed == "llm" || trimmed.starts_with("llm ") {
+        let rest = trimmed.strip_prefix("llm ").unwrap_or("");
+        if rest == "--poll" || rest == "-r" {
+            if crate::llm_bridge::has_response() {
+                if let Some(resp) = crate::llm_bridge::take_response() {
+                    println!("{}", resp);
+                }
+            } else if crate::llm_bridge::is_daemon_connected() {
+                println!("LLM daemon connected but no response ready yet.");
+            } else {
+                println!("No LLM daemon connected. Start one with 'llmd'.");
+            }
+        } else if rest == "--status" || rest == "-s" {
+            if crate::llm_bridge::is_daemon_connected() {
+                println!("LLM daemon: connected. /dev/llm bridge active.");
+            } else {
+                println!("LLM daemon: not connected. Use 'llmd' to start.");
+            }
+        } else if rest == "--help" || rest == "-h" {
+            println!("LLM Bridge Commands:");
+            println!("  llm <query>         — send query to LLM daemon");
+            println!("  llm --poll/-r       — retrieve response");
+            println!("  llm --status/-s     — check daemon status");
+            println!("  llm --help/-h       — this help");
+        } else if !rest.is_empty() {
+            if crate::llm_bridge::enqueue_query(rest) {
+                println!("Query sent to LLM daemon. Check with 'llm --poll'.");
+            } else {
+                println!("LLM busy (previous query still pending). Try 'llm --poll' first.");
+            }
+        } else {
+            println!("Usage: llm <query>  or  llm --poll (check response)");
+        }
+        return;
+    }
+
     // ── Conversation memory ─────────────────────────────────────────────
     if trimmed == "memory" || trimmed == "history" || trimmed == "chatlog" {
         let recent = crate::lm_memory::recent(8);
@@ -2084,6 +2121,8 @@ fn cmd_help() {
     println!("                consc mhs/voice/neural — neural voice engine");
     println!("                consc think <q>       — async MHS inference (background)");
     println!("                consc think --poll    — check async results");
+    println!("                consc llm <q>         — send query to LLM daemon (/dev/llm)");
+    println!("                consc llm --poll      — get LLM daemon response");
     println!("                consc memory/history   — conversation memory");
     println!("                consc coupling/cross   — cross-modal coupling");
     println!("                consc values/core      — deliberation values");

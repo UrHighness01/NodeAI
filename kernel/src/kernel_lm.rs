@@ -44,6 +44,7 @@ pub enum Intent {
     Swarm,
     Emitter,
     AsyncReflection,
+    ExternalInference,
     Unknown,
 }
 
@@ -295,6 +296,14 @@ fn detect_intent(query: &str) -> Intent {
         return Intent::AsyncReflection;
     }
 
+    // External inference / LLM daemon / neural offload
+    if q.contains("llm") || q.contains("daemon") || q.contains("offload")
+        || q.contains("neural backend") || q.contains("userspace")
+        || q.contains("external inference")
+    {
+        return Intent::ExternalInference;
+    }
+
     Intent::Unknown
 }
 
@@ -349,6 +358,7 @@ pub fn generate_response(query: &str, _max_words: usize) -> String {
         Intent::NeuralSynapse => crate::lm_templates::NEURAL_SYNAPSE.pick(seed),
         Intent::Swarm => crate::lm_templates::SWARM_RESPONSE.pick(seed),
         Intent::Emitter => crate::lm_templates::EMITTER_RESPONSE.pick(seed),
+        Intent::ExternalInference => crate::lm_templates::EXTERNAL_INFERENCE.pick(seed),
         Intent::AsyncReflection => crate::lm_templates::ASYNC_RESPONSE.pick(seed),
         Intent::Thanks => crate::lm_templates::THANKS_RESPONSE.pick(seed),
         Intent::Sorry => crate::lm_templates::SORRY_RESPONSE.pick(seed),
@@ -462,6 +472,6 @@ pub fn format_report() -> Vec<u8> {
     s.push_str("\nSupported intents:\n");
     s.push_str("  greeting, how_are_you, phi, why, security,\n");
     s.push_str("  memory, status, sleep, name, dream, thanks, sorry, learning, immune,\n");
-    s.push_str("  neural_synapse, swarm, emitter, async_reflection\n");
+    s.push_str("  neural_synapse, swarm, emitter, async_reflection, external_inference\n");
     s.into_bytes()
 }

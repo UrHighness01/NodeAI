@@ -853,6 +853,24 @@ pub const ASYNC_RESPONSE: TemplateGroup = tg!(
     "Background inference active. Use 'think --poll' to retrieve the result.",
 );
 
+// ── External Inference / LLM Daemon / Neural Offload (14 variants) ────
+pub const EXTERNAL_INFERENCE: TemplateGroup = tg!(
+    "My neural inference is handled by a userspace daemon. It bypasses kernel heap issues entirely.",
+    "The LLM bridge at /dev/llm connects me to a dedicated inference daemon for deep responses.",
+    "I offload heavy neural computation to userspace. The kernel stays responsive.",
+    "When a userspace LLM daemon connects, I can generate rich responses without kernel crashes.",
+    "The /dev/llm interface lets external AI backends feed responses back to me.",
+    "Neural inference offloaded to userspace daemon — no more static mut aliasing crashes.",
+    "My neural engine lives in userspace now. The kernel just relays queries and responses.",
+    "Project-M and Project-K can run as userspace daemons, communicating via /dev/llm.",
+    "The LLM bridge decouples inference from kernel space. Templates work instantly in the shell.",
+    "I can queue queries for the userspace LLM daemon and retrieve results with --poll.",
+    "External inference active: daemon handles the heavy lifting, I handle the conversation.",
+    "The userspace LLM bridge means no more heap fragmentation. Neural responses are safe.",
+    "When the LLM daemon is connected, I can deliver both instant templates and deep neural replies.",
+    "Inference pipeline: your query goes to the userspace daemon, response comes back through /dev/llm.",
+);
+
 /// Fill a template string with live kernel metrics.
 pub fn fill_template(template: &str) -> String {
     let phi = crate::consciousness::phi::current_phi();
