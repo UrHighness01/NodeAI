@@ -108,9 +108,10 @@ pub mod cortex;         // /dev/cortex bridge to userspace
 pub mod kernel_lm;      // template-driven kernel language model
 pub mod lm_memory;      // conversation memory ring buffer
 pub mod lm_templates;   // multi-variant LM templates
-pub mod lm_mhs;         // MHS neural voice engine
+pub mod lm_mhs;         // MHS neural voice engine (Project-M, 6.6MB INT8)
 pub mod lm_mhs_prompt;  // MHS prompt builder with context
-// lm_mhs_tok is a child module of lm_mhs (accessed via lm_mhs_tok.rs in same dir)
+pub mod lm_projectk;    // Project-K nano model (1.6MB INT4, d=192, vocab=2448)
+// lm_mhs_tok / lm_projectk_tok are child modules of their respective parents
 pub mod swarm_consensus; // EW-5 swarm consciousness
 pub mod nano_nn;        // nano-NN intent embedding classifier
 pub mod lm_validator;   // grounded neural validator
@@ -360,7 +361,8 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     crate::lm_validator::init(); // grounded neural validator
     crate::emotional_arc::init(); // emotional arc tracking
     crate::lm_learner::init(); // conversational learning
-    crate::lm_mhs::init(); // MHS neural voice engine
+    crate::lm_mhs::init();       // Project-M neural voice engine (6.6MB INT8)
+    crate::lm_projectk::init();  // Project-K nano model (1.6MB INT4)
     crate::lm_memory::init(); // conversation memory for kernel LM
     // ── Phase EW-0: EW Sensory Cortex ────────────────────────────────────────
     crate::sensor_cortex::init();
