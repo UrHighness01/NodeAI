@@ -2129,6 +2129,10 @@ fn cmd_help() {
     println!("    consc set <key>=<val>       — set core value");
     println!("    consc boost/forget/kill     — process control");
     println!("    consc <text>                — LM query");
+    println!("  Userspace:");
+    println!("    consciousness-cli exists as a standalone binary.");
+    println!("    Build: cargo build -p consciousness-cli \\");
+    println!("           --target x86_64-unknown-linux-gnu");
     println!("  Operators:   |  >  >>  <  ;  &&  ||");
     println!("  Power:       reboot, shutdown");
 }

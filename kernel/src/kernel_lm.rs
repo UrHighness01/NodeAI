@@ -46,6 +46,7 @@ pub enum Intent {
     AsyncReflection,
     ExternalInference,
     SensorInteraction,
+    UserspaceIntrospection,
     Unknown,
 }
 
@@ -315,6 +316,15 @@ fn detect_intent(query: &str) -> Intent {
         return Intent::SensorInteraction;
     }
 
+    // CLI / userspace introspection
+    if q.contains("cli") || q.contains("standalone") || q.contains("userspace")
+        || q.contains("/dev/consciousness") || q.contains("consciousness-cli")
+        || (q.contains("outside") && q.contains("kernel"))
+        || (q.contains("monitor") && !q.contains("health") && !q.contains("task"))
+    {
+        return Intent::UserspaceIntrospection;
+    }
+
     Intent::Unknown
 }
 
@@ -378,6 +388,7 @@ pub fn generate_response(query: &str, _max_words: usize) -> String {
         Intent::Emitter => crate::lm_templates::EMITTER_RESPONSE.pick(seed),
         Intent::ExternalInference => crate::lm_templates::EXTERNAL_INFERENCE.pick(seed),
         Intent::SensorInteraction => crate::lm_templates::SENSOR_INTERACTION.pick(seed),
+        Intent::UserspaceIntrospection => crate::lm_templates::USERSPACE_INTROSPECTION.pick(seed),
         Intent::AsyncReflection => crate::lm_templates::ASYNC_RESPONSE.pick(seed),
         Intent::Thanks => crate::lm_templates::THANKS_RESPONSE.pick(seed),
         Intent::Sorry => crate::lm_templates::SORRY_RESPONSE.pick(seed),
