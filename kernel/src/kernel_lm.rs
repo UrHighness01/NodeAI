@@ -84,8 +84,9 @@ fn detect_intent(query: &str) -> Intent {
     let words: Vec<&str> = q.split_whitespace().collect();
 
     // Empty / single-char greeting
+    // Empty queries → unknown (chat will try neural then fallback)
     if q.is_empty() || q == "?" {
-        return Intent::StatusQuery;
+        return Intent::Unknown;
     }
     if q.len() <= 5 && (q.contains("hi") || q.contains("hey") || q.contains("hello") || q.contains("yo"))
         && !q.contains("how") && !q.contains("phi")
