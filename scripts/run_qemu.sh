@@ -7,7 +7,13 @@
 #   3. image-builder <kernel.elf> <out-dir>  (creates BIOS/UEFI .img)
 #   4. qemu-system-x86_64 -drive file=nodeai-bios.img ...
 #
-# Usage: ./scripts/run_qemu.sh [--debug] [--release] [--uefi] [--memory 512]
+# Usage: ./scripts/run_qemu.sh [--debug] [--release] [--uefi] [--nographic] [--gui] [--memory 512]
+#
+# --nographic  Full interactive terminal mode — keyboard input goes to kernel shell.
+#              Type commands like 'consc hello', 'help', 'mem'. Press Ctrl+A X to quit.
+#              This is the ONLY mode that allows typing commands into the kernel.
+# --gui        SDL window + serial output to terminal. Keyboard goes to SDL window,
+#              NOT the kernel serial shell — you cannot type commands this way.
 #
 # Dependencies (install once):
 #   sudo apt install qemu-system-x86 curl
@@ -26,17 +32,19 @@ RELEASE=1
 UEFI=0
 GUI=0
 WIFI=0
+NOGRAPHIC=0
 
 # ── Parse args ────────────────────────────────────────────────────────────────
 while [[ $# -gt 0 ]]; do
     case $1 in
-        --debug)   DEBUG=1 ;;
-        --release) RELEASE=1 ;;
-        --uefi)    UEFI=1 ;;
-        --gui)     GUI=1 ;;
-        --wifi)    WIFI=1 ;;
-        --memory)  MEMORY="$2"; shift ;;
-        --memory=*)MEMORY="${1#*=}" ;;
+        --debug)      DEBUG=1 ;;
+        --release)    RELEASE=1 ;;
+        --uefi)       UEFI=1 ;;
+        --gui)        GUI=1 ;;
+        --nographic)  NOGRAPHIC=1 ;;
+        --wifi)       WIFI=1 ;;
+        --memory)     MEMORY="$2"; shift ;;
+        --memory=*)   MEMORY="${1#*=}" ;;
         -h|--help)
             sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'
             exit 0 ;;
@@ -99,13 +107,25 @@ QEMU_ARGS=(
     -machine q35
     -cpu Haswell
     -m "${MEMORY}M"
-    -serial stdio
     -no-reboot
     -no-shutdown
 )
 
-if [[ $GUI -eq 0 ]]; then
-    QEMU_ARGS+=(-display none -monitor unix:qemu-monitor.sock,server,nowait) # headless — all output via serial/stdio
+if [[ $NOGRAPHIC -eq 1 ]]; then
+    # Full terminal mode: keyboard → serial → you. Press Ctrl+A X to exit.
+    # This is the only mode where you can TYPE commands into the kernel shell.
+    QEMU_ARGS+=(-nographic)
+    echo "  Display: nographic (terminal = serial console)"
+    echo "  Type commands directly. Press Ctrl+A X to quit."
+elif [[ $GUI -eq 1 ]]; then
+    # SDL window for display, but keyboard goes to PS/2 (VGA), NOT serial.
+    # You can see output on serial but cannot type commands into the kernel.
+    QEMU_ARGS+=(-serial stdio -display sdl)
+    echo "  Display: SDL window (WARNING: keyboard goes to SDL, not serial shell)"
+else
+    # Headless: serial routed to stdio, no window. Output visible, no typing.
+    QEMU_ARGS+=(-serial stdio -display none -monitor unix:qemu-monitor.sock,server,nowait)
+    echo "  Display: headless (serial → stdout, read-only)"
 fi
 
 # KVM acceleration if available (10-50x faster)
