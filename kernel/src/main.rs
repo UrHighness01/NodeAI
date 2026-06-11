@@ -117,6 +117,8 @@ pub mod lm_validator;   // grounded neural validator
 pub mod emotional_arc;  // longitudinal emotional arc tracking
 pub mod lm_learner;     // conversational learning from terminal input
 pub mod immune_counter; // EW-4b countermeasure selection + covertness + self-heal
+pub mod immune_covert;   // EW-4b: covertness budget (frequency exposure tracking)
+pub mod immune_heal;     // EW-4b: self-healing trigger monitor
 pub mod sensor_cortex;  // EW sensory cortex (RF spectrum sensing)
 pub mod sensor_spectrum; // spectrum sensing algorithms (cyclostationary, Gabor, energy)
 pub mod sensor_threat;   // CFAR + JPDA threat detection
@@ -356,6 +358,8 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     crate::sensor_immune::init();
     crate::sensor_emitter::init();
     crate::immune_counter::init();
+    crate::immune_covert::init();
+    crate::immune_heal::init();
     crate::swarm_consensus::init();
     crate::async_task::init();
     crate::klog!(INFO, "sensor_cortex: 2x ambient RF sensors + /dev/sensor + threat + immune registered");
@@ -425,6 +429,8 @@ fn idle_loop() -> ! {
             crate::async_task::tick();
             // EW immune countermeasures tick
             crate::immune_counter::tick();
+            crate::immune_covert::tick();
+            crate::immune_heal::tick();
             // Sensor emitter fingerprint tick (lightweight, scans every 50 ticks)
             crate::sensor_emitter::tick();
             // EW-5 swarm consciousness tick
