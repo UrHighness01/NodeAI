@@ -22,6 +22,17 @@ QEMU="/usr/bin/qemu-system-x86_64"
 QA=(-machine q35 -cpu qemu64,+avx2,+rdrand,+rdseed -m 2048M)
 QA+=(-serial stdio -display none -no-reboot -no-shutdown)
 QA+=(-drive "format=raw,file=$ID/nodeai-bios.img")
+
+# Attach Qwen3.5 weight disk if available (second AHCI drive, index 1)
+QWEN35="$ROOT/models/lm_qwen35.bin"
+if [[ -f "$QWEN35" ]]; then
+    QWEN_IMG="$ROOT/target/qwen35_weights.img"
+    if [[ ! -f "$QWEN_IMG" ]] || [[ "$QWEN35" -nt "$QWEN_IMG" ]]; then
+        cp "$QWEN35" "$QWEN_IMG"
+    fi
+    QA+=(-drive "format=raw,file=$QWEN_IMG,if=ide,index=1")
+fi
+
 "$QEMU" "${QA[@]}" > "$TEST_LOG" 2>&1 &
 QPID=$!; sleep "$TIMEOUT"; kill "$QPID" 2>/dev/null || true; wait "$QPID" 2>/dev/null || true
 set +e

@@ -164,13 +164,19 @@ if [[ $UEFI -eq 0 ]]; then
 fi
 
 # Qwen3.5 weight disk (second AHCI drive, index 1)
-QWEN35_BIN="${ROOT}/../models/lm_qwen35.bin"
+QWEN35_BIN="${ROOT}/models/lm_qwen35.bin"
 QWEN35_IMG="${ROOT}/target/qwen35_weights.img"
 if [[ -f "$QWEN35_BIN" ]]; then
-    # Wrap raw binary in a raw disk image (no filesystem — kernel reads raw bytes)
+    # Wrap raw binary in a raw disk image, padded to sector boundary
     if [[ ! -f "$QWEN35_IMG" ]] || [[ "$QWEN35_BIN" -nt "$QWEN35_IMG" ]]; then
         echo "  Building Qwen3.5 weight disk image..."
         cp "$QWEN35_BIN" "$QWEN35_IMG"
+        # Pad to sector boundary (AHCI reads sectors)
+        size=$(stat -c %s "$QWEN35_IMG")
+        pad=$(( (512 - size % 512) % 512 ))
+        if [[ $pad -gt 0 ]]; then
+            dd if=/dev/zero bs=1 count=$pad >> "$QWEN35_IMG" 2>/dev/null
+        fi
     fi
     QWEN35_SIZE=$(stat -c %s "$QWEN35_IMG")
     QEMU_ARGS+=(-drive "format=raw,file=$QWEN35_IMG,if=ide,index=1")
