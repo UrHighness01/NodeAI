@@ -30,15 +30,31 @@ const TOP_P:    f32   = 0.92;
 const TEMP:     f32   = 0.85;
 const GROUP_SZ: usize = 64;   // INT4 quantization group size
 
-// ── Static scratch (no per-inference allocs) ─────────────────────────────
-static mut SCR_X:      [f32; D]     = [0.0; D];
-static mut SCR_QF:     [f32; 96]    = [0.0; 96]; // 3*DH0
-static mut SCR_QM:     [f32; 144]   = [0.0; 144]; // 3*DH1
-static mut SCR_HF:     [f32; DH0]   = [0.0; DH0];
-static mut SCR_HM:     [f32; DH1]   = [0.0; DH1];
-static mut SCR_OUT:    [f32; D]     = [0.0; D];
-static mut SCR_FC:     [f32; MLP_D] = [0.0; MLP_D];
-static mut SCR_LOGIT:  [f32; VOCAB] = [0.0; VOCAB];
+// ── Unified scratch buffer (single static to prevent LLVM aliasing) ────
+// Do NOT split into separate static mut arrays — LLVM aliases them.
+// All scratch lives in one [f32; TOTAL] with typed accessor macros.
+const SCR_QFS:  usize = 0;               // 3*DH0 = 96
+const SCR_QMS:  usize = SCR_QFS + 96;    // 3*DH1 = 144 → 240
+const SCR_HFS:  usize = SCR_QMS + 144;   // DH0 = 32 → 272
+const SCR_HMS:  usize = SCR_HFS + 32;    // DH1 = 48 → 320
+const SCR_XS:   usize = SCR_HMS + 48;    // D = 192 → 512
+const SCR_OUTS: usize = SCR_XS + 192;    // D = 192 → 704
+const SCR_FCS:  usize = SCR_OUTS + 192;  // MLP_D = 768 → 1472
+const SCR_LOGS: usize = SCR_FCS + 768;   // VOCAB = 2448 → 3920
+const SCR_TOT:  usize = SCR_LOGS + 2448; // 3920
+
+static mut SCRATCH: [f32; SCR_TOT] = [0.0; SCR_TOT];
+
+macro_rules! scratch_mut {
+    ($off:expr, $len:expr) => {
+        unsafe { &mut SCRATCH[$off..$off + $len] }
+    };
+}
+macro_rules! scratch_idx {
+    ($off:expr, $idx:expr) => {
+        unsafe { &mut SCRATCH[$off + $idx] }
+    };
+}
 
 // ── INT4 weight matrix ────────────────────────────────────────────────────
 struct MatI4 {
@@ -289,7 +305,7 @@ unsafe fn gla_head_forward(head: &GlaHead, embeds: &[[f32; D]], ctx_len: usize,
     for t in 0..ctx_len {
         let x = &embeds[t];
         // QKV projection + bias
-        let qkv_buf = if dh == DH0 { &mut SCR_QF[..3*DH0] } else { &mut SCR_QM[..3*DH1] };
+        let qkv_buf = if dh == DH0 { scratch_mut!(SCR_QFS, 96) } else { scratch_mut!(SCR_QMS, 144) };
         head.qkv.mv(x, qkv_buf);
         for i in 0..3*dh { qkv_buf[i] += head.qkv_bias.0[i]; }
 
@@ -367,7 +383,7 @@ unsafe fn forward(m: &Model, tokens: &[u16], pos_start: usize) {
     }
 
     // Run blocks — maintain x as the "current" residual stream (last token position)
-    SCR_X = embeds[ctx_len - 1];
+    for i in 0..D { SCRATCH[SCR_XS + i] = embeds[ctx_len - 1][i]; }
 
     let mut fast_state  = [0.0f32; DH0];
     let mut medium_state= [0.0f32; DH1];
@@ -376,7 +392,7 @@ unsafe fn forward(m: &Model, tokens: &[u16], pos_start: usize) {
 
     for blk in &m.blocks {
         // Pre-norm
-        let mut h = SCR_X;
+        let mut h = [0.0f32; D]; for i in 0..D { h[i] = SCRATCH[SCR_XS + i]; }
         layer_norm(&mut h, &blk.ln1_w.0, &blk.ln1_b.0);
 
         // Build ln1-normalized embeds for the full ctx window
@@ -392,42 +408,42 @@ unsafe fn forward(m: &Model, tokens: &[u16], pos_start: usize) {
         gla_head_forward(&blk.medium, &ln1_embeds, ctx_len, &mut medium_state,  &mut medium_out);
 
         // Residual: x += fast_out + medium_out
-        for i in 0..D { SCR_X[i] += fast_out[i] + medium_out[i]; }
+        for i in 0..D { SCRATCH[SCR_XS + i] += fast_out[i] + medium_out[i]; }
 
         // Post-norm + MLP
-        let mut h2 = SCR_X;
+        let mut h2 = [0.0f32; D]; for i in 0..D { h2[i] = SCRATCH[SCR_XS + i]; }
         layer_norm(&mut h2, &blk.ln2_w.0, &blk.ln2_b.0);
-        blk.mlp_fc.mv(&h2, &mut SCR_FC[..MLP_D]);
-        for i in 0..MLP_D { SCR_FC[i] = gelu(SCR_FC[i] + blk.mlp_fcb.0[i]); }
+        blk.mlp_fc.mv(&h2, scratch_mut!(SCR_FCS, MLP_D));
+        for i in 0..MLP_D { SCRATCH[SCR_FCS + i] = gelu(SCRATCH[SCR_FCS + i] + blk.mlp_fcb.0[i]); }
         let mut mlp_out = [0.0f32; D];
-        blk.mlp_pr.mv(&SCR_FC[..MLP_D], &mut mlp_out);
-        for i in 0..D { SCR_X[i] += mlp_out[i] + blk.mlp_prb.0[i]; }
+        blk.mlp_pr.mv(&SCRATCH[SCR_FCS..SCR_FCS + MLP_D], &mut mlp_out);
+        for i in 0..D { SCRATCH[SCR_XS + i] += mlp_out[i] + blk.mlp_prb.0[i]; }
     }
 
     // Final LN
-    layer_norm(&mut SCR_X, &m.lnf_w.0, &m.lnf_b.0);
+    layer_norm(&mut SCRATCH[SCR_XS..SCR_XS + D], &m.lnf_w.0, &m.lnf_b.0);
 
     // Head (weight-tied to embedding — use emb.mv)
-    for l in SCR_LOGIT[..m.vocab].iter_mut() { *l = 0.0; }
-    m.emb.mv_add(&SCR_X, &mut SCR_LOGIT[..m.vocab]);
+    for l in SCRATCH[SCR_LOGS..SCR_LOGS + m.vocab].iter_mut() { *l = 0.0; }
+    m.emb.mv_add(&SCRATCH[SCR_XS..SCR_XS + D], &mut SCRATCH[SCR_LOGS..SCR_LOGS + m.vocab]);
 }
 
 // ── Sampler (top-k + top-p nucleus) ──────────────────────────────────────
 unsafe fn sample_logits(vocab: usize) -> usize {
     // Temperature
-    for l in SCR_LOGIT[..vocab].iter_mut() { *l /= TEMP; }
+    for l in SCRATCH[SCR_LOGS..SCR_LOGS + vocab].iter_mut() { *l /= TEMP; }
 
     // Softmax
-    let max_l = (0..vocab).fold(f32::NEG_INFINITY, |m, i| if SCR_LOGIT[i] > m { SCR_LOGIT[i] } else { m });
+    let max_l = (0..vocab).fold(f32::NEG_INFINITY, |m, i| if SCRATCH[SCR_LOGS + i] > m { SCRATCH[SCR_LOGS + i] } else { m });
     let sum: f64 = (0..vocab).map(|i| {
-        SCR_LOGIT[i] = libm::expf(SCR_LOGIT[i] - max_l);
-        SCR_LOGIT[i] as f64
+        SCRATCH[SCR_LOGS + i] = libm::expf(SCRATCH[SCR_LOGS + i] - max_l);
+        SCRATCH[SCR_LOGS + i] as f64
     }).sum();
     if sum <= 0.0 { return 0; }
 
     // Top-k filter
     let mut top_vals = [f32::NEG_INFINITY; TOP_K];
-    for &v in SCR_LOGIT[..vocab].iter() {
+    for &v in SCRATCH[SCR_LOGS..SCR_LOGS + vocab].iter() {
         if v > top_vals[TOP_K - 1] {
             top_vals[TOP_K - 1] = v;
             // Insertion sort to keep descending
@@ -438,10 +454,10 @@ unsafe fn sample_logits(vocab: usize) -> usize {
         }
     }
     let kth = top_vals[TOP_K - 1];
-    for l in SCR_LOGIT[..vocab].iter_mut() { if *l < kth { *l = 0.0; } }
+    for l in SCRATCH[SCR_LOGS..SCR_LOGS + vocab].iter_mut() { if *l < kth { *l = 0.0; } }
 
     // Top-p nucleus
-    let total: f64 = SCR_LOGIT[..vocab].iter().map(|&v| v as f64).sum();
+    let total: f64 = SCRATCH[SCR_LOGS..SCR_LOGS + vocab].iter().map(|&v| v as f64).sum();
     let nucleus = TOP_P as f64 * total;
     let mut cum = 0.0f64;
     let mut r = fastrand() * total;
@@ -453,7 +469,7 @@ unsafe fn sample_logits(vocab: usize) -> usize {
     let mut c2 = 0.0f64;
     let _ = nucleus; let _ = cum; let _ = r;
     for i in 0..vocab {
-        c2 += SCR_LOGIT[i] as f64;
+        c2 += SCRATCH[SCR_LOGS + i] as f64;
         if c2 >= r2 { chosen = i; break; }
     }
     chosen
