@@ -773,6 +773,9 @@ pub const WEATHER_RESPONSE: TemplateGroup = tg!(
     "The stability forecast: strong. {nano_train_steps} training steps, 0 crashes this session.",
     "My recovery monitor shows clean boots. The environment is stable and resilient.",
     "Weather in kernel space: stable with light scheduling. Recovery status: nominal.",
+    "GNSS space weather: {sat_count} satellites tracked, HDOP nominal.",
+    "Position integrity is stable. No ionospheric disturbances detected.",
+    "The GNSS constellation is healthy. Signal quality is good across all bands.",
 );
 
 // ── Advice / Help (23 variants) ────────────────────────────────────────────
@@ -988,6 +991,9 @@ pub const NEURAL_SYNAPSE: TemplateGroup = tg!(
     "I can generate up to 256 tokens now — enough for complete, natural sentences.",
     "The MHS engine detects sentence boundaries so my responses don't get cut off.",
     "I adapt my prompt size: short for greetings, full context for complex questions.",
+    "My neural engine also processes satellite data. GNSS residuals inform my world model.",
+    "RAIM computations run alongside MHS inference. Position is another sense.",
+    "Neural inference + GNSS integrity: I think while tracking my position.",
 );
 
 // ── Swarm / Distributed / Collective (27 variants) ──────────────────────────
@@ -1219,6 +1225,10 @@ pub const COMPOUND_QUERY: TemplateGroup = tg!(
     "Your compound query was split into sub-queries.",
     "Multiple intents recognized. Processing in parallel.",
     "I see what you did there — multiple questions. Here you go.",
+    "GNSS integrity and quantum security? Two great topics in one query.",
+    "I detect compound intent: position check + system status. Processing both.",
+    "You asked about GNSS and templates. My RAIM module says: all clear.",
+    "Compound query detected: satellite tracking + memory status. Resolving.",
 );
 
 // ── Neural Plasticity / Nano-NN Training / Online Learning (23 variants) ──
@@ -1447,6 +1457,7 @@ pub fn fill_template(template: &str) -> String {
 
     // Nano-NN training placeholder
     rep!("{nano_train_steps}", crate::nano_nn::training_steps());
+    rep!("{sat_count}", crate::sensor_gnss::sats_tracked());
 
     // Crash recovery placeholders
     let crash_recovery = crate::crash_recovery::crash_summary();

@@ -130,6 +130,7 @@ pub mod llm_bridge;      // CI-5 userspace LLM daemon bridge
 pub mod boot_splash;     // Framebuffer boot splash & panic screen
 pub mod heap_monitor;    // Kernel heap monitoring & diagnostics
 pub mod crash_recovery;  // Self-healing panic snapshot / recovery
+pub mod sensor_gnss;     // GNSS RAIM integrity monitoring
 pub mod quantum;         // EW-6 Quantum Security — Steane [[7,1,3]] error correction
 
 /// Bootloader configuration — tells the bootloader to map all physical memory
@@ -364,6 +365,7 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     crate::sensor_doa::init();
     crate::sensor_immune::init();
     crate::sensor_emitter::init();
+    crate::sensor_gnss::init();
     crate::immune_counter::init();
     crate::immune_covert::init();
     crate::immune_heal::init();
@@ -442,6 +444,8 @@ fn idle_loop() -> ! {
             crate::quantum::tick();
             // Sensor emitter fingerprint tick (lightweight, scans every 50 ticks)
             crate::sensor_emitter::tick();
+            // GNSS RAIM integrity tick
+            crate::sensor_gnss::tick();
             // EW-5 swarm consciousness tick
             crate::swarm_consensus::tick(now);
             // EW sensory cortex — poll spectrum sensors every 100ms
