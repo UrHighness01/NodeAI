@@ -118,10 +118,11 @@ if [[ $NOGRAPHIC -eq 1 ]]; then
     echo "  Display: nographic (terminal = serial console)"
     echo "  Type commands directly. Press Ctrl+C to quit."
 elif [[ $GUI -eq 1 ]]; then
-    # SDL window for display, but keyboard goes to PS/2 (VGA), NOT serial.
-    # You can see output on serial but cannot type commands into the kernel.
-    QEMU_ARGS+=(-serial stdio -display sdl)
-    echo "  Display: SDL window (WARNING: keyboard goes to SDL, not serial shell)"
+    # SDL window: keyboard → PS/2 IRQ1 → kernel shell. Type commands in the SDL window.
+    # Serial output still goes to this terminal so you can see kernel logs.
+    QEMU_ARGS+=(-serial stdio -display sdl,grab-on-hover=off)
+    echo "  Display: SDL window — click the window to focus it, then type commands"
+    echo "  Serial logs appear in this terminal"
 else
     # Headless: serial routed to stdio, no window. Output visible, no typing.
     QEMU_ARGS+=(-serial stdio -display none -monitor unix:qemu-monitor.sock,server,nowait)
