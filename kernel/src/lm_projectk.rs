@@ -124,13 +124,14 @@ fn f32s<'a>(w: &'a [u8], mo: &MatOff) -> &'a [f32] {
     unsafe { core::slice::from_raw_parts(w[mo.p..].as_ptr() as *const f32, mo.cols) }
 }
 fn mv4(w: &[u8], m: &MatOff, x: &[f32], out: &mut [f32]) {
-    for i in 0..m.rows {
+    let xlen = x.len();
+    for i in 0..m.rows.min(out.len()) {
         let mut acc = 0.0;
         for g in 0..m.ng {
             let sc = f32::from_le_bytes([w[m.s+(i*m.ng+g)*4], w[m.s+(i*m.ng+g)*4+1], w[m.s+(i*m.ng+g)*4+2], w[m.s+(i*m.ng+g)*4+3]]);
             for k in 0..GROUP_SZ {
                 let col = g*GROUP_SZ+k;
-                if col >= m.cols { break; }
+                if col >= m.cols || col >= xlen { break; }
                 let byte = w[m.p+(i*m.np*2+g*GROUP_SZ+k)/2];
                 let nib = if (g*GROUP_SZ+k)%2==0 { byte & 0x0F } else { (byte>>4)&0x0F };
                 let q = if nib>=8 { nib as i32-16 } else { nib as i32 };
@@ -201,7 +202,7 @@ fn forward(e: &ModelFlat, tokens: &[u16]) {
         }
     }
 
-    let mut res = emb[ctx-1];
+    let mut res = if ctx > 0 { emb[ctx-1] } else { [0.0f32; D] };
     let mut fs = [0.0; DH0]; let mut ms = [0.0; DH1];
     let mut fo = [0.0; D]; let mut mo = [0.0; D];
 
