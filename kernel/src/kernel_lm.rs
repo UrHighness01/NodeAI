@@ -448,9 +448,17 @@ pub fn generate_response(query: &str, _max_words: usize) -> String {
             let cleaned = neural.trim().to_string();
             // Accept any non-empty neural output (≥2 chars filters bare "?" artifacts)
             if !cleaned.is_empty() && cleaned.len() > 2 {
+                crate::klog!(INFO, "kernel_lm: neural response ({}B) for '{}' — '{}'", 
+                    cleaned.len(), query.chars().take(20).collect::<String>(), 
+                    cleaned.chars().take(60).collect::<String>());
                 crate::lm_memory::record(query, &cleaned);
                 return cleaned;
             }
+            crate::klog!(INFO, "kernel_lm: neural generated '{}' but too short ({}B), falling back", 
+                cleaned, cleaned.len());
+        } else {
+            crate::klog!(INFO, "kernel_lm: neural generate() returned None for '{}'", 
+                query.chars().take(30).collect::<String>());
         }
     }
 
