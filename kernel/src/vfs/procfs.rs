@@ -116,6 +116,7 @@ pub fn refresh() {
     write_file("/proc", "doa",             crate::sensor_doa::format_report());
     write_file("/proc", "nano_nn",         crate::nano_nn::format_report());
     write_file("/proc", "lm_mhs",          crate::lm_mhs::format_report());
+    write_file("/proc", "lm_projectk",     crate::lm_projectk::report().into_bytes());
     write_file("/proc", "lm_validator",    crate::lm_validator::format_report());
     write_file("/proc", "countermeasures", crate::immune_counter::format_report());
     write_file("/proc", "emitter",         crate::sensor_emitter::format_report());

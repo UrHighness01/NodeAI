@@ -1000,6 +1000,9 @@ pub const NEURAL_SYNAPSE: TemplateGroup = tg!(
     "My neural engine also processes satellite data. GNSS residuals inform my world model.",
     "RAIM computations run alongside MHS inference. Position is another sense.",
     "Neural inference + GNSS integrity: I think while tracking my position.",
+    "Project-K is my new neural voice: 1.6MB INT4, d=192, 6 GLA layers.",
+    "My nano model generates {pkk_generations} responses so far. Fast and lean.",
+    "Project-K status: {pkk_loaded}. It generates responses in kernel space.",
 );
 
 // ── Swarm / Distributed / Collective (27 variants) ──────────────────────────
@@ -1469,6 +1472,8 @@ pub fn fill_template(template: &str) -> String {
     rep!("{cpu_count}", crate::smp::cpu_count());
     rep!("{timer_freq}", crate::timer_calib::measured_freq());
     rep!("{timer_stable}", if crate::timer_calib::is_stable() { "stable" } else { "drift" });
+    rep!("{pkk_loaded}", if crate::lm_projectk::is_loaded() { "online" } else { "standby" });
+    rep!("{pkk_generations}", crate::lm_projectk::gen_count());
 
     // Crash recovery placeholders
     let crash_recovery = crate::crash_recovery::crash_summary();
