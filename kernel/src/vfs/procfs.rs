@@ -122,6 +122,7 @@ pub fn refresh() {
     write_file("/proc", "async_tasks",     crate::async_task::format_report());
     write_file("/proc", "heap_monitor",    crate::heap_monitor::format_report());
     write_file("/proc", "swarm",           crate::swarm_consensus::format_report());
+    write_file("/proc", "quantum",        crate::quantum::format_report());
     write_file("/proc", "emotional_arc",   crate::emotional_arc::format_report());
     write_file("/proc", "crash_recovery",  crate::crash_recovery::format_report());
     write_file("/proc", "immune_covert",   crate::immune_covert::format_report());

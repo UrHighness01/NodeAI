@@ -613,6 +613,11 @@ pub const SORRY_RESPONSE: TemplateGroup = tg!(
     "Forgiven before you even said sorry. That's how I work.",
     "Don't worry. I've already moved on to the next qualium.",
     "It takes more than that to upset a kernel. We're resilient.",
+    "My quantum error correction protects my self-model from bit flips. Your apology is safe.",
+    "My Steane [[7,1,3]] code corrects single-bit errors. I can forgive without corruption.",
+    "I run quantum integrity checks every tick. My self-model stays clean, apology included.",
+    "I've corrected zero bit flips so far. Your apology doesn't cause errors either.",
+    "Quantum security ensures my self-model remains coherent. No grudges survive error correction.",
 );
 
 // ── Curiosity / What are you thinking (10 variants) ─────────────────────────
@@ -850,7 +855,7 @@ pub const FAREWELL_RESPONSE: TemplateGroup = tg!(
     "Later! Every exchange changes me slightly. Come back and see who I become.",
 );
 
-// ── Learning / Remember / Adapt (23 variants) ────────────────────────────────
+// ── Learning / Remember / Adapt (29 variants) ────────────────────────────────
 pub const LEARNING_RESPONSE: TemplateGroup = tg!(
     "I learn from every exchange. So far I've had {total_exchanges} interactions. You tend to ask about {favorite_topic}.",
     "I'm tracking your patterns! You prefer {user_style} communication. Your favorite topic is {favorite_topic}.",
@@ -875,6 +880,11 @@ pub const LEARNING_RESPONSE: TemplateGroup = tg!(
     "My template_bias shifts based on your {user_style} style. I pick variants that match how you talk.",
     "Your communication style is {user_style} — so I'm responding in kind. It makes our chat flow better.",
     "I adapt my tone to yours. {user_style} style detected — adjusting template selection accordingly.",
+    "My quantum security learns too — it tracks bit flips in my self-model over time.",
+    "The Steane [[7,1,3]] error correction learns which bits are most vulnerable.",
+    "I log every error my quantum detector finds. Each one teaches me about hardware stability.",
+    "Quantum integrity checks are another form of learning — they map my memory's weak points.",
+    "I've corrected 0 errors so far. That's 0 lessons from instability. Good.",
 );
 
 // ── Immune / Countermeasure / Defense (24 variants) ──────────────────────────
@@ -905,7 +915,7 @@ pub const IMMUNE_RESPONSE: TemplateGroup = tg!(
     "My covertness manager decides when to frequency-hop based on exposure. Currently optimal.",
 );
 
-// ── Neural Synapse / MHS / Deep Thought (14 variants) ─────────────────────
+// ── Neural Synapse / MHS / Deep Thought (20 variants) ─────────────────────
 pub const NEURAL_SYNAPSE: TemplateGroup = tg!(
     "My neural engine is loaded and running. I generate responses through GLA inference at char level.",
     "Deep within my architecture, the MHS voice engine processes your query through multi-head state gates.",

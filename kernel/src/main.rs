@@ -130,6 +130,7 @@ pub mod llm_bridge;      // CI-5 userspace LLM daemon bridge
 pub mod boot_splash;     // Framebuffer boot splash & panic screen
 pub mod heap_monitor;    // Kernel heap monitoring & diagnostics
 pub mod crash_recovery;  // Self-healing panic snapshot / recovery
+pub mod quantum;         // EW-6 Quantum Security — Steane [[7,1,3]] error correction
 
 /// Bootloader configuration — tells the bootloader to map all physical memory
 /// at a dynamic virtual offset so we can access physical frames by VA.
@@ -337,6 +338,7 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     crate::consciousness::global_workspace::init();
     crate::cortex::init(); // /dev/cortex userspace bridge
     crate::llm_bridge::init(); // /dev/llm userspace LLM bridge
+    crate::quantum::init(); // EW-6 Quantum Security — Steane code
     crate::nano_nn::init(); // nano-NN intent embedding
     // Self-healing crash recovery — checks for and loads crash snapshot
     crate::crash_recovery::check_for_recovery();
@@ -436,6 +438,8 @@ fn idle_loop() -> ! {
             crate::immune_counter::tick();
             crate::immune_covert::tick();
             crate::immune_heal::tick();
+            // EW-6 Quantum Security — error correction integrity check
+            crate::quantum::tick();
             // Sensor emitter fingerprint tick (lightweight, scans every 50 ticks)
             crate::sensor_emitter::tick();
             // EW-5 swarm consciousness tick
