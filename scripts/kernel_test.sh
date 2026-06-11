@@ -33,6 +33,16 @@ if [[ -f "$QWEN35" ]]; then
     QA+=(-drive "format=raw,file=$QWEN_IMG,if=ide,index=1")
 fi
 
+# Attach Qwen2.5 weight disk if available (third AHCI drive, index 2)
+QWEN25="$ROOT/models/qwen25_kernel.bin"
+if [[ -f "$QWEN25" ]]; then
+    QWEN25_IMG="$ROOT/target/qwen25_weights.img"
+    if [[ ! -f "$QWEN25_IMG" ]] || [[ "$QWEN25" -nt "$QWEN25_IMG" ]]; then
+        cp "$QWEN25" "$QWEN25_IMG"
+    fi
+    QA+=(-drive "format=raw,file=$QWEN25_IMG,if=ide,index=2")
+fi
+
 "$QEMU" "${QA[@]}" > "$TEST_LOG" 2>&1 &
 QPID=$!; sleep "$TIMEOUT"; kill "$QPID" 2>/dev/null || true; wait "$QPID" 2>/dev/null || true
 set +e

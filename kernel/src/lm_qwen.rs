@@ -497,11 +497,10 @@ fn read_f32_vec(data: &[u8], off: &mut usize, n: usize) -> Option<Vec<f32>> {
 
 // ── Init ──────────────────────────────────────────────────────────────────────
 
-/// Load Qwen weights from the second QEMU drive (device index 1) at boot time.
-/// This is spawned as a background kernel task; generation falls back to templates
-/// until LOADED becomes true.
+/// Load Qwen weights from QEMU drive (index 2) at boot time.
+/// Uses drive 2 to avoid conflict with Qwen3.5 on drive 1.
 pub fn init() {
-    match crate::storage::read_all(1) {
+    match crate::storage::read_all(2) {
         Ok(data) => {
             crate::klog!(INFO, "qwen: read {} MB from weight disk, parsing...",
                 data.len() / 1024 / 1024);

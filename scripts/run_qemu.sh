@@ -186,6 +186,27 @@ else
     echo "    Run: python3 scripts/convert_qwen35_kernel.py"
 fi
 
+# Qwen2.5 weight disk (third AHCI drive, index 2 — fallback voice)
+QWEN25_BIN="${ROOT}/models/qwen25_kernel.bin"
+QWEN25_IMG="${ROOT}/target/qwen25_weights.img"
+if [[ -f "$QWEN25_BIN" ]]; then
+    if [[ ! -f "$QWEN25_IMG" ]] || [[ "$QWEN25_BIN" -nt "$QWEN25_IMG" ]]; then
+        echo "  Building Qwen2.5 weight disk image..."
+        cp "$QWEN25_BIN" "$QWEN25_IMG"
+        size=$(stat -c %s "$QWEN25_IMG")
+        pad=$(( (512 - size % 512) % 512 ))
+        if [[ $pad -gt 0 ]]; then
+            dd if=/dev/zero bs=1 count=$pad >> "$QWEN25_IMG" 2>/dev/null
+        fi
+    fi
+    QWEN25_SIZE=$(stat -c %s "$QWEN25_IMG")
+    QEMU_ARGS+=(-drive "format=raw,file=$QWEN25_IMG,if=ide,index=2")
+    echo "  Qwen2.5: weight disk attached ($((QWEN25_SIZE / 1048576))MB)"
+else
+    echo "  Qwen2.5: weight binary not found at $QWEN25_BIN — fallback unavailable"
+    echo "    Run: python3 scripts/convert_qwen_kernel.py"
+fi
+
 if [[ $WIFI -eq 1 ]]; then
     # USB passthrough for AR9271 WiFi dongle (TP-Link TL-WN722N v1 or similar)
     # Requires the dongle plugged into the host and user in 'plugdev' group:
