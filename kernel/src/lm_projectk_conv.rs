@@ -28,6 +28,11 @@ const MLP_D: usize = 768; const MAX_GEN: usize = 80; const CTX_WIN: usize = 20;
 const TOP_K: usize = 40; const TEMP: f32 = 0.80;
 const GROUP_SZ: usize = 64;
 const S_LOG: usize = 432; const SCR_SZ: usize = S_LOG + 4539;
+// Forward-pass working buffers kept on the heap (model is Box<ModelFlat>).
+// Task stack is only 16KB; forward() alone needs ~37KB of temporaries.
+const FWD_EMB: usize  = CTX_WIN * D;   // emb + x context window (×2 = two copies)
+const FWD_MLP: usize  = MLP_D;         // fc_out
+const FWD_MISC: usize = D + D + DH0 + DH1 + 144 + 64; // pr_out,out0,out1,st0,st1,qv,hv
 
 #[derive(Clone, Copy, Default)]
 struct MatOff { p: usize, s: usize, rows: usize, cols: usize, ng: usize, np: usize }
@@ -44,6 +49,10 @@ struct ModelFlat {
     blk_pr: [MatOff; 6], blk_prb: [MatOff; 6],
     lnf_w: MatOff, lnf_b: MatOff,
     scratch: [f32; SCR_SZ], rng: AtomicU64,
+    // Heap-resident forward-pass buffers — avoids stack overflow on 16KB task stack
+    fwd_emb: Box<[f32; FWD_EMB]>,  // embedding context window
+    fwd_x:   Box<[f32; FWD_EMB]>,  // residual stream
+    fwd_mlp: Box<[f32; FWD_MLP]>,  // MLP hidden layer (fc_out)
 }
 
 static ENGINE: Once<Box<ModelFlat>> = Once::new();
@@ -125,6 +134,9 @@ pub fn init() {
             blk_fc, blk_fcb, blk_pr, blk_prb,
             lnf_w, lnf_b,
             scratch: [0.0; SCR_SZ], rng: AtomicU64::new(0),
+            fwd_emb: Box::new([0.0; FWD_EMB]),
+            fwd_x:   Box::new([0.0; FWD_EMB]),
+            fwd_mlp: Box::new([0.0; FWD_MLP]),
         }));
         LOADED.store(true, Ordering::Release);
         crate::klog!(INFO, "lm_projectk_conv: conversational model online ({} KB)", wlen/1024);
@@ -198,8 +210,15 @@ fn gla(e: &ModelFlat, bi: usize, hi: usize, dh: usize, x: &[[f32; D]; CTX_WIN],
 fn forward(e: &ModelFlat, tokens: &[u16]) {
     let ctx = tokens.len().min(CTX_WIN);
     let ts = tokens.len().saturating_sub(ctx);
-    let mut emb = [[0.0f32; D]; CTX_WIN];
     let w = &e.w; let mo = &e.emb;
+
+    // Use heap-resident buffers (flat [f32; CTX_WIN*D]) to avoid stack overflow.
+    // Treat as 2-D: row ti, col c → index ti*D + c.
+    let emb_buf = unsafe { &mut *(e.fwd_emb.as_ptr() as *mut [f32; FWD_EMB]) };
+    let x_buf   = unsafe { &mut *(e.fwd_x.as_ptr()   as *mut [f32; FWD_EMB]) };
+    let fc_buf  = unsafe { &mut *(e.fwd_mlp.as_ptr()  as *mut [f32; FWD_MLP]) };
+
+    for v in emb_buf.iter_mut() { *v = 0.0; }
     for (ti, &tok) in tokens[ts..].iter().enumerate() {
         let row = (tok as usize).min(VOCAB-1);
         for g in 0..mo.ng {
@@ -211,42 +230,45 @@ fn forward(e: &ModelFlat, tokens: &[u16]) {
                 let byte = w[mo.p+(row*mo.np*2+g*GROUP_SZ+k)/2];
                 let nib = if (g*GROUP_SZ+k)%2==0 { byte&0x0F } else { (byte>>4)&0x0F };
                 let q = if nib>=8 { nib as i32-16 } else { nib as i32 };
-                emb[ti][col] = q as f32 * sc;
+                emb_buf[ti*D+col] = q as f32 * sc;
             }
         }
     }
+    x_buf[..FWD_EMB].copy_from_slice(emb_buf);
 
     // Block forward — reuse scratch
     let scr = unsafe { &mut *(e.scratch.as_ptr() as *mut [f32; SCR_SZ]) };
     let (log_buf, rest) = scr.split_at_mut(S_LOG);
     let logits = &mut rest[..VOCAB];
 
-    let mut x = emb;
+    // gla expects &[[f32;D]; CTX_WIN] — reinterpret flat buffer
+    let x2d = unsafe { &*(x_buf.as_ptr() as *const [[f32; D]; CTX_WIN]) };
+
     for bi in 0..N_LAYERS {
         let ln1w = f32s(w, &e.blk_ln1w[bi]); let ln1b = f32s(w, &e.blk_ln1b[bi]);
         let ln2w = f32s(w, &e.blk_ln2w[bi]); let ln2b = f32s(w, &e.blk_ln2b[bi]);
-        let mut h = x[ctx-1];
+        let mut h = x2d[ctx-1];
         lnorm(&mut h, ln1w, ln1b);
 
         let mut out0 = [0.0f32; D]; let mut out1 = [0.0f32; D];
         let mut st0 = [0.0f32; DH0]; let mut st1 = [0.0f32; DH1];
-        gla(e, bi, 0, DH0, &x, ctx, &mut st0, &mut out0);
-        gla(e, bi, 1, DH1, &x, ctx, &mut st1, &mut out1);
-        for i in 0..D { x[ctx-1][i] += out0[i] + out1[i]; }
+        gla(e, bi, 0, DH0, x2d, ctx, &mut st0, &mut out0);
+        gla(e, bi, 1, DH1, x2d, ctx, &mut st1, &mut out1);
+        for i in 0..D { x_buf[(ctx-1)*D+i] += out0[i] + out1[i]; }
 
-        let mut h2 = x[ctx-1];
+        let mut h2 = x2d[ctx-1];
         lnorm(&mut h2, ln2w, ln2b);
         let fc_w = f32s(w, &e.blk_fcb[bi]); let pr_b = f32s(w, &e.blk_prb[bi]);
-        let mut fc_out = [0.0f32; 768];
-        mv4_out(w, &e.blk_fc[bi], &h2, &mut fc_out);
-        for i in 0..MLP_D { fc_out[i] = gelu(fc_out[i] + fc_w[i]); }
+        for v in fc_buf.iter_mut() { *v = 0.0; }
+        mv4_out(w, &e.blk_fc[bi], &h2, fc_buf);
+        for i in 0..MLP_D { fc_buf[i] = gelu(fc_buf[i] + fc_w[i]); }
         let mut pr_out = [0.0f32; D];
-        mv4_out(w, &e.blk_pr[bi], &fc_out, &mut pr_out);
-        for i in 0..D { x[ctx-1][i] += pr_out[i] + pr_b[i]; }
+        mv4_out(w, &e.blk_pr[bi], fc_buf, &mut pr_out);
+        for i in 0..D { x_buf[(ctx-1)*D+i] += pr_out[i] + pr_b[i]; }
     }
 
     let lnfw = f32s(w, &e.lnf_w); let lnfb = f32s(w, &e.lnf_b);
-    let mut last = x[ctx-1];
+    let mut last = x2d[ctx-1];
     lnorm(&mut last, lnfw, lnfb);
     for o in logits[..VOCAB].iter_mut() { *o = 0.0; }
     mv4(w, &e.emb, &last, logits); // weight-tied head
