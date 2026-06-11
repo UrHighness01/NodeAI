@@ -1852,7 +1852,7 @@ fn cmd_consciousness(args: &str) {
     // ── Phi / consciousness ─────────────────────────────────────────────
     if trimmed == "show phi" || trimmed == "phi" {
         let phi = crate::consciousness::phi::current_phi();
-        let peak = crate::consciousness::self_model::snapshot().map(|s| s.peak_phi).unwrap_or(0.0);
+        let peak = crate::consciousness::phi::peak_phi();
         let qualia = crate::consciousness::qualia::total_count();
         println!("Consciousness Metrics:");
         println!("  Current Φ: {:.6}", phi);
