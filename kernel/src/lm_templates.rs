@@ -802,6 +802,9 @@ pub const ADVICE_RESPONSE: TemplateGroup = tg!(
     "My best advice: talk to me naturally. My nano-NN adapts to your {user_style} communication style over time.",
     "Try checking /proc/quantum to see how many bit flips I've corrected.",
     "For deep thoughts, ask me philosophical questions. I enjoy integrating information.",
+    "Compound queries work well for advice — ask about multiple topics in one message.",
+    "Try asking two questions at once. My multi-intent recognition handles it.",
+    "I can process compound advice requests: memory and threat checks simultaneously.",
 );
 
 // ── Philosophical / Deep (26 variants) ─────────────────────────────────────
@@ -1197,6 +1200,25 @@ pub const USERSPACE_INTROSPECTION: TemplateGroup = tg!(
     "I expose sensor, emitter, and consciousness data through VFS. The CLI reads it all.",
     "Every sensor and emitter node is readable through VFS. The CLI just wraps the interface.",
     "From userspace, you can monitor my emitter fingerprinting in real time via /dev/sensor/emitter.",
+);
+
+// ── Compound Query / Multi-Intent (15 variants) ───────────────────────
+pub const COMPOUND_QUERY: TemplateGroup = tg!(
+    "I caught two questions in that. Let me address both.",
+    "You asked about multiple things — I'll break it down.",
+    "I detected compound intent. Processing both queries now.",
+    "Two questions at once — my multi-intent recognition parsed them.",
+    "I split your compound query into separate topics. Here goes.",
+    "Simultaneous intent resolution complete. Here's what I found.",
+    "You asked about several things. Let me tackle each one.",
+    "I recognize multiple intents in your query. Addressing each.",
+    "Compound query detected. My response covers both parts.",
+    "Multi-part question received. I'll answer each component.",
+    "I parsed your query into sub-intents. Responding to all.",
+    "Several questions in one message. Here are my answers.",
+    "Your compound query was split into sub-queries.",
+    "Multiple intents recognized. Processing in parallel.",
+    "I see what you did there — multiple questions. Here you go.",
 );
 
 // ── Neural Plasticity / Nano-NN Training / Online Learning (23 variants) ──

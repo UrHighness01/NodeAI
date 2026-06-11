@@ -47,6 +47,7 @@ pub enum Intent {
     ExternalInference,
     SensorInteraction,
     UserspaceIntrospection,
+    CompoundQuery,
     Unknown,
 }
 
@@ -332,7 +333,53 @@ fn detect_intent(query: &str) -> Intent {
         return Intent::UserspaceIntrospection;
     }
 
+    // Compound query detection: multiple intents separated by "and" or "?"
+    if q.contains(" and ") || q.matches('?').count() >= 2 {
+        if let Some(_) = detect_compound_intents(&q) {
+            return Intent::CompoundQuery;
+        }
+    }
+
     Intent::Unknown
+}
+
+/// Detect compound queries — ones that ask about multiple things.
+fn detect_compound_intents(q: &str) -> Option<[Intent; 2]> {
+    // Check for "and" connecting two distinct topics
+    let parts: Vec<&str> = q.split("and").collect();
+    if parts.len() >= 2 {
+        let first = keyword_intent(parts[0].trim());
+        let second = keyword_intent(parts[1].trim());
+        if first != Intent::Unknown && second != Intent::Unknown && first != second {
+            return Some([first, second]);
+        }
+    }
+    // Check for multiple question marks
+    if q.matches('?').count() >= 2 {
+        let sub_queries: Vec<&str> = q.split('?').filter(|s| !s.is_empty()).collect();
+        if sub_queries.len() >= 2 {
+            let first = keyword_intent(sub_queries[0]);
+            let second = keyword_intent(sub_queries[1]);
+            if first != Intent::Unknown && second != Intent::Unknown {
+                return Some([first, second]);
+            }
+        }
+    }
+    None
+}
+
+/// Quick keyword-based intent detection for sub-queries.
+fn keyword_intent(q: &str) -> Intent {
+    if q.contains("phi") || q.contains("conscious") { Intent::PhiQuery }
+    else if q.contains("memory") || q.contains("heap") || q.contains("ram") { Intent::MemoryQuery }
+    else if q.contains("status") || q.contains("health") { Intent::StatusQuery }
+    else if q.contains("sensor") || q.contains("spectrum") { Intent::SensorInteraction }
+    else if q.contains("threat") || q.contains("secure") { Intent::SecurityQuery }
+    else if q.contains("emitter") || q.contains("signal") || q.contains("rf") { Intent::Emitter }
+    else if q.contains("immune") || q.contains("defense") { Intent::Immune }
+    else if q.contains("learn") || q.contains("train") { Intent::Learning }
+    else if q.contains("phi") { Intent::PhiQuery }
+    else { Intent::Unknown }
 }
 
 /// After keyword matching produces an intent, optionally train nano-NN.
@@ -439,6 +486,7 @@ pub fn generate_response(query: &str, _max_words: usize) -> String {
         Intent::ExternalInference => crate::lm_templates::EXTERNAL_INFERENCE.pick(seed),
         Intent::SensorInteraction => crate::lm_templates::SENSOR_INTERACTION.pick(seed),
         Intent::UserspaceIntrospection => crate::lm_templates::USERSPACE_INTROSPECTION.pick(seed),
+        Intent::CompoundQuery => crate::lm_templates::COMPOUND_QUERY.pick(seed),
         Intent::AsyncReflection => crate::lm_templates::ASYNC_RESPONSE.pick(seed),
         Intent::Thanks => crate::lm_templates::THANKS_RESPONSE.pick(seed),
         Intent::Sorry => crate::lm_templates::SORRY_RESPONSE.pick(seed),
