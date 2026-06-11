@@ -274,10 +274,11 @@ pub fn generate(prompt: &str) -> Option<String> {
     if !LOADED.load(Ordering::Acquire) { return None; }
     let e = ENGINE.get()?;
 
-    // Encode prompt as-is — model is character-level, just feed the raw text
+    // Wrap as conversational turn so model completes in Q&A register, not code
+    let wrapped = format!("User: {}\nNodeAI: ", prompt.trim());
     let mut toks: Vec<u16> = Vec::with_capacity(64);
     toks.push(3); // BOS
-    for ch in prompt.chars() {
+    for ch in wrapped.chars() {
         let cp = ch as u32;
         if let Ok(idx) = PKK_CP2TOK.binary_search_by_key(&cp, |x| x.0) {
             toks.push(PKK_CP2TOK[idx].1);
