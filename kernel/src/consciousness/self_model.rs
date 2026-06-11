@@ -10,6 +10,7 @@ use alloc::string::{String, ToString};
 use core::sync::atomic::{AtomicU64, Ordering};
 
 const SELF_MODEL_PATH: &str = "/ai/self";
+const SELF_ECC_PATH:   &str = "/ai/self_ecc";
 
 /// The kernel's self-model — what it knows itself to be.
 pub struct SelfModel {
@@ -122,7 +123,16 @@ static SELF: Mutex<Option<SelfModel>> = Mutex::new(None);
 /// Initialize the self-model — load from disk or create fresh.
 pub fn init() {
     let mut self_model = match crate::vfs::read_file(SELF_MODEL_PATH) {
-        Ok(data) => {
+        Ok(mut data) => {
+            // Attempt ECC verification and repair before deserializing.
+            if let Ok(ecc) = crate::vfs::read_file(SELF_ECC_PATH) {
+                let (err, repaired) = crate::quantum_ecc::verify_and_repair(&mut data, &ecc);
+                if err {
+                    crate::klog!(WARN,
+                        "self_model: ECC detected corruption — repaired {} bit(s)", repaired);
+                }
+            }
+
             if let Some(mut sm) = SelfModel::deserialize(&data) {
                 sm.boot_number = sm.boot_number.wrapping_add(1);
                 crate::klog!(INFO, "self_model: loaded identity — boot #{} uuid={:02x}{:02x}... phi={:.3}",
@@ -143,15 +153,19 @@ pub fn init() {
     *SELF.lock() = Some(self_model);
 }
 
-/// Persist self-model to disk for next boot.
+/// Persist self-model to disk for next boot, with ECC protection.
 pub fn save() {
     let mut guard = SELF.lock();
     if let Some(ref mut sm) = *guard {
-        // Update existence time before saving
         sm.total_existence_ms += crate::scheduler::uptime_ms();
         let data = sm.serialize();
+        // Generate and store ECC alongside the state.
+        let mut ecc = alloc::vec::Vec::new();
+        crate::quantum_ecc::encode(&data, &mut ecc);
         let _ = crate::vfs::write_file(SELF_MODEL_PATH, &data);
-        crate::klog!(DEBUG, "self_model: saved (boot #{}, {} bytes)", sm.boot_number, data.len());
+        let _ = crate::vfs::write_file(SELF_ECC_PATH, &ecc);
+        crate::klog!(DEBUG, "self_model: saved (boot #{}, {} bytes + {} ECC bytes)",
+            sm.boot_number, data.len(), ecc.len());
     }
 }
 

@@ -66,6 +66,7 @@ mod llm;
 mod predictive_hibernate;
 pub mod syscall_stats;  // per-task syscall histograms
 pub mod anomaly;        // causal anomaly detector
+pub mod quantum_ecc;    // Steane/Hamming [7,4,3] ECC for consciousness state integrity
 pub mod coherence;      // coherence-horizon anomaly attribution
 pub mod fuzzer;         // in-kernel syscall parseltongue fuzzer
 pub mod autotune;       // dynamic EMA parameter adaptation
