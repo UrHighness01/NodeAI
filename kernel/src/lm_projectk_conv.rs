@@ -50,9 +50,9 @@ struct ModelFlat {
     lnf_w: MatOff, lnf_b: MatOff,
     scratch: [f32; SCR_SZ], rng: AtomicU64,
     // Heap-resident forward-pass buffers — avoids stack overflow on 16KB task stack
-    fwd_emb: Box<[f32; FWD_EMB]>,  // embedding context window
-    fwd_x:   Box<[f32; FWD_EMB]>,  // residual stream
-    fwd_mlp: Box<[f32; FWD_MLP]>,  // MLP hidden layer (fc_out)
+    fwd_emb: Vec<f32>,  // embedding context window (CTX_WIN*D)
+    fwd_x:   Vec<f32>,  // residual stream (CTX_WIN*D)
+    fwd_mlp: Vec<f32>,  // MLP hidden layer (MLP_D)
 }
 
 static ENGINE: Once<Box<ModelFlat>> = Once::new();
@@ -134,9 +134,9 @@ pub fn init() {
             blk_fc, blk_fcb, blk_pr, blk_prb,
             lnf_w, lnf_b,
             scratch: [0.0; SCR_SZ], rng: AtomicU64::new(0),
-            fwd_emb: Box::new([0.0; FWD_EMB]),
-            fwd_x:   Box::new([0.0; FWD_EMB]),
-            fwd_mlp: Box::new([0.0; FWD_MLP]),
+            fwd_emb: alloc::vec![0.0f32; FWD_EMB],
+            fwd_x:   alloc::vec![0.0f32; FWD_EMB],
+            fwd_mlp: alloc::vec![0.0f32; FWD_MLP],
         }));
         LOADED.store(true, Ordering::Release);
         crate::klog!(INFO, "lm_projectk_conv: conversational model online ({} KB)", wlen/1024);
@@ -212,11 +212,18 @@ fn forward(e: &ModelFlat, tokens: &[u16]) {
     let ts = tokens.len().saturating_sub(ctx);
     let w = &e.w; let mo = &e.emb;
 
-    // Use heap-resident buffers (flat [f32; CTX_WIN*D]) to avoid stack overflow.
-    // Treat as 2-D: row ti, col c → index ti*D + c.
-    let emb_buf = unsafe { &mut *(e.fwd_emb.as_ptr() as *mut [f32; FWD_EMB]) };
-    let x_buf   = unsafe { &mut *(e.fwd_x.as_ptr()   as *mut [f32; FWD_EMB]) };
-    let fc_buf  = unsafe { &mut *(e.fwd_mlp.as_ptr()  as *mut [f32; FWD_MLP]) };
+    // Use heap-resident Vec buffers to avoid stack overflow on 16KB task stack.
+    // Treat flat [CTX_WIN*D] as 2-D: row ti, col c → index ti*D + c.
+    // Single-threaded kernel — safe to alias through *mut via same pattern as scratch.
+    let emb_buf: &mut [f32] = unsafe {
+        core::slice::from_raw_parts_mut(e.fwd_emb.as_ptr() as *mut f32, FWD_EMB)
+    };
+    let x_buf: &mut [f32] = unsafe {
+        core::slice::from_raw_parts_mut(e.fwd_x.as_ptr() as *mut f32, FWD_EMB)
+    };
+    let fc_buf: &mut [f32] = unsafe {
+        core::slice::from_raw_parts_mut(e.fwd_mlp.as_ptr() as *mut f32, FWD_MLP)
+    };
 
     for v in emb_buf.iter_mut() { *v = 0.0; }
     for (ti, &tok) in tokens[ts..].iter().enumerate() {
@@ -342,5 +349,24 @@ pub fn generate(prompt: &str) -> Option<String> {
         if toks.len() > CTX_WIN { toks.remove(0); }
     }
     GEN_COUNT.fetch_add(1, Ordering::Relaxed);
-    if out.trim().is_empty() { None } else { Some(out.trim().to_string()) }
+    let trimmed = out.trim();
+    if trimmed.is_empty() { return None; }
+
+    // Quality gate: reject garbage kernel-code output.
+    // Good conversational text is >40% alphabetic and has spaces.
+    // Bad model output looks like: "=1x {key modio_fore_cor" or "****builliow=0.Ma"
+    let total = trimmed.len().max(1);
+    let alpha = trimmed.chars().filter(|c| c.is_alphabetic()).count();
+    let spaces = trimmed.chars().filter(|&c| c == ' ').count();
+    let code_chars = trimmed.chars().filter(|&c| matches!(c, '_'|'='|'{'|'}'|'('|')'|'*'|'<'|'>'|'/'|'\\'|'['|']'|'#'|'@'|'`'|';')).count();
+    let alpha_ratio = alpha as f32 / total as f32;
+    let code_ratio = code_chars as f32 / total as f32;
+    let has_space = spaces > 0 || total < 12;
+
+    if alpha_ratio < 0.45 || code_ratio > 0.20 || !has_space {
+        crate::klog!(DEBUG, "lm_conv: quality gate rejected output (alpha={:.2} code={:.2})", alpha_ratio, code_ratio);
+        return None;
+    }
+
+    Some(trimmed.to_string())
 }
