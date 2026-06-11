@@ -143,6 +143,7 @@ pub fn record_interaction(intent: Intent, query: &str) {
             state.follow_up_tendency = state.follow_up_tendency.saturating_sub(1);
         }
     }
+    crate::persistence::mark_dirty();
 }
 
 /// Get template selection bias — adjusts hash seed to prefer templates
@@ -296,6 +297,61 @@ pub fn session_exchanges() -> u16 {
 /// Get total exchange count across all sessions.
 pub fn total_exchanges() -> u64 {
     LEARNER.lock().total_exchanges
+}
+
+/// Export learner state for persistence.
+pub fn export_state() -> Option<Vec<u8>> {
+    let state = LEARNER.lock();
+    let mut buf = Vec::with_capacity(128);
+    // Format: intent_counters (33*u16), total_exchanges (u64), session_exchanges (u16),
+    //         avg_query_len (u16), query_len_samples (u16), recent_intents (16*u8),
+    //         recent_idx (u8), prefers_short (u8), follow_up_tendency (u8)
+    for &c in state.intent_counters.iter() { buf.extend_from_slice(&c.to_le_bytes()); }
+    buf.extend_from_slice(&state.total_exchanges.to_le_bytes());
+    buf.extend_from_slice(&state.session_exchanges.to_le_bytes());
+    buf.extend_from_slice(&state.avg_query_len.to_le_bytes());
+    buf.extend_from_slice(&state.query_len_samples.to_le_bytes());
+    buf.extend_from_slice(&state.recent_intents);
+    buf.push(state.recent_idx);
+    buf.push(if state.prefers_short { 1 } else { 0 });
+    buf.push(state.follow_up_tendency);
+    Some(buf)
+}
+
+/// Import learner state from persistence.
+pub fn import_state(data: &[u8]) {
+    let expected = 33*2 + 8 + 2 + 2 + 2 + 16 + 1 + 1 + 1;
+    if data.len() < expected { return; }
+    let mut pos = 0;
+    let mut intent_counters = [0u16; INTENT_COUNT];
+    for c in intent_counters.iter_mut() {
+        *c = u16::from_le_bytes([data[pos], data[pos+1]]);
+        pos += 2;
+    }
+    let total_exchanges = u64::from_le_bytes([
+        data[pos], data[pos+1], data[pos+2], data[pos+3],
+        data[pos+4], data[pos+5], data[pos+6], data[pos+7]
+    ]);
+    pos += 8;
+    let session_exchanges = u16::from_le_bytes([data[pos], data[pos+1]]); pos += 2;
+    let avg_query_len = u16::from_le_bytes([data[pos], data[pos+1]]); pos += 2;
+    let query_len_samples = u16::from_le_bytes([data[pos], data[pos+1]]); pos += 2;
+    let mut recent_intents = [0u8; 16];
+    recent_intents.copy_from_slice(&data[pos..pos+16]); pos += 16;
+    let recent_idx = data[pos]; pos += 1;
+    let prefers_short = data[pos] != 0; pos += 1;
+    let follow_up_tendency = data[pos];
+
+    let mut state = LEARNER.lock();
+    state.intent_counters = intent_counters;
+    state.total_exchanges = total_exchanges;
+    state.session_exchanges = session_exchanges;
+    state.avg_query_len = avg_query_len;
+    state.query_len_samples = query_len_samples;
+    state.recent_intents = recent_intents;
+    state.recent_idx = recent_idx;
+    state.prefers_short = prefers_short;
+    state.follow_up_tendency = follow_up_tendency;
 }
 
 /// Format /proc/lm_learner report.

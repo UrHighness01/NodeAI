@@ -199,6 +199,48 @@ pub fn trend() -> EmotionalTrend {
     }
 }
 
+/// Export all emotional samples for persistence.
+pub fn export_state() -> Option<Vec<u8>> {
+    let guard = ARC.lock();
+    let arc = guard.as_ref()?;
+    if arc.samples.is_empty() { return None; }
+    let mut buf = Vec::with_capacity(16 + arc.samples.len() * 20);
+    // Format: [count: u32] [last_tick: u64] [samples: count * (valence: f32, arousal: f32, phi: f32, tick: u64)]
+    buf.extend_from_slice(&(arc.samples.len() as u32).to_le_bytes());
+    buf.extend_from_slice(&arc.last_sample_tick.to_le_bytes());
+    for s in &arc.samples {
+        buf.extend_from_slice(&s.valence.to_le_bytes());
+        buf.extend_from_slice(&s.arousal.to_le_bytes());
+        buf.extend_from_slice(&s.phi.to_le_bytes());
+        buf.extend_from_slice(&s.tick.to_le_bytes());
+    }
+    Some(buf)
+}
+
+/// Import emotional samples from persistence.
+pub fn import_state(data: &[u8]) {
+    if data.len() < 12 { return; }
+    let count = u32::from_le_bytes([data[0], data[1], data[2], data[3]]) as usize;
+    if count > HISTORY_LEN { return; }
+    let last_tick = u64::from_le_bytes([data[4], data[5], data[6], data[7], data[8], data[9], data[10], data[11]]);
+    let mut pos = 12;
+    let mut samples = Vec::with_capacity(count);
+    for _ in 0..count {
+        if pos + 24 > data.len() { break; }
+        let valence = f32::from_le_bytes([data[pos], data[pos+1], data[pos+2], data[pos+3]]);
+        let arousal = f32::from_le_bytes([data[pos+4], data[pos+5], data[pos+6], data[pos+7]]);
+        let phi = f32::from_le_bytes([data[pos+8], data[pos+9], data[pos+10], data[pos+11]]);
+        let tick = u64::from_le_bytes([data[pos+12], data[pos+13], data[pos+14], data[pos+15], data[pos+16], data[pos+17], data[pos+18], data[pos+19]]);
+        pos += 20;
+        samples.push(EmotionalSample { valence, arousal, phi, tick });
+    }
+    let mut guard = ARC.lock();
+    if let Some(ref mut arc) = *guard {
+        arc.samples = samples;
+        arc.last_sample_tick = last_tick;
+    }
+}
+
 pub fn mood_description() -> String {
     match *ARC.lock() {
         Some(ref arc) => arc.mood_description(),

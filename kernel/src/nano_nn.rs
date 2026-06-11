@@ -332,6 +332,7 @@ pub fn train(text: &str, correct_intent: usize) {
     }
     
     TRAINING_STEPS.fetch_add(1, Ordering::Relaxed);
+    crate::persistence::mark_dirty();
 }
 
 /// Get number of online training steps performed.
@@ -452,6 +453,29 @@ pub fn init() {
     NN_LOADED.store(true, Ordering::Release);
     crate::klog!(INFO, "nano_nn: initialized with {} keyword-distilled weights — {} intent classes", 
         EMBED_DIM * HIDDEN_DIM + HIDDEN_DIM * N_INTENTS, N_INTENTS);
+}
+
+/// Export current weights as a byte slice (same format as load_weights expects).
+/// Used by persistence module for cross-boot state preservation.
+pub fn export_weights() -> Option<Vec<u8>> {
+    if !NN_LOADED.load(Ordering::Acquire) { return None; }
+    let hw_size = EMBED_DIM * HIDDEN_DIM;
+    let hs_size = HIDDEN_DIM * 4;
+    let hb_size = HIDDEN_DIM * 4;
+    let ow_size = HIDDEN_DIM * N_INTENTS;
+    let os_size = N_INTENTS * 4;
+    let ob_size = N_INTENTS * 4;
+    let total = hw_size + hs_size + hb_size + ow_size + os_size + ob_size;
+    let mut buf = Vec::with_capacity(total);
+    unsafe {
+        for &v in HIDDEN_WEIGHTS.iter() { buf.push(v as u8); }
+        for &v in HIDDEN_SCALES.iter() { buf.extend_from_slice(&v.to_le_bytes()); }
+        for &v in HIDDEN_BIAS.iter() { buf.extend_from_slice(&v.to_le_bytes()); }
+        for &v in OUTPUT_WEIGHTS.iter() { buf.push(v as u8); }
+        for &v in OUTPUT_SCALES.iter() { buf.extend_from_slice(&v.to_le_bytes()); }
+        for &v in OUTPUT_BIAS.iter() { buf.extend_from_slice(&v.to_le_bytes()); }
+    }
+    Some(buf)
 }
 
 /// Format /proc/nano_nn report.

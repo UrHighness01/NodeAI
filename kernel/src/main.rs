@@ -138,6 +138,7 @@ pub mod quantum;         // EW-6 Quantum Security — Steane [[7,1,3]] error cor
 pub mod quantum_anneal;  // EW-6 QUBO solver for scheduling optimization
 pub mod swarm_gossip;    // EW-5 epidemic gossip protocol
 pub mod swarm_identity;  // EW-5 swarm node identity management
+pub mod persistence;    // Cross-boot state persistence (self, memory, weights, etc.)
 
 /// Bootloader configuration — tells the bootloader to map all physical memory
 /// at a dynamic virtual offset so we can access physical frames by VA.
@@ -364,6 +365,7 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     // crate::lm_mhs::init();       // Project-M — disabled: static mut aliasing bug (#PF)
     crate::lm_projectk::init();  // Project-K nano model (1.6MB INT4)
     crate::lm_memory::init(); // conversation memory for kernel LM
+    crate::persistence::init(); // load state from VFS (restores self, memory, weights, etc.)
     // ── Phase EW-0: EW Sensory Cortex ────────────────────────────────────────
     crate::sensor_cortex::init();
     crate::sensor_cortex::register_sensor(
@@ -484,6 +486,8 @@ fn idle_loop() -> ! {
             crate::vfs::procfs::refresh();
             crate::page_cache::tick_writeback();
             crate::syscall_proxy::tick();
+            // Persistence: save state every heartbeat (5s) if dirty
+            crate::persistence::tick();
         }
 
         // Persist episodic memory to disk every 30 seconds

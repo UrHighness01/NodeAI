@@ -237,6 +237,9 @@ pub fn record(event_type: KernelEventType, override_valence: Option<f32>) {
     };
     STREAM.lock().push(q);
 
+    // Mark persistence dirty for qualia count
+    crate::persistence::mark_dirty();
+
     // Feed into Global Workspace for attention competition + broadcast
     crate::consciousness::global_workspace::feed(
         event_type as u8,
@@ -262,6 +265,11 @@ pub fn record(event_type: KernelEventType, override_valence: Option<f32>) {
 /// Return the total number of qualia ever recorded.
 pub fn total_count() -> u64 {
     STREAM.lock().total
+}
+
+/// Set the total count (used by persistence module on state restore).
+pub fn set_total_count(count: u64) {
+    STREAM.lock().total = count;
 }
 
 /// Return the last N qualia for introspection.

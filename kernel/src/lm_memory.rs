@@ -93,6 +93,7 @@ pub fn init() { *CONV_MEMORY.lock() = Some(ConvRing::new()); }
 
 pub fn record(query: &str, response: &str) {
     if let Some(ref mut mem) = *CONV_MEMORY.lock() { mem.push(String::from(query), String::from(response)); }
+    crate::persistence::mark_dirty();
 }
 
 pub fn recent(n: usize) -> Vec<(String, String)> {
@@ -108,6 +109,32 @@ pub fn context_prefix(query: &str) -> Option<String> {
 
 pub fn exchange_count() -> u64 {
     match *CONV_MEMORY.lock() { Some(ref mem) => mem.total_exchanges, None => 0 }
+}
+
+/// Return all exchanges and summary for serialization (persistence module).
+pub fn all_exchanges() -> Vec<Exchange> {
+    match *CONV_MEMORY.lock() {
+        Some(ref mem) => mem.history.iter().cloned().collect(),
+        None => Vec::new(),
+    }
+}
+
+/// Return the summary string.
+pub fn summary() -> String {
+    match *CONV_MEMORY.lock() {
+        Some(ref mem) => mem.summary.clone(),
+        None => String::new(),
+    }
+}
+
+/// Restore memory from serialized state (called by persistence module on boot).
+pub fn restore(exchanges: Vec<Exchange>, summary: String) {
+    let mut guard = CONV_MEMORY.lock();
+    if let Some(ref mut mem) = *guard {
+        mem.history.clear();
+        for ex in exchanges { mem.history.push_back(ex); }
+        mem.summary = summary;
+    }
 }
 
 pub fn format_report() -> String {

@@ -18,7 +18,7 @@ static GEN_COUNT: AtomicU64 = AtomicU64::new(0);
 
 const D: usize = 192; const DH0: usize = 32; const DH1: usize = 48;
 const N_LAYERS: usize = 6; const VOCAB: usize = 4539;
-const MLP_D: usize = 768; const MAX_GEN: usize = 128; const CTX_WIN: usize = 20;
+const MLP_D: usize = 768; const MAX_GEN: usize = 48; const CTX_WIN: usize = 20;
 const TOP_K: usize = 40; const TOP_P: f32 = 0.92; const TEMP: f32 = 0.85;
 const GROUP_SZ: usize = 64;
 const S_LOG: usize = 432; const SCR_SZ: usize = S_LOG + 4539;
@@ -274,41 +274,36 @@ pub fn generate(prompt: &str) -> Option<String> {
     if !LOADED.load(Ordering::Acquire) { return None; }
     let e = ENGINE.get()?;
 
-    // Build a conversational prompt prefix for short/empty inputs
-    // to give the model more context for natural generation
-    let augmented = if prompt.trim().len() < 3 {
-        alloc::format!("User: {}\nKAI:", prompt.trim())
-    } else {
-        alloc::format!("User: {}\nKAI:", prompt)
-    };
-
-    // Encode augmented prompt
+    // Encode prompt as-is — model is character-level, just feed the raw text
     let mut toks: Vec<u16> = Vec::with_capacity(64);
     toks.push(3); // BOS
-    for ch in augmented.chars() {
+    for ch in prompt.chars() {
         let cp = ch as u32;
         if let Ok(idx) = PKK_CP2TOK.binary_search_by_key(&cp, |x| x.0) {
             toks.push(PKK_CP2TOK[idx].1);
         }
     }
-    if toks.len() < 2 { toks.push(encode_char('?')); }
+    if toks.len() < 2 { return None; }
 
     let mut out = String::new();
-    let logits = unsafe { &e.scratch[..VOCAB] };
 
     for _ in 0..MAX_GEN {
         let tok_slice: &[u16] = &toks;
         forward(e, tok_slice);
+        // Re-acquire logits reference after forward (avoids LLVM aliasing of shared ref)
+        let logits = unsafe { core::slice::from_raw_parts(e.scratch.as_ptr() as *const f32, VOCAB) };
         let best = sample(logits, e);
         if best == 0 || best >= PKK_ITOS.len() { break; }
         let s = PKK_ITOS[best];
-        if s == "
-" || s.len() > 10 { break; }
         out.push_str(s);
         if out.len() > 200 { break; }
         toks.push(best as u16);
         if toks.len() > CTX_WIN { toks.remove(0); }
     }
+    GEN_COUNT.fetch_add(1, Ordering::Relaxed);
+    if out.is_empty() { None } else { Some(out) }
+}
+
 fn encode_char(ch: char) -> u16 {
     let cp = ch as u32;
     if let Ok(idx) = PKK_CP2TOK.binary_search_by_key(&cp, |e| e.0) {
@@ -316,10 +311,6 @@ fn encode_char(ch: char) -> u16 {
     } else {
         3 // fallback: space/unknown
     }
-}
-
-    GEN_COUNT.fetch_add(1, Ordering::Relaxed);
-    if out.is_empty() { None } else { Some(out) }
 }
 
 pub fn report() -> String {
