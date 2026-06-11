@@ -387,6 +387,7 @@ pub const STATUS_RESPONSE: TemplateGroup = tg!(
     "My boot screen shows ALIVE. Uptime: {uptime}. Everything nominal.",
     "Status: {cpu_count} CPU(s), {tasks} tasks, {mem}M free, phi={phi:.4}",
     "SMP: {cpu_count} core(s) — work in progress. AP boot coming soon.",
+    "APIC timer: {timer_freq} Hz, {timer_stable}. Tick delivery accurate.",
 );
 
 // ── Sleep / Goodnight (14 variants) ─────────────────────────────────────────
@@ -1466,6 +1467,8 @@ pub fn fill_template(template: &str) -> String {
     rep!("{nano_train_steps}", crate::nano_nn::training_steps());
     rep!("{sat_count}", crate::sensor_gnss::sats_tracked());
     rep!("{cpu_count}", crate::smp::cpu_count());
+    rep!("{timer_freq}", crate::timer_calib::measured_freq());
+    rep!("{timer_stable}", if crate::timer_calib::is_stable() { "stable" } else { "drift" });
 
     // Crash recovery placeholders
     let crash_recovery = crate::crash_recovery::crash_summary();

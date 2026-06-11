@@ -127,6 +127,7 @@ pub fn refresh() {
     write_file("/proc", "quantum_anneal",  crate::quantum_anneal::format_report());
     write_file("/proc", "swarm_gossip",    crate::swarm_gossip::format_report());
     write_file("/proc", "smp",             crate::smp::format_report());
+    write_file("/proc", "timer_calib",     crate::timer_calib::format_report());
     write_file("/proc", "swarm_identity",  crate::swarm_identity::format_report());
     write_file("/proc", "emotional_arc",   crate::emotional_arc::format_report());
     write_file("/proc", "crash_recovery",  crate::crash_recovery::format_report());

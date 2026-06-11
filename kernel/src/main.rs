@@ -132,6 +132,7 @@ pub mod heap_monitor;    // Kernel heap monitoring & diagnostics
 pub mod crash_recovery;  // Self-healing panic snapshot / recovery
 pub mod sensor_gnss;     // GNSS RAIM integrity monitoring
 pub mod smp;             // SMP multicore management
+pub mod timer_calib;     // APIC timer calibration monitor
 pub mod quantum;         // EW-6 Quantum Security — Steane [[7,1,3]] error correction
 pub mod quantum_anneal;  // EW-6 QUBO solver for scheduling optimization
 pub mod swarm_gossip;    // EW-5 epidemic gossip protocol
@@ -344,6 +345,7 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     crate::cortex::init(); // /dev/cortex userspace bridge
     crate::llm_bridge::init(); // /dev/llm userspace LLM bridge
     crate::smp::init();      // SMP multicore — per-CPU data
+    crate::timer_calib::init(); // APIC timer calibration monitor
     crate::quantum::init(); // EW-6 Quantum Security — Steane code
     crate::quantum_anneal::init(); // EW-6 QUBO solver
     crate::swarm_gossip::init(); // EW-5 gossip protocol
@@ -476,6 +478,7 @@ fn idle_loop() -> ! {
                 now / 1000, tasks, free, sensor_stats.signals_detected, threat_lvl);
             // Heap monitor tick — checks thresholds, tracks peak usage
             crate::heap_monitor::tick();
+            crate::timer_calib::tick();
             crate::vfs::procfs::refresh();
             crate::page_cache::tick_writeback();
             crate::syscall_proxy::tick();
