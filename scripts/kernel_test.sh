@@ -19,7 +19,7 @@ ID="$ROOT/target/images"; mkdir -p "$ID"
 echo "PASS: Boot image"
 echo "=== Test 3: Boot (${TIMEOUT}s) ==="
 QEMU="/usr/bin/qemu-system-x86_64"
-QA=(-machine q35 -cpu qemu64,+avx2,+rdrand,+rdseed -m 512M)
+QA=(-machine q35 -cpu qemu64,+avx2,+rdrand,+rdseed -m 2048M)
 QA+=(-serial stdio -display none -no-reboot -no-shutdown)
 QA+=(-drive "format=raw,file=$ID/nodeai-bios.img")
 "$QEMU" "${QA[@]}" > "$TEST_LOG" 2>&1 &

@@ -26,7 +26,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-MEMORY=512
+MEMORY=2048
 DEBUG=0
 RELEASE=1
 UEFI=0
@@ -158,6 +158,23 @@ fi
 if [[ $UEFI -eq 0 ]]; then
     QEMU_ARGS+=(-drive "format=raw,file=$BIOS_IMG")
     echo "  Boot: BIOS via $BIOS_IMG"
+fi
+
+# Qwen3.5 weight disk (second AHCI drive, index 1)
+QWEN35_BIN="${ROOT}/../models/lm_qwen35.bin"
+QWEN35_IMG="${ROOT}/target/qwen35_weights.img"
+if [[ -f "$QWEN35_BIN" ]]; then
+    # Wrap raw binary in a raw disk image (no filesystem — kernel reads raw bytes)
+    if [[ ! -f "$QWEN35_IMG" ]] || [[ "$QWEN35_BIN" -nt "$QWEN35_IMG" ]]; then
+        echo "  Building Qwen3.5 weight disk image..."
+        cp "$QWEN35_BIN" "$QWEN35_IMG"
+    fi
+    QWEN35_SIZE=$(stat -c %s "$QWEN35_IMG")
+    QEMU_ARGS+=(-drive "format=raw,file=$QWEN35_IMG,if=ide,index=1")
+    echo "  Qwen3.5: weight disk attached ($((QWEN35_SIZE / 1048576))MB)"
+else
+    echo "  Qwen3.5: weight binary not found at $QWEN35_BIN — Qwen3.5 will be unavailable"
+    echo "    Run: python3 scripts/convert_qwen35_kernel.py"
 fi
 
 if [[ $WIFI -eq 1 ]]; then
