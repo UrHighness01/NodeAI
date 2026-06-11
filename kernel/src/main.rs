@@ -108,7 +108,7 @@ pub mod cortex;         // /dev/cortex bridge to userspace
 pub mod kernel_lm;      // template-driven kernel language model
 pub mod lm_memory;      // conversation memory ring buffer
 pub mod lm_templates;   // multi-variant LM templates
-pub mod lm_mhs;         // MHS neural voice engine (Project-M, 6.6MB INT8)
+// pub mod lm_mhs;         // MHS — disabled: static mut aliasing bug (#PF heap corruption)
 pub mod lm_mhs_prompt;  // MHS prompt builder with context
 pub mod lm_projectk;    // Project-K nano model (1.6MB INT4, d=192, vocab=2448)
 // lm_mhs_tok / lm_projectk_tok are child modules of their respective parents

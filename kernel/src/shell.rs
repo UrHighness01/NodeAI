@@ -1722,9 +1722,7 @@ fn cmd_consciousness(args: &str) {
 
     // ── MHS voice / neural ──────────────────────────────────────────────
     if trimmed == "mhs" || trimmed == "voice" || trimmed == "neural" {
-        let report_bytes = crate::lm_mhs::format_report();
-        let report = core::str::from_utf8(&report_bytes).unwrap_or("");
-        println!("{}", report);
+        println!("MHS neural voice: disabled (static mut aliasing bug). Use Project-K instead.");
         return;
     }
 

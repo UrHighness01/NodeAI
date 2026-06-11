@@ -1413,9 +1413,9 @@ pub fn fill_template(template: &str) -> String {
     rep!("{last_heal}", &last_heal);
 
     // MHS placeholders
-    let mhs_status = if crate::lm_mhs::is_loaded() { "online (weights loaded)" } else { "standby" };
-    let mhs_generations = crate::lm_mhs::generation_count();
-    let mhs_weight_size = crate::lm_mhs::weight_size();
+    let mhs_status = if false { "online (weights loaded)" } else { "disabled (aliasing bug)" };
+    let mhs_generations: u64 = 0;
+    let mhs_weight_size: u64 = 0;
     let vocab_size = 4539u16; // Project-M vocab size
     rep!("{mhs_status}", mhs_status);
     rep!("{mhs_generations}", mhs_generations);

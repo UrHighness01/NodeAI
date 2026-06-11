@@ -86,9 +86,9 @@ pub fn build_minimal_prompt(query: &str) -> (String, usize) {
 
 /// Get a human-readable description of MHS model state.
 pub fn model_description() -> String {
-    if crate::lm_mhs::is_loaded() {
+    if false {
         "Project-M char-level LM — INT8 quantized, active".into()
     } else {
-        "untrained stub — call load_weights() to activate".into()
+        "MHS disabled — use Project-K (1.6MB INT4 nano model)".into()
     }
 }
