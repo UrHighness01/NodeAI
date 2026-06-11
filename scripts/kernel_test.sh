@@ -23,25 +23,8 @@ QA=(-machine q35 -cpu qemu64,+avx2,+rdrand,+rdseed -m 2048M)
 QA+=(-serial stdio -display none -no-reboot -no-shutdown)
 QA+=(-drive "format=raw,file=$ID/nodeai-bios.img")
 
-# Attach Qwen3.5 weight disk if available (second AHCI drive, index 1)
-QWEN35="$ROOT/models/lm_qwen35.bin"
-if [[ -f "$QWEN35" ]]; then
-    QWEN_IMG="$ROOT/target/qwen35_weights.img"
-    if [[ ! -f "$QWEN_IMG" ]] || [[ "$QWEN35" -nt "$QWEN_IMG" ]]; then
-        cp "$QWEN35" "$QWEN_IMG"
-    fi
-    QA+=(-drive "format=raw,file=$QWEN_IMG,if=ide,index=1")
-fi
-
-# Attach Qwen2.5 weight disk if available (third AHCI drive, index 2)
-QWEN25="$ROOT/models/qwen25_kernel.bin"
-if [[ -f "$QWEN25" ]]; then
-    QWEN25_IMG="$ROOT/target/qwen25_weights.img"
-    if [[ ! -f "$QWEN25_IMG" ]] || [[ "$QWEN25" -nt "$QWEN25_IMG" ]]; then
-        cp "$QWEN25" "$QWEN25_IMG"
-    fi
-    QA+=(-drive "format=raw,file=$QWEN25_IMG,if=ide,index=2")
-fi
+# Qwen weight disks skipped in test mode (767MB AHCI read takes >60s).
+# Use ./scripts/run_qemu.sh --gui for Qwen voices.
 
 "$QEMU" "${QA[@]}" > "$TEST_LOG" 2>&1 &
 QPID=$!; sleep "$TIMEOUT"; kill "$QPID" 2>/dev/null || true; wait "$QPID" 2>/dev/null || true

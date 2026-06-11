@@ -287,6 +287,10 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
         klog!(INFO, "PS/2 keyboard initialized");
     }
 
+    // ── Phase 6a: AHCI/SATA storage (weight disks for AI models) ────────────
+    crate::ahci::init(phys_offset);
+    crate::klog!(INFO, "ahci: AHCI controller initialized (loads Qwen model weights)");
+
     // ── Hardware parity drivers (AHCI, NVMe, USB, WiFi, GPU) ────────────────
 
     // ── Developer experience & self-hosting (git, build, profiler, KADB, package manager) ─

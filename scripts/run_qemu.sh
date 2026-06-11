@@ -179,7 +179,7 @@ if [[ -f "$QWEN35_BIN" ]]; then
         fi
     fi
     QWEN35_SIZE=$(stat -c %s "$QWEN35_IMG")
-    QEMU_ARGS+=(-drive "format=raw,file=$QWEN35_IMG,if=ide,index=1")
+    QEMU_ARGS+=(-drive "format=raw,file=$QWEN35_IMG,index=1")
     echo "  Qwen3.5: weight disk attached ($((QWEN35_SIZE / 1048576))MB)"
 else
     echo "  Qwen3.5: weight binary not found at $QWEN35_BIN — Qwen3.5 will be unavailable"
@@ -200,7 +200,7 @@ if [[ -f "$QWEN25_BIN" ]]; then
         fi
     fi
     QWEN25_SIZE=$(stat -c %s "$QWEN25_IMG")
-    QEMU_ARGS+=(-drive "format=raw,file=$QWEN25_IMG,if=ide,index=2")
+    QEMU_ARGS+=(-drive "format=raw,file=$QWEN25_IMG,index=2")
     echo "  Qwen2.5: weight disk attached ($((QWEN25_SIZE / 1048576))MB)"
 else
     echo "  Qwen2.5: weight binary not found at $QWEN25_BIN — fallback unavailable"

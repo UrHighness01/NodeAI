@@ -6,8 +6,9 @@ use linked_list_allocator::LockedHeap;
 #[global_allocator]
 pub static KERNEL_HEAP: LockedHeap = LockedHeap::empty();
 
-/// Initial heap size: 64 MiB (was 4 MiB→16 MiB→32 MiB, OOM with R23-R27 modules).
-const HEAP_SIZE: usize = 64 * 1024 * 1024;
+/// Initial heap size: 900 MiB (for Qwen3.5 767MB weight loading + runtime).
+/// QEMU boots with 2048MB RAM — PMM manages the remaining ~1100MB.
+const HEAP_SIZE: usize = 900 * 1024 * 1024;
 
 /// Static backing store for the kernel heap.
 /// Must be in BSS (zero-initialized) to avoid inflating the binary.

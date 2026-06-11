@@ -458,8 +458,20 @@ pub fn read_all(drive_idx: usize) -> Result<Vec<u8>, &'static str> {
         return Err("drive not found");
     }
 
-    // Read sectors until an all-zero chunk (marks end of payload)
-    let mut out: Vec<u8> = Vec::with_capacity(512 * 1024 * 1024); // 512 MB pre-alloc
+    // Pre-allocate exact capacity from drive's sector count
+    let total_sectors = {
+        let ports = AHCI_PORTS.lock();
+        if drive_idx < ports.len() {
+            ports[drive_idx].sectors
+        } else {
+            0
+        }
+    };
+    let total_bytes = (total_sectors * SECTOR_SIZE as u64).min(900 * 1024 * 1024) as usize;
+    if total_bytes == 0 {
+        return Err("drive has zero capacity");
+    }
+    let mut out: Vec<u8> = Vec::with_capacity(total_bytes);
     let mut lba = 0u64;
     let mut consecutive_zero = 0usize;
 
@@ -475,8 +487,7 @@ pub fn read_all(drive_idx: usize) -> Result<Vec<u8>, &'static str> {
                 }
                 out.extend_from_slice(&chunk);
                 lba += CHUNK_SECTORS as u64;
-                // Hard cap at 768 MB for safety
-                if out.len() >= 768 * 1024 * 1024 { break; }
+                if out.len() >= total_bytes { break; }
             }
             None => break,
         }
