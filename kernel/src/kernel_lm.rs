@@ -446,7 +446,8 @@ pub fn generate_response(query: &str, _max_words: usize) -> String {
         let projectk_response = crate::lm_projectk::generate(query);
         if let Some(ref neural) = projectk_response {
             let cleaned = neural.trim().to_string();
-            if !cleaned.is_empty() && cleaned.len() > 5 {
+            // Accept any non-empty neural output (≥2 chars filters bare "?" artifacts)
+            if !cleaned.is_empty() && cleaned.len() > 2 {
                 crate::lm_memory::record(query, &cleaned);
                 return cleaned;
             }

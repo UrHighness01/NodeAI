@@ -274,10 +274,18 @@ pub fn generate(prompt: &str) -> Option<String> {
     if !LOADED.load(Ordering::Acquire) { return None; }
     let e = ENGINE.get()?;
 
-    // Encode prompt
+    // Build a conversational prompt prefix for short/empty inputs
+    // to give the model more context for natural generation
+    let augmented = if prompt.trim().len() < 3 {
+        alloc::format!("User: {}\nKAI:", prompt.trim())
+    } else {
+        alloc::format!("User: {}\nKAI:", prompt)
+    };
+
+    // Encode augmented prompt
     let mut toks: Vec<u16> = Vec::with_capacity(64);
     toks.push(3); // BOS
-    for ch in prompt.chars() {
+    for ch in augmented.chars() {
         let cp = ch as u32;
         if let Ok(idx) = PKK_CP2TOK.binary_search_by_key(&cp, |x| x.0) {
             toks.push(PKK_CP2TOK[idx].1);

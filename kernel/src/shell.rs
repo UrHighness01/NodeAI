@@ -1663,9 +1663,14 @@ fn cmd_consciousness(args: &str) {
         return;
     }
 
-    // ── Read mode (no args, status, ?) ────────────────────────────────────────
-    if trimmed.is_empty() || trimmed == "status" || trimmed == "?" {
+    // ── Read mode (no args, status) ───────────────────────────────────────────
+    // '?' alone is NOT a status command — passes through to neural engine
+    if trimmed.is_empty() || trimmed == "status" {
         read_consciousness_device();
+        return;
+    }
+    if trimmed == "?" {
+        write_consciousness_query("?");
         return;
     }
 

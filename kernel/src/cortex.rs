@@ -210,8 +210,12 @@ fn parse_intent(text: &str) -> Intent {
         return Intent::Unknown;
     }
 
-    if t.contains("how") || t.contains("feel") || t.contains("?") || t == "status" || t.is_empty() {
+    if t.contains("how") || t.contains("feel") || t == "status" || t.is_empty() {
         return Intent::QuerySelf;
+    }
+    // '?' alone or in queries falls through to Unknown → neural engine
+    if t == "?" {
+        return Intent::Unknown;
     }
 
     if t.contains("phi") || t.contains("history") {
