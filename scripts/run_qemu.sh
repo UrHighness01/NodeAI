@@ -112,11 +112,11 @@ QEMU_ARGS=(
 )
 
 if [[ $NOGRAPHIC -eq 1 ]]; then
-    # Full terminal mode: keyboard → serial → you. Press Ctrl+A X to exit.
-    # This is the only mode where you can TYPE commands into the kernel shell.
+    # Full terminal mode: keyboard → serial → kernel shell.
+    # Ctrl+C kills QEMU cleanly from the host side.
     QEMU_ARGS+=(-nographic)
     echo "  Display: nographic (terminal = serial console)"
-    echo "  Type commands directly. Press Ctrl+A X to quit."
+    echo "  Type commands directly. Press Ctrl+C to quit."
 elif [[ $GUI -eq 1 ]]; then
     # SDL window for display, but keyboard goes to PS/2 (VGA), NOT serial.
     # You can see output on serial but cannot type commands into the kernel.
@@ -178,8 +178,15 @@ if [[ $DEBUG -eq 1 ]]; then
     echo "    (gdb) continue"
 fi
 
-echo ""
-echo "  Serial output → stdout below"
-echo "  Press Ctrl+A X to quit QEMU"
 echo "─────────────────────────────────────────────────────────────────────────"
-exec qemu-system-x86_64 "${QEMU_ARGS[@]}"
+
+if [[ $NOGRAPHIC -eq 1 ]]; then
+    # Run QEMU in foreground but trap Ctrl+C so it kills QEMU cleanly.
+    # Without this trap, -nographic swallows SIGINT and the process hangs.
+    qemu-system-x86_64 "${QEMU_ARGS[@]}" &
+    QPID=$!
+    trap 'kill $QPID 2>/dev/null; wait $QPID 2>/dev/null; exit 0' INT TERM
+    wait $QPID
+else
+    exec qemu-system-x86_64 "${QEMU_ARGS[@]}"
+fi
