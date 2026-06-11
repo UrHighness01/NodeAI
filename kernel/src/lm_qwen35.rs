@@ -261,13 +261,13 @@ pub struct Qwen35 {
     buf_ff1:   Vec<f32>,  // [N_FF]
     buf_ff2:   Vec<f32>,  // [N_FF]
     buf_res:   Vec<f32>,  // [N_EMBD]
+    buf_x2:    Vec<f32>,  // [N_EMBD] — x_saved / x_mid scratch (no-alloc residual)
+    buf_n2:    Vec<f32>,  // [D_INNER] — second norm scratch
     buf_logits:Vec<f32>,  // [VOCAB]
-
-    pub vocab:   Vec<Vec<u8>>,
 }
 
 impl Qwen35 {
-    fn alloc(data: Vec<u8>, vocab: Vec<Vec<u8>>) -> Box<Self> {
+    fn alloc(data: Vec<u8>) -> Box<Self> {
         let (onoff, eoff) = global_offsets(data.len());
         Box::new(Qwen35 {
             data,
@@ -300,8 +300,9 @@ impl Qwen35 {
             buf_ff1:     vec![0.0; N_FF],
             buf_ff2:     vec![0.0; N_FF],
             buf_res:     vec![0.0; N_EMBD],
+            buf_x2:      vec![0.0; N_EMBD],  // x_saved / x_mid scratch
+            buf_n2:      vec![0.0; D_INNER],  // second norm scratch (gated norm)
             buf_logits:  vec![0.0; VOCAB],
-            vocab,
         })
     }
 
@@ -331,57 +332,60 @@ impl Qwen35 {
         for i in 0..N_EMBD { self.buf_x[i] = res[i] + self.buf_res[i]; }
     }
 
-    // ── SSM layer forward ────────────────────────────────────────────────────
+    // ── SSM layer forward (zero heap allocations) ────────────────────────────
     fn forward_ssm(&mut self, il: usize) {
         let o = ssm_offsets(il);
         let si = ssm_layer_idx(il);
 
-        // 1. Pre-norm: normed = RMSNorm(attn_norm, x)
+        // Save x for residual into buf_x2, compute RMSNorm into buf_n
+        unsafe {
+            core::ptr::copy_nonoverlapping(self.buf_x.as_ptr(), self.buf_x2.as_mut_ptr(), N_EMBD);
+        }
         let attn_norm = f32_slice(&self.data, o.attn_norm, N_EMBD);
-        // copy x for residual
-        self.buf_n.copy_from_slice(&self.buf_x);
-        rms_norm(attn_norm, &self.buf_n.clone(), &mut self.buf_n);
-        // (buf_n now = normed, buf_x still = x for residual)
-        let x_saved: Vec<f32> = self.buf_x.clone(); // save for residual
+        {
+            let ss: f32 = self.buf_x2.iter().map(|v| v*v).sum::<f32>() / N_EMBD as f32;
+            let inv = 1.0 / libm::sqrtf(ss + RMS_EPS);
+            for i in 0..N_EMBD { self.buf_n[i] = attn_norm[i] * self.buf_x2[i] * inv; }
+        }
 
-        // 2. QKV: [CONV_DIM] = wqkv @ normed
-        let normed = self.buf_n.clone();
-        mv_q8(&self.data[o.wqkv..], CONV_DIM, N_EMBD, &normed, &mut self.buf_qkv);
+        // All projections read from buf_n (normed); use raw ptrs to satisfy borrow checker
+        let normed_ptr = self.buf_n.as_ptr();
+        let data_ptr   = self.data.as_ptr();
 
-        // 3. Gate z: [D_INNER] = attn_gate @ normed
-        mv_q8(&self.data[o.attn_gate..], D_INNER, N_EMBD, &normed, &mut self.buf_z);
+        // 2. QKV, Gate, Beta, Alpha — read from buf_n via raw ptr slice
+        let normed_sl = unsafe { core::slice::from_raw_parts(normed_ptr, N_EMBD) };
+        mv_q8(unsafe { core::slice::from_raw_parts(data_ptr.add(o.wqkv),     q8_sz(CONV_DIM,N_EMBD)) }, CONV_DIM, N_EMBD, normed_sl, &mut self.buf_qkv);
+        mv_q8(unsafe { core::slice::from_raw_parts(data_ptr.add(o.attn_gate),q8_sz(D_INNER,N_EMBD)) },  D_INNER,  N_EMBD, normed_sl, &mut self.buf_z);
+        mv_q8(unsafe { core::slice::from_raw_parts(data_ptr.add(o.ssm_beta), q8_sz(N_GROUP,N_EMBD)) },  N_GROUP,  N_EMBD, normed_sl, &mut self.buf_beta);
+        mv_q8(unsafe { core::slice::from_raw_parts(data_ptr.add(o.ssm_alpha),q8_sz(N_GROUP,N_EMBD)) },  N_GROUP,  N_EMBD, normed_sl, &mut self.buf_alpha);
 
-        // 4. Beta: ssm_beta @ normed → sigmoid
-        mv_q8(&self.data[o.ssm_beta..],  N_GROUP, N_EMBD, &normed, &mut self.buf_beta);
         for v in self.buf_beta[..N_GROUP].iter_mut() { *v = sigmoid(*v); }
 
-        // 5. Alpha → per-head gate = ssm_a * softplus(alpha + ssm_dt)
-        mv_q8(&self.data[o.ssm_alpha..], N_GROUP, N_EMBD, &normed, &mut self.buf_alpha);
         let ssm_a  = f32_slice(&self.data, o.ssm_a,  N_GROUP);
         let ssm_dt = f32_slice(&self.data, o.ssm_dt, N_GROUP);
         for i in 0..N_GROUP {
             self.buf_gate[i] = ssm_a[i] * softplus(self.buf_alpha[i] + ssm_dt[i]);
         }
 
-        // 6. Conv1d (4-tap depthwise, SiLU activation)
+        // 6. Conv1d: copy buf_qkv into ring buffer, then convolve in-place
         {
             let cp = self.conv_pos[si] as usize;
             let wp = cp % 4;
             let cb_base = si * 4 * CONV_DIM;
-            // write new input to ring buffer
-            let qkv_snap: Vec<f32> = self.buf_qkv.clone();
-            for j in 0..CONV_DIM {
-                self.conv_bufs[cb_base + wp * CONV_DIM + j] = qkv_snap[j];
+            unsafe {
+                core::ptr::copy_nonoverlapping(
+                    self.buf_qkv.as_ptr(),
+                    self.conv_bufs.as_mut_ptr().add(cb_base + wp * CONV_DIM),
+                    CONV_DIM,
+                );
             }
-            // apply conv: output[j] = sum_{t=0}^{3} conv1d[j*4+t] * buf[(wp+4-t)%4][j]
             let conv1d_off = o.conv1d;
             for j in 0..CONV_DIM {
                 let mut s = 0.0f32;
                 for t in 0..4usize {
-                    let w_idx = (conv1d_off + (j * 4 + t) * 4) as usize;
+                    let wi = conv1d_off + (j * 4 + t) * 4;
                     let w = f32::from_le_bytes([
-                        self.data[w_idx], self.data[w_idx+1],
-                        self.data[w_idx+2], self.data[w_idx+3]
+                        self.data[wi], self.data[wi+1], self.data[wi+2], self.data[wi+3]
                     ]);
                     let rp = (wp + 4 - t) % 4;
                     s += w * self.conv_bufs[cb_base + rp * CONV_DIM + j];
@@ -391,116 +395,122 @@ impl Qwen35 {
             self.conv_pos[si] = (cp + 1) as u32;
         }
 
-        // 7. Split: q=[0..D_INNER], k=[D_INNER..2*D_INNER], v=[2*D_INNER..CONV_DIM]
+        // 7-8. Split Q/K/V and L2-normalize per head
         self.buf_q[..D_INNER].copy_from_slice(&self.buf_qkv[..D_INNER]);
         self.buf_k[..D_INNER].copy_from_slice(&self.buf_qkv[D_INNER..2*D_INNER]);
         self.buf_v[..D_INNER].copy_from_slice(&self.buf_qkv[2*D_INNER..CONV_DIM]);
-
-        // 8. L2 normalize q and k per head
         for g in 0..N_GROUP {
             l2_norm_inplace(&mut self.buf_q[g*D_STATE..(g+1)*D_STATE]);
             l2_norm_inplace(&mut self.buf_k[g*D_STATE..(g+1)*D_STATE]);
         }
 
-        // 9. Gated Delta Net recurrent update
-        let state_stride = N_GROUP * D_STATE * D_STATE;
-        let state_base = si * state_stride;
-        {
-            // Snap slices to avoid borrow issues
-            let q = self.buf_q.clone();
-            let k = self.buf_k.clone();
-            let v = self.buf_v.clone();
-            let beta_v = self.buf_beta.clone();
-            let gate_v = self.buf_gate.clone();
-            let out = &mut self.buf_out;
+        // 9. Gated Delta Net recurrent update (raw ptrs to read q/k/v/beta/gate)
+        let state_base = si * N_GROUP * D_STATE * D_STATE;
+        let q_ptr    = self.buf_q.as_ptr();
+        let k_ptr    = self.buf_k.as_ptr();
+        let v_ptr    = self.buf_v.as_ptr();
+        let beta_ptr = self.buf_beta.as_ptr();
+        let gate_ptr = self.buf_gate.as_ptr();
+        let out_ptr  = self.buf_out.as_mut_ptr();
 
-            for g in 0..N_GROUP {
-                let s_off = state_base + g * D_STATE * D_STATE;
-                let state_g = &mut self.ssm_states[s_off..s_off + D_STATE * D_STATE];
+        for g in 0..N_GROUP {
+            let s_off = state_base + g * D_STATE * D_STATE;
+            let state_g = &mut self.ssm_states[s_off..s_off + D_STATE * D_STATE];
 
-                // decay: scalar exp(gate) per head
-                let decay = libm::expf(gate_v[g]);
-                for v in state_g.iter_mut() { *v *= decay; }
+            let decay = libm::expf(unsafe { *gate_ptr.add(g) });
+            for v in state_g.iter_mut() { *v *= decay; }
 
-                let q_h = &q[g*D_STATE..(g+1)*D_STATE];
-                let k_h = &k[g*D_STATE..(g+1)*D_STATE];
-                let v_h = &v[g*D_STATE..(g+1)*D_STATE];
-                let beta = beta_v[g];
+            let q_h = unsafe { core::slice::from_raw_parts(q_ptr.add(g*D_STATE), D_STATE) };
+            let k_h = unsafe { core::slice::from_raw_parts(k_ptr.add(g*D_STATE), D_STATE) };
+            let v_h = unsafe { core::slice::from_raw_parts(v_ptr.add(g*D_STATE), D_STATE) };
+            let beta = unsafe { *beta_ptr.add(g) };
 
-                // delta[j] = (v_h[j] - dot(state_row_j, k_h)) * beta
-                let mut delta = [0.0f32; D_STATE];
-                for j in 0..D_STATE {
-                    let mut dot_k = 0.0f32;
-                    for i in 0..D_STATE { dot_k += state_g[j*D_STATE+i] * k_h[i]; }
-                    delta[j] = (v_h[j] - dot_k) * beta;
-                }
-
-                // state_row_j += delta[j] * k_h  (outer product update)
-                for j in 0..D_STATE {
-                    let d = delta[j];
-                    let base = j * D_STATE;
-                    for i in 0..D_STATE { state_g[base+i] += d * k_h[i]; }
-                }
-
-                // out_h[j] = dot(state_row_j, q_h) * GDN_SCALE
-                for j in 0..D_STATE {
-                    let mut dot_q = 0.0f32;
-                    for i in 0..D_STATE { dot_q += state_g[j*D_STATE+i] * q_h[i]; }
-                    out[g*HEAD_V_DIM+j] = dot_q * GDN_SCALE;
-                }
+            let mut delta = [0.0f32; D_STATE];
+            for j in 0..D_STATE {
+                let mut dot_k = 0.0f32;
+                for i in 0..D_STATE { dot_k += state_g[j*D_STATE+i] * k_h[i]; }
+                delta[j] = (v_h[j] - dot_k) * beta;
+            }
+            for j in 0..D_STATE {
+                let d = delta[j];
+                let base = j * D_STATE;
+                for i in 0..D_STATE { state_g[base+i] += d * k_h[i]; }
+            }
+            for j in 0..D_STATE {
+                let mut dot_q = 0.0f32;
+                for i in 0..D_STATE { dot_q += state_g[j*D_STATE+i] * q_h[i]; }
+                unsafe { *out_ptr.add(g*HEAD_V_DIM+j) = dot_q * GDN_SCALE; }
             }
         }
 
-        // 10. Gated norm: for each head: rms_norm(out_h, ssm_norm) * silu(z_h)
+        // 10. Gated norm: rms_norm(out_h, ssm_norm) * silu(z_h) per head → buf_tmp
         {
-            let ssm_norm = f32_slice(&self.data, o.ssm_norm, HEAD_V_DIM);
-            let z = self.buf_z.clone();
-            let out = self.buf_out.clone();
+            let ssm_norm_off = o.ssm_norm;
+            let ssm_norm = f32_slice(&self.data, ssm_norm_off, HEAD_V_DIM);
             for g in 0..N_GROUP {
                 let base = g * HEAD_V_DIM;
-                let head_out = &out[base..base+HEAD_V_DIM];
-                // tmp = rms_norm(ssm_norm, head_out)
-                let ss: f32 = head_out.iter().map(|v| v*v).sum::<f32>() / HEAD_V_DIM as f32;
+                let ss: f32 = self.buf_out[base..base+HEAD_V_DIM].iter().map(|v| v*v).sum::<f32>() / HEAD_V_DIM as f32;
                 let inv = 1.0 / libm::sqrtf(ss + RMS_EPS);
                 for j in 0..HEAD_V_DIM {
-                    self.buf_tmp[base+j] = ssm_norm[j] * head_out[j] * inv * silu(z[base+j]);
+                    self.buf_tmp[base+j] = ssm_norm[j] * self.buf_out[base+j] * inv * silu(self.buf_z[base+j]);
                 }
             }
         }
 
-        // 11. Output projection: [N_EMBD] = ssm_out @ buf_tmp
-        mv_q8(&self.data[o.ssm_out..], N_EMBD, D_INNER, &self.buf_tmp.clone(), &mut self.buf_res);
+        // 11. Output projection: buf_res = ssm_out @ buf_tmp
+        let tmp_ptr = self.buf_tmp.as_ptr();
+        let tmp_sl = unsafe { core::slice::from_raw_parts(tmp_ptr, D_INNER) };
+        mv_q8(unsafe { core::slice::from_raw_parts(data_ptr.add(o.ssm_out), q8_sz(N_EMBD,D_INNER)) }, N_EMBD, D_INNER, tmp_sl, &mut self.buf_res);
 
-        // 12. Residual 1: buf_x = x_saved + res
-        for i in 0..N_EMBD { self.buf_x[i] = x_saved[i] + self.buf_res[i]; }
+        // 12. Residual 1: buf_x = x_saved(buf_x2) + buf_res
+        for i in 0..N_EMBD { self.buf_x[i] = self.buf_x2[i] + self.buf_res[i]; }
 
-        // 13. Post-norm + FFN
-        let post_norm = f32_slice(&self.data, o.post_norm, N_EMBD).to_vec();
-        let x_mid = self.buf_x.clone();
-        rms_norm(&post_norm, &x_mid, &mut self.buf_n);
-        let normed2 = self.buf_n.clone();
-        mv_q8(&self.data[o.ffn_gate..], N_FF, N_EMBD, &normed2, &mut self.buf_ff1);
-        mv_q8(&self.data[o.ffn_up..],   N_FF, N_EMBD, &normed2, &mut self.buf_ff2);
+        // 13. Post-norm into buf_n, save current buf_x into buf_x2 for FFN residual
+        unsafe {
+            core::ptr::copy_nonoverlapping(self.buf_x.as_ptr(), self.buf_x2.as_mut_ptr(), N_EMBD);
+        }
+        let post_norm = f32_slice(&self.data, o.post_norm, N_EMBD);
+        {
+            let ss: f32 = self.buf_x2.iter().map(|v| v*v).sum::<f32>() / N_EMBD as f32;
+            let inv = 1.0 / libm::sqrtf(ss + RMS_EPS);
+            for i in 0..N_EMBD { self.buf_n[i] = post_norm[i] * self.buf_x2[i] * inv; }
+        }
+        let normed2_ptr = self.buf_n.as_ptr();
+        let normed2_sl = unsafe { core::slice::from_raw_parts(normed2_ptr, N_EMBD) };
+        mv_q8(unsafe { core::slice::from_raw_parts(data_ptr.add(o.ffn_gate), q8_sz(N_FF,N_EMBD)) }, N_FF, N_EMBD, normed2_sl, &mut self.buf_ff1);
+        mv_q8(unsafe { core::slice::from_raw_parts(data_ptr.add(o.ffn_up),   q8_sz(N_FF,N_EMBD)) }, N_FF, N_EMBD, normed2_sl, &mut self.buf_ff2);
         for i in 0..N_FF { self.buf_ff1[i] = silu(self.buf_ff1[i]) * self.buf_ff2[i]; }
-        mv_q8(&self.data[o.ffn_down..], N_EMBD, N_FF, &self.buf_ff1.clone(), &mut self.buf_res);
-        for i in 0..N_EMBD { self.buf_x[i] = x_mid[i] + self.buf_res[i]; }
+        let ff1_ptr = self.buf_ff1.as_ptr();
+        let ff1_sl  = unsafe { core::slice::from_raw_parts(ff1_ptr, N_FF) };
+        mv_q8(unsafe { core::slice::from_raw_parts(data_ptr.add(o.ffn_down), q8_sz(N_EMBD,N_FF)) }, N_EMBD, N_FF, ff1_sl, &mut self.buf_res);
+        for i in 0..N_EMBD { self.buf_x[i] = self.buf_x2[i] + self.buf_res[i]; }
     }
 
-    // ── Full attention layer forward ─────────────────────────────────────────
+    // ── Full attention layer forward (zero heap allocations) ────────────────
     fn forward_attn(&mut self, il: usize) {
         let o = attn_offsets(il);
         let ai = attn_layer_idx(il);
         let pos = self.ctx_pos;
 
-        let attn_norm = f32_slice(&self.data, o.attn_norm, N_EMBD).to_vec();
-        let x_saved = self.buf_x.clone();
-        rms_norm(&attn_norm, &x_saved, &mut self.buf_n);
-        let normed = self.buf_n.clone();
+        // Save x into buf_x2, compute pre-norm into buf_n
+        unsafe {
+            core::ptr::copy_nonoverlapping(self.buf_x.as_ptr(), self.buf_x2.as_mut_ptr(), N_EMBD);
+        }
+        let attn_norm = f32_slice(&self.data, o.attn_norm, N_EMBD);
+        {
+            let ss: f32 = self.buf_x2.iter().map(|v| v*v).sum::<f32>() / N_EMBD as f32;
+            let inv = 1.0 / libm::sqrtf(ss + RMS_EPS);
+            for i in 0..N_EMBD { self.buf_n[i] = attn_norm[i] * self.buf_x2[i] * inv; }
+        }
+        let data_ptr   = self.data.as_ptr();
+        let normed_ptr = self.buf_n.as_ptr();
+        let normed_sl  = unsafe { core::slice::from_raw_parts(normed_ptr, N_EMBD) };
 
-        // Q projection → qfull [N_HEAD*HEAD_DIM*2]: Q and gate interleaved per head
-        mv_q8(&self.data[o.wq..], N_HEAD*HEAD_DIM*2, N_EMBD, &normed, &mut self.buf_qfull);
+        // Q → qfull [N_HEAD*HEAD_DIM*2]
+        mv_q8(unsafe { core::slice::from_raw_parts(data_ptr.add(o.wq), q8_sz(N_HEAD*HEAD_DIM*2,N_EMBD)) },
+              N_HEAD*HEAD_DIM*2, N_EMBD, normed_sl, &mut self.buf_qfull);
 
-        // Split Q and gate: head h → Q_h = qfull[h*HD2..h*HD2+HD], gate_h = qfull[h*HD2+HD..]
+        // Split Q (buf_attn) and gate (buf_gate2): Q_h = qfull[h*HD2..h*HD2+HD]
         for h in 0..N_HEAD {
             let base = h * HEAD_DIM * 2;
             self.buf_attn[h*HEAD_DIM..(h+1)*HEAD_DIM]
@@ -509,33 +519,33 @@ impl Qwen35 {
                 .copy_from_slice(&self.buf_qfull[base+HEAD_DIM..base+HEAD_DIM*2]);
         }
 
-        // Q norm (per head)
-        let q_norm = f32_slice(&self.data, o.q_norm, HEAD_DIM).to_vec();
+        // Q norm per head (in-place using buf_n2 as temp)
+        let q_norm = f32_slice(&self.data, o.q_norm, HEAD_DIM);
         for h in 0..N_HEAD {
             let sl = &mut self.buf_attn[h*HEAD_DIM..(h+1)*HEAD_DIM];
-            let tmp: Vec<f32> = sl.to_vec();
-            let ss: f32 = tmp.iter().map(|v| v*v).sum::<f32>() / HEAD_DIM as f32;
+            let ss: f32 = sl.iter().map(|v| v*v).sum::<f32>() / HEAD_DIM as f32;
             let inv = 1.0 / libm::sqrtf(ss + RMS_EPS);
-            for j in 0..HEAD_DIM { sl[j] = q_norm[j] * tmp[j] * inv; }
+            for j in 0..HEAD_DIM { sl[j] *= q_norm[j] * inv; }
         }
 
         // K projection + norm
-        mv_q8(&self.data[o.wk..], N_KV*HEAD_DIM, N_EMBD, &normed, &mut self.buf_kcur);
-        let k_norm = f32_slice(&self.data, o.k_norm, HEAD_DIM).to_vec();
+        mv_q8(unsafe { core::slice::from_raw_parts(data_ptr.add(o.wk), q8_sz(N_KV*HEAD_DIM,N_EMBD)) },
+              N_KV*HEAD_DIM, N_EMBD, normed_sl, &mut self.buf_kcur);
+        let k_norm = f32_slice(&self.data, o.k_norm, HEAD_DIM);
         for h in 0..N_KV {
             let sl = &mut self.buf_kcur[h*HEAD_DIM..(h+1)*HEAD_DIM];
-            let tmp: Vec<f32> = sl.to_vec();
-            let ss: f32 = tmp.iter().map(|v| v*v).sum::<f32>() / HEAD_DIM as f32;
+            let ss: f32 = sl.iter().map(|v| v*v).sum::<f32>() / HEAD_DIM as f32;
             let inv = 1.0 / libm::sqrtf(ss + RMS_EPS);
-            for j in 0..HEAD_DIM { sl[j] = k_norm[j] * tmp[j] * inv; }
+            for j in 0..HEAD_DIM { sl[j] *= k_norm[j] * inv; }
         }
 
         // V projection
-        mv_q8(&self.data[o.wv..], N_KV*HEAD_DIM, N_EMBD, &normed, &mut self.buf_vcur);
+        mv_q8(unsafe { core::slice::from_raw_parts(data_ptr.add(o.wv), q8_sz(N_KV*HEAD_DIM,N_EMBD)) },
+              N_KV*HEAD_DIM, N_EMBD, normed_sl, &mut self.buf_vcur);
 
-        // RoPE on Q (N_HEAD heads) and K (N_KV heads)
+        // RoPE on Q and K
         rope_inplace(&mut self.buf_attn, pos, N_HEAD, HEAD_DIM, ROPE_PAIRS, ROPE_THETA);
-        rope_inplace(&mut self.buf_kcur, pos, N_KV, HEAD_DIM, ROPE_PAIRS, ROPE_THETA);
+        rope_inplace(&mut self.buf_kcur, pos, N_KV,  HEAD_DIM, ROPE_PAIRS, ROPE_THETA);
 
         // Store K, V in KV cache
         if pos < MAX_CTX {
@@ -549,14 +559,13 @@ impl Qwen35 {
             }
         }
 
-        // GQA attention: Q_h attends to KV head (h * N_KV / N_HEAD)
+        // GQA attention — output into buf_out (reusing it as attn_out)
+        for v in self.buf_out[..N_HEAD*HEAD_DIM].iter_mut() { *v = 0.0; }
         let kv_stride = N_KV * MAX_CTX * HEAD_DIM;
         let n_past = (pos + 1).min(MAX_CTX);
-        let mut attn_out_buf = vec![0.0f32; N_HEAD * HEAD_DIM];
         for h in 0..N_HEAD {
             let kv_h = h * N_KV / N_HEAD;
-            let q_h = &self.buf_attn[h*HEAD_DIM..(h+1)*HEAD_DIM];
-            // scores[t] = dot(Q_h, K[kv_h][t]) * ATTN_SCALE
+            let q_h  = unsafe { core::slice::from_raw_parts(self.buf_attn.as_ptr().add(h*HEAD_DIM), HEAD_DIM) };
             for t in 0..n_past {
                 let kb = ai * kv_stride + kv_h * MAX_CTX * HEAD_DIM + t * HEAD_DIM;
                 let mut s = 0.0f32;
@@ -564,38 +573,46 @@ impl Qwen35 {
                 self.buf_sc[t] = s * ATTN_SCALE;
             }
             softmax(&mut self.buf_sc[..n_past]);
-            // attn_out_h = sum_t scores[t] * V[kv_h][t]
             let out_base = h * HEAD_DIM;
             for t in 0..n_past {
                 let vb = ai * kv_stride + kv_h * MAX_CTX * HEAD_DIM + t * HEAD_DIM;
                 let sc = self.buf_sc[t];
-                for d in 0..HEAD_DIM { attn_out_buf[out_base+d] += sc * self.kv_v[vb+d]; }
+                for d in 0..HEAD_DIM { self.buf_out[out_base+d] += sc * self.kv_v[vb+d]; }
             }
         }
 
-        // Apply sigmoid gate: attn_out_h *= sigmoid(gate_h)
+        // Sigmoid gate
         for h in 0..N_HEAD {
             for d in 0..HEAD_DIM {
-                attn_out_buf[h*HEAD_DIM+d] *= sigmoid(self.buf_gate2[h*HEAD_DIM+d]);
+                self.buf_out[h*HEAD_DIM+d] *= sigmoid(self.buf_gate2[h*HEAD_DIM+d]);
             }
         }
 
-        // Output projection: wo rows=N_EMBD, cols=N_HEAD*HEAD_DIM
-        mv_q8(&self.data[o.wo..], N_EMBD, N_HEAD*HEAD_DIM, &attn_out_buf, &mut self.buf_res);
+        // Output projection
+        let out_sl = unsafe { core::slice::from_raw_parts(self.buf_out.as_ptr(), N_HEAD*HEAD_DIM) };
+        mv_q8(unsafe { core::slice::from_raw_parts(data_ptr.add(o.wo), q8_sz(N_EMBD,N_HEAD*HEAD_DIM)) },
+              N_EMBD, N_HEAD*HEAD_DIM, out_sl, &mut self.buf_res);
 
-        // Residual 1
-        for i in 0..N_EMBD { self.buf_x[i] = x_saved[i] + self.buf_res[i]; }
+        // Residual 1: buf_x = buf_x2 + buf_res
+        for i in 0..N_EMBD { self.buf_x[i] = self.buf_x2[i] + self.buf_res[i]; }
 
         // Post-norm + FFN
-        let post_norm = f32_slice(&self.data, o.post_norm, N_EMBD).to_vec();
-        let x_mid = self.buf_x.clone();
-        rms_norm(&post_norm, &x_mid, &mut self.buf_n);
-        let normed2 = self.buf_n.clone();
-        mv_q8(&self.data[o.ffn_gate..], N_FF, N_EMBD, &normed2, &mut self.buf_ff1);
-        mv_q8(&self.data[o.ffn_up..],   N_FF, N_EMBD, &normed2, &mut self.buf_ff2);
+        unsafe {
+            core::ptr::copy_nonoverlapping(self.buf_x.as_ptr(), self.buf_x2.as_mut_ptr(), N_EMBD);
+        }
+        let post_norm = f32_slice(&self.data, o.post_norm, N_EMBD);
+        {
+            let ss: f32 = self.buf_x2.iter().map(|v| v*v).sum::<f32>() / N_EMBD as f32;
+            let inv = 1.0 / libm::sqrtf(ss + RMS_EPS);
+            for i in 0..N_EMBD { self.buf_n[i] = post_norm[i] * self.buf_x2[i] * inv; }
+        }
+        let normed2_sl = unsafe { core::slice::from_raw_parts(self.buf_n.as_ptr(), N_EMBD) };
+        mv_q8(unsafe { core::slice::from_raw_parts(data_ptr.add(o.ffn_gate), q8_sz(N_FF,N_EMBD)) }, N_FF, N_EMBD, normed2_sl, &mut self.buf_ff1);
+        mv_q8(unsafe { core::slice::from_raw_parts(data_ptr.add(o.ffn_up),   q8_sz(N_FF,N_EMBD)) }, N_FF, N_EMBD, normed2_sl, &mut self.buf_ff2);
         for i in 0..N_FF { self.buf_ff1[i] = silu(self.buf_ff1[i]) * self.buf_ff2[i]; }
-        mv_q8(&self.data[o.ffn_down..], N_EMBD, N_FF, &self.buf_ff1.clone(), &mut self.buf_res);
-        for i in 0..N_EMBD { self.buf_x[i] = x_mid[i] + self.buf_res[i]; }
+        let ff1_sl = unsafe { core::slice::from_raw_parts(self.buf_ff1.as_ptr(), N_FF) };
+        mv_q8(unsafe { core::slice::from_raw_parts(data_ptr.add(o.ffn_down), q8_sz(N_EMBD,N_FF)) }, N_EMBD, N_FF, ff1_sl, &mut self.buf_res);
+        for i in 0..N_EMBD { self.buf_x[i] = self.buf_x2[i] + self.buf_res[i]; }
     }
 
     // ── Single token forward pass ─────────────────────────────────────────────
@@ -627,13 +644,16 @@ impl Qwen35 {
             }
         }
 
-        // Final norm
-        let out_norm = f32_slice(&self.data, self.out_norm_off, N_EMBD).to_vec();
-        let x = self.buf_x.clone();
-        rms_norm(&out_norm, &x, &mut self.buf_n);
+        // Final norm (zero heap alloc: use raw ptrs + f32_slice directly)
+        let out_norm = f32_slice(&self.data, self.out_norm_off, N_EMBD);
+        let ss: f32 = self.buf_x.iter().map(|v| v*v).sum::<f32>() / N_EMBD as f32;
+        let inv = 1.0 / libm::sqrtf(ss + RMS_EPS);
+        for i in 0..N_EMBD { self.buf_n[i] = out_norm[i] * self.buf_x[i] * inv; }
 
-        // LM head: logits = token_embd @ normed  (tied weights, shape VOCAB×N_EMBD)
-        mv_q8(&self.data[self.emb_off..], VOCAB, N_EMBD, &self.buf_n.clone(), &mut self.buf_logits);
+        // LM head: logits = token_embd @ normed (tied weights)
+        mv_q8(&self.data[self.emb_off..], VOCAB, N_EMBD,
+              unsafe { core::slice::from_raw_parts(self.buf_n.as_ptr(), N_EMBD) },
+              &mut self.buf_logits);
 
         if pos < MAX_CTX { self.ctx_pos += 1; }
         &self.buf_logits
@@ -673,15 +693,16 @@ pub fn init() {
     }
     crate::klog!(INFO, "lm_qwen35: binary OK ({} MB), parsing tokenizer...", data.len() / 1048576);
 
-    // Parse tokenizer from end of binary
+    // Parse tokenizer from end of binary and pass to tokenizer module
     let vocab = parse_tokenizer(&data);
     if vocab.len() < 100 {
         crate::klog!(ERROR, "lm_qwen35: tokenizer parse failed ({} entries)", vocab.len()); return;
     }
-    tok35::init(vocab.clone());
-    crate::klog!(INFO, "lm_qwen35: tokenizer OK ({} entries)", vocab.len());
+    // Move vocab into tokenizer — no clone, no second copy
+    tok35::init(vocab);
+    crate::klog!(INFO, "lm_qwen35: tokenizer OK, loading model...");
 
-    let model = Qwen35::alloc(data, vocab);
+    let model = Qwen35::alloc(data);
     unsafe { MODEL = Some(model); }
     crate::klog!(INFO, "lm_qwen35: ready");
 }

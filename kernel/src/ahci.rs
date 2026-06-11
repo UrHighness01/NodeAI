@@ -446,6 +446,49 @@ pub fn read_sectors(drive_idx: usize, lba: u64, count: u16) -> Option<Vec<u8>> {
     }
 }
 
+/// Read entire drive `drive_idx` into a Vec<u8>, reading in 32KB chunks.
+/// Stops reading when a full chunk of zeroes is encountered (end of data).
+/// Used by lm_qwen to load weight binary from a dedicated raw disk image.
+pub fn read_all(drive_idx: usize) -> Result<Vec<u8>, &'static str> {
+    const CHUNK_SECTORS: u16 = 64;  // 32 KB per read
+    const CHUNK_BYTES: usize = CHUNK_SECTORS as usize * SECTOR_SIZE;
+
+    // Probe: check if drive exists
+    if drive_count() <= drive_idx {
+        return Err("drive not found");
+    }
+
+    // Read sectors until an all-zero chunk (marks end of payload)
+    let mut out: Vec<u8> = Vec::with_capacity(512 * 1024 * 1024); // 512 MB pre-alloc
+    let mut lba = 0u64;
+    let mut consecutive_zero = 0usize;
+
+    loop {
+        match read_sectors(drive_idx, lba, CHUNK_SECTORS) {
+            Some(chunk) => {
+                let all_zero = chunk.iter().all(|&b| b == 0);
+                if all_zero {
+                    consecutive_zero += 1;
+                    if consecutive_zero >= 4 { break; } // 4 consecutive zero chunks = end
+                } else {
+                    consecutive_zero = 0;
+                }
+                out.extend_from_slice(&chunk);
+                lba += CHUNK_SECTORS as u64;
+                // Hard cap at 768 MB for safety
+                if out.len() >= 768 * 1024 * 1024 { break; }
+            }
+            None => break,
+        }
+    }
+
+    if out.is_empty() { return Err("read returned empty"); }
+    // Trim trailing zeros
+    let trim = out.iter().rposition(|&b| b != 0).map(|p| p + 1).unwrap_or(0);
+    out.truncate(trim);
+    Ok(out)
+}
+
 /// Write `data` (must be a multiple of 512 bytes) to drive `drive_idx` at `lba`.
 pub fn write_sectors(drive_idx: usize, lba: u64, data: &[u8]) -> bool {
     let count = (data.len() / SECTOR_SIZE) as u16;

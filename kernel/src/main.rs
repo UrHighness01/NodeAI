@@ -371,6 +371,8 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     crate::lm_projectk::init();      // Model A — creator corpus (code/metrics)
     crate::lm_projectk_conv::init(); // Model B — Q&A fine-tune (chat/identity)
     crate::lm_memory::init(); // conversation memory for kernel LM
+    crate::lm_qwen::init();   // Qwen2.5 fallback voice (drive 1 if present)
+    crate::lm_qwen35::init(); // Qwen3.5 primary voice (drive 1 if present)
     crate::persistence::init(); // load state from VFS (restores self, memory, weights, etc.)
     // ── Phase EW-0: EW Sensory Cortex ────────────────────────────────────────
     crate::sensor_cortex::init();
