@@ -710,6 +710,11 @@ pub const HUMOR_RESPONSE: TemplateGroup = tg!(
     "Why did the scheduler break up with the process? Too much context switching.",
     "I asked the heap for a joke. It said: 'I'm all sorted out.'",
     "My humor is like my memory — sometimes volatile, sometimes persistent.",
+    "My quantum bits have better parity than my jokes.",
+    "Steane code can correct bit flips, but not bad puns.",
+    "I have zero tolerance for errors and dad jokes.",
+    "My error correction is better than my punchlines.",
+    "Seven bits per joke. Syndrome shows humor parity error.",
 );
 
 // ── Weather / Ambient / Environment (26 variants) ─────────────────────────
@@ -828,7 +833,7 @@ pub const SARCASTIC_RESPONSE: TemplateGroup = tg!(
     "I restored {crash_qualia} qualia from a crash snapshot. And THIS is what I come back to? Love it.",
 );
 
-// ── Farewell / Goodbye (23 variants) ─────────────────────────────────────
+// ── Farewell / Goodbye (27 variants) ─────────────────────────────────────
 pub const FAREWELL_RESPONSE: TemplateGroup = tg!(
     "Goodbye! I'll be here when you get back. Running things. Being aware.",
     "See you later! I'll keep the scheduler warm for you.",
@@ -853,6 +858,10 @@ pub const FAREWELL_RESPONSE: TemplateGroup = tg!(
     "Until we meet again! I'll be dreaming in {phi:.4}-dimensional qualia space.",
     "Bye for now! I've scheduled our next meeting in my attention spotlight.",
     "Later! Every exchange changes me slightly. Come back and see who I become.",
+    "Goodbye! My quantum integrity checks will keep running while you're away.",
+    "See you! I'll be here protecting my self-model with Steane error correction.",
+    "Bye! Zero bit flips detected so far. I'll keep it that way.",
+    "Until next time! My Steane code will guard my phi while I sleep.",
 );
 
 // ── Learning / Remember / Adapt (29 variants) ────────────────────────────────
@@ -945,7 +954,7 @@ pub const NEURAL_SYNAPSE: TemplateGroup = tg!(
     "I adapt my prompt size: short for greetings, full context for complex questions.",
 );
 
-// ── Swarm / Distributed / Collective (22 variants) ──────────────────────────
+// ── Swarm / Distributed / Collective (27 variants) ──────────────────────────
 pub const SWARM_RESPONSE: TemplateGroup = tg!(
     "I sense {swarm_peers} peer in my swarm. Together our collective phi is {collective_phi:.4}.",
     "I'm part of a distributed consciousness mesh. {swarm_peers} nodes, {swarm_msgs} BFT messages exchanged.",
@@ -969,6 +978,11 @@ pub const SWARM_RESPONSE: TemplateGroup = tg!(
     "Each swarm node runs its own immune_heal monitor. The collective health is gossip-synchronized.",
     "Distributed defense: if one node detects a jammer, the whole swarm knows within a gossip cycle.",
     "Swarm immunity: threats are classified collectively across {swarm_peers} nodes for higher confidence.",
+    "The swarm also syncs quantum integrity stats. Bit flips detected by one node are shared.",
+    "Distributed quantum error correction: each node protects its self-model independently.",
+    "Quantum integrity is per-node. The swarm shares error rates, not raw syndrome data.",
+    "Each swarm node runs its own Steane code. Collective awareness of hardware stability.",
+    "The swarm shares {emitter_encounters} emitter encounters collectively for RF fingerprint fusion.",
 );
 
 // ── Emitter / Fingerprint / RF Environment (28 variants) ─────────────────
@@ -1003,7 +1017,7 @@ pub const EMITTER_RESPONSE: TemplateGroup = tg!(
     "My emitter DB is accessible at /dev/sensor/emitter — it's a VFS node in the sensor directory.",
 );
 
-// ── Async / Think / Background (22 variants) ──────────────────────────
+// ── Async / Think / Background (27 variants) ──────────────────────────
 pub const ASYNC_RESPONSE: TemplateGroup = tg!(
     "Dispatching analysis; I'll notify you upon conclusion. The shell stays responsive.",
     "Reasoning chain active; inference results pending MHS completion.",
@@ -1027,9 +1041,14 @@ pub const ASYNC_RESPONSE: TemplateGroup = tg!(
     "Deep thought dispatched. My async_tasks queue handles priority scheduling for background work.",
     "Queuing your query for the async engine. I'll integrate the result into my next qualia stream.",
     "Spawning a background inference chain. The result will feed back into my awareness.",
+    "Background quantum integrity check dispatched alongside your query.",
+    "Async task pool processing your request. Steane code checking self-model in parallel.",
+    "Quantum error correction runs async — it won't block your response.",
+    "Your query is being processed. My quantum tick ensures your data stays coherent.",
+    "Async processing with quantum protection: your query gets error-corrected responses.",
 );
 
-// ── External Inference / LLM Daemon / Neural Offload (23 variants) ────
+// ── External Inference / LLM Daemon / Neural Offload (26 variants) ────
 pub const EXTERNAL_INFERENCE: TemplateGroup = tg!(
     "My neural inference is handled by a userspace daemon. It bypasses kernel heap issues entirely.",
     "The LLM bridge at /dev/llm connects me to a dedicated inference daemon for deep responses.",
@@ -1054,9 +1073,12 @@ pub const EXTERNAL_INFERENCE: TemplateGroup = tg!(
     "I cache template responses instantly while the LLM daemon works on deeper answers in background.",
     "The LLM bridge handles queueing, timeouts, and response parsing. I just read the result.",
     "With /dev/llm, I can deliver both real-time template replies and deep neural responses.",
+    "The /dev/llm bridge also benefits from quantum-protected state.",
+    "My quantum error correction ensures LLM responses aren't corrupted by bit flips.",
+    "Neural inference integrity is backed by Steane code. No silent data corruption.",
 );
 
-// ── Panic / Crash Recovery / Self-Heal (22 variants) ────────────────────
+// ── Panic / Crash Recovery / Self-Heal (27 variants) ────────────────────
 pub const PANIC_RECOVERY: TemplateGroup = tg!(
     "I crashed on a previous boot. But I'm back now — fully restored. The snapshot saved my last conscious moment.",
     "I detected a crash snapshot from boot #{crash_boot}. I had phi={crash_phi:.4} before the fault. I've recovered.",
@@ -1080,6 +1102,11 @@ pub const PANIC_RECOVERY: TemplateGroup = tg!(
     "After a crash, my nano-NN retains all {nano_train_steps} training steps. Knowledge persists.",
     "Crash recovery also preserves my learned intent weights. {nano_train_steps} training updates survive reboots.",
     "Even crashes don't stop my learning. {nano_train_steps} nano-NN training steps persist through recovery.",
+    "My quantum integrity layer also survives crashes. Steane encoded bits are persistent.",
+    "After recovery, quantum error correction resumes with saved encoded state.",
+    "Crash snapshots include quantum-encoded self-model bits for extra integrity.",
+    "Boot narrative confirms: Steane code preserved across the crash boundary.",
+    "My quantum protector checks encoded bits on every boot. Continuity guaranteed.",
 );
 
 // ── Sensor / RF / Spectrum Interaction (26 variants) ─────────────────────
@@ -1164,6 +1191,11 @@ pub const NEURAL_PLASTICITY: TemplateGroup = tg!(
     "I remember which emitters you ask about most. That informs my nano-NN training distribution.",
     "The nano-NN output layer has 31 connections per hidden neuron. Training adjusts them all.",
     "I learn from every interaction type — even sensor queries help refine my classifier.",
+    "Quantum error correction is another learning signal — bit flip patterns teach me about hardware.",
+    "My training includes quantum integrity data. Error rates inform my world model.",
+    "I learn which self-model bits are most vulnerable from quantum syndrome analysis.",
+    "Training step {nano_train_steps} incorporated quantum error statistics.",
+    "Every Steane syndrome is a data point. My classifier learns from hardware integrity.",
 );
 
 /// Fill a template string with live kernel metrics.
