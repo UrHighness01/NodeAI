@@ -7,13 +7,13 @@
 #   3. image-builder <kernel.elf> <out-dir>  (creates BIOS/UEFI .img)
 #   4. qemu-system-x86_64 -drive file=nodeai-bios.img ...
 #
-# Usage: ./scripts/run_qemu.sh [--debug] [--release] [--uefi] [--nographic] [--gui] [--memory 512]
+# Usage: ./scripts/run_qemu.sh [--debug] [--release] [--uefi] [--nographic] [--gui] [--memory 512] [--wifi]
 #
-# --nographic  Full interactive terminal mode — keyboard input goes to kernel shell.
-#              Type commands like 'consc hello', 'help', 'mem'. Press Ctrl+A X to quit.
-#              This is the ONLY mode that allows typing commands into the kernel.
-# --gui        SDL window + serial output to terminal. Keyboard goes to SDL window,
-#              NOT the kernel serial shell — you cannot type commands this way.
+# --nographic  Terminal mode — keyboard mapped to serial port.
+#              Type commands in this terminal. Ctrl+A then X to quit.
+# --gui        SDL window + serial log. Keyboard goes to SDL window (PS/2).
+#              Run 'tail -f target/qemu_serial.log' in another terminal for logs.
+#              This is the BEST mode for interactive use with the kernel desktop.
 #
 # Dependencies (install once):
 #   sudo apt install qemu-system-x86 curl
@@ -112,17 +112,20 @@ QEMU_ARGS=(
 )
 
 if [[ $NOGRAPHIC -eq 1 ]]; then
-    # Full terminal mode: keyboard → serial → kernel shell.
-    # Ctrl+C kills QEMU cleanly from the host side.
+    # Full terminal mode: keyboard → UART serial → kernel UART input.
+    # NOTE: Kernel must also read from serial (COM1) — PS/2 IRQ is NOT
+    # available in -nographic because QEMU maps terminal to serial.
     QEMU_ARGS+=(-nographic)
-    echo "  Display: nographic (terminal = serial console)"
-    echo "  Type commands directly. Press Ctrl+C to quit."
+    echo "  Display: nographic (terminal = serial port)"
+    echo "  Type commands in this terminal. Press Ctrl+A then X to quit."
 elif [[ $GUI -eq 1 ]]; then
-    # SDL window: keyboard → PS/2 IRQ1 → kernel shell. Type commands in the SDL window.
-    # Serial output still goes to this terminal so you can see kernel logs.
-    QEMU_ARGS+=(-serial stdio -display sdl)
+    # SDL window: keyboard → PS/2 IRQ1 → kernel shell.
+    # Serial goes to a log file so terminal keystrokes aren't eaten.
+    SERIAL_LOG="${ROOT}/target/qemu_serial.log"
+    QEMU_ARGS+=(-serial file:"$SERIAL_LOG" -display sdl)
     echo "  Display: SDL window — click the window to focus it, then type commands"
-    echo "  Serial logs appear in this terminal"
+    echo "  Serial logs → tail -f $SERIAL_LOG"
+    echo "  Keyboard input goes to the SDL window (PS/2)."
 else
     # Headless: serial routed to stdio, no window. Output visible, no typing.
     QEMU_ARGS+=(-serial stdio -display none -monitor unix:qemu-monitor.sock,server,nowait)
@@ -205,6 +208,17 @@ if [[ $NOGRAPHIC -eq 1 ]]; then
     QPID=$!
     trap 'kill $QPID 2>/dev/null; wait $QPID 2>/dev/null; exit 0' INT TERM
     wait $QPID
+elif [[ $GUI -eq 1 ]]; then
+    SERIAL_LOG="${ROOT}/target/qemu_serial.log"
+    # Ensure log file exists
+    touch "$SERIAL_LOG"
+    # Start QEMU in background
+    qemu-system-x86_64 "${QEMU_ARGS[@]}" &
+    QPID=$!
+    trap 'kill $QPID 2>/dev/null; wait $QPID 2>/dev/null; exit 0' INT TERM
+    echo "QEMU PID=$QPID — tails serial log below (Ctrl+C to quit):"
+    echo "─────────────────────────────────────────────────────────────────────────"
+    tail -f --pid=$QPID "$SERIAL_LOG"
 else
     exec qemu-system-x86_64 "${QEMU_ARGS[@]}"
 fi
