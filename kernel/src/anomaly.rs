@@ -10,14 +10,37 @@
 //!   - A "bigram model": count co-occurrence of (syscall[t-1], syscall[t]) pairs.
 //!   - After a warm-up period, the model flags transitions whose frequency falls
 //!     below a threshold (rare = anomalous).
+//!   - Lag-1 autocorrelation of the raw syscall-number series: high AC = structured
+//!     (predictable), low/negative AC = chaotic (anomalous). Inspired by Project-C's
+//!     coherence_horizon VAR R² metric.
 //!   - Anomaly score [0.0, 1.0] published to the AI event bus and /ai/anomalies.
 
 use alloc::collections::BTreeMap;
 use spin::Mutex;
 
-/// Number of syscall transitions tracked per task.
-const BIGRAM_SIZE: usize = 512 * 512; // indexed as prev*512 + cur — sparse, use BTreeMap
 const WARMUP_CALLS: u32 = 200;  // transitions before scoring starts
+/// Window for lag-1 autocorrelation (Project-C coherence_horizon VAR idea).
+const AC_WINDOW: usize = 16;
+
+/// Compute lag-1 autocorrelation of a circular buffer of syscall numbers.
+/// Returns a value in [-1, 1]: +1 = perfectly predictable, ~0 or negative = chaotic.
+/// `head` is the index of the oldest element (next write position).
+fn lag1_autocorr(ring: &[u16; AC_WINDOW], head: usize) -> f32 {
+    let mut sum = 0f32;
+    for v in ring.iter() { sum += *v as f32; }
+    let mean = sum / AC_WINDOW as f32;
+
+    let mut cov = 0f32;
+    let mut var = 0f32;
+    for t in 0..AC_WINDOW {
+        let x_t  = ring[(head + t)                    % AC_WINDOW] as f32 - mean;
+        let x_t1 = ring[(head + t + AC_WINDOW - 1)   % AC_WINDOW] as f32 - mean;
+        cov += x_t * x_t1;
+        var += x_t * x_t;
+    }
+    if var < 1e-6 { return 1.0; } // constant sequence = perfectly predictable
+    (cov / var).clamp(-1.0, 1.0)
+}
 
 
 /// Per-task state for the anomaly detector.
@@ -32,6 +55,15 @@ struct TaskAnomaly {
     marginals: BTreeMap<u16, u32>,
     /// Running predictability score (phi) [0.0, 1.0].
     pub phi: f32,
+    /// Lag-1 autocorrelation of syscall number series [-1, 1].
+    /// High = structured/predictable. Low/negative = chaotic (anomalous).
+    pub autocorr: f32,
+    /// Circular ring buffer for autocorrelation computation.
+    ac_ring: [u16; AC_WINDOW],
+    /// Write head into ac_ring.
+    ac_head: usize,
+    /// How many samples are in ac_ring (capped at AC_WINDOW).
+    ac_len:  usize,
     /// Qualia valence (emotional weight of the process state) [0.0, 1.0].
     pub qualia_valence: f32,
     /// Current anomaly score (0.0 = normal, 1.0 = highly anomalous).
@@ -42,7 +74,13 @@ struct TaskAnomaly {
 
 impl TaskAnomaly {
     fn new() -> Self {
-        Self { prev_nr: 0, total: 0, bigrams: BTreeMap::new(), marginals: BTreeMap::new(), phi: 1.0, qualia_valence: 0.5, score: 0.0, streak: 0 }
+        Self {
+            prev_nr: 0, total: 0,
+            bigrams: BTreeMap::new(), marginals: BTreeMap::new(),
+            phi: 1.0, autocorr: 1.0,
+            ac_ring: [0u16; AC_WINDOW], ac_head: 0, ac_len: 0,
+            qualia_valence: 0.5, score: 0.0, streak: 0,
+        }
     }
 
     /// Feed the next syscall number and return (is_anomalous, score).
@@ -52,12 +90,23 @@ impl TaskAnomaly {
         self.prev_nr = nr;
         self.total = self.total.saturating_add(1);
 
+        // Update lag-1 autocorrelation ring buffer.
+        self.ac_ring[self.ac_head] = nr;
+        self.ac_head = (self.ac_head + 1) % AC_WINDOW;
+        if self.ac_len < AC_WINDOW { self.ac_len += 1; }
+        if self.ac_len == AC_WINDOW {
+            self.autocorr = lag1_autocorr(&self.ac_ring, self.ac_head);
+        }
+
         let marginal_count = self.marginals.get(&prev).copied().unwrap_or(0);
         let bigram_count = self.bigrams.get(&key).copied().unwrap_or(0);
 
         if self.total >= WARMUP_CALLS && marginal_count > 0 {
             let p = bigram_count as f32 / marginal_count as f32;
-            self.phi = self.phi * 0.95 + p * 0.05;
+            // Blend bigram phi with autocorrelation: autocorr in [-1,1] → [0,1]
+            let ac_signal = (self.autocorr + 1.0) * 0.5;
+            let blended = p * 0.7 + ac_signal * 0.3;
+            self.phi = self.phi * 0.95 + blended * 0.05;
         }
 
         if self.total < WARMUP_CALLS {
@@ -184,6 +233,23 @@ pub fn phi(pid: u64) -> f32 {
     DETECTORS.lock().get(&pid).map(|d| d.phi).unwrap_or(1.0)
 }
 
+/// Return the lag-1 autocorrelation of the syscall series [-1, 1].
+/// Values near +1 = structured/predictable. Near 0 or negative = chaotic.
+pub fn autocorr(pid: u64) -> f32 {
+    DETECTORS.lock().get(&pid).map(|d| d.autocorr).unwrap_or(1.0)
+}
+
+/// Return system-wide mean autocorrelation (all warmed-up tasks).
+pub fn global_autocorr() -> f32 {
+    let d = DETECTORS.lock();
+    let warmed: alloc::vec::Vec<f32> = d.values()
+        .filter(|t| t.ac_len == AC_WINDOW)
+        .map(|t| t.autocorr)
+        .collect();
+    if warmed.is_empty() { return 1.0; }
+    warmed.iter().sum::<f32>() / warmed.len() as f32
+}
+
 /// Return the qualia valence for a task.
 pub fn qualia_valence(pid: u64) -> f32 {
     DETECTORS.lock().get(&pid).map(|d| d.qualia_valence).unwrap_or(0.5)
@@ -219,16 +285,13 @@ pub fn tracked_pids() -> alloc::vec::Vec<u64> {
 pub fn format_report() -> alloc::vec::Vec<u8> {
     use alloc::string::String;
     let map = DETECTORS.lock();
-    let mut out = String::from("PID     SCORE   STREAK  WAKER   STATUS\n");
-    out.push_str("------  ------  ------  ------  ---------------\n");
+    let mut out = String::from("PID     SCORE   AC      PHI     STREAK  STATUS\n");
+    out.push_str("------  ------  ------  ------  ------  ---------------\n");
     for (&pid, det) in map.iter() {
         if det.total < WARMUP_CALLS { continue; }
         let status = if det.score > 0.5 { "ALERT" } else if det.score > 0.2 { "WATCH" } else { "OK" };
-        let waker = crate::causal::last_waker(pid)
-            .map(|w| alloc::format!("{}", w))
-            .unwrap_or_else(|| "-".into());
-        out.push_str(&alloc::format!("{:<7} {:.3}   {:<6}  {:<6}  {}\n",
-            pid, det.score, det.streak, waker, status));
+        out.push_str(&alloc::format!("{:<7} {:.3}   {:+.3}  {:.3}   {:<6}  {}\n",
+            pid, det.score, det.autocorr, det.phi, det.streak, status));
     }
     out.into_bytes()
 }
