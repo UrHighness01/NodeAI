@@ -13,12 +13,6 @@ use alloc::format;
 use alloc::vec::Vec;
 use spin::Mutex;
 
-/// Maximum ticks on one frequency before exposure is critical.
-const MAX_TICKS_ON_FREQ: u64 = 500; // 50s at 100ms tick
-
-/// Default tick interval for linear exposure ramp.
-const TICK_EXPOSURE_DELTA: f32 = 0.002; // 0.2% per tick → 100% at 500 ticks
-
 struct CovertState {
     /// Ticks spent on current frequency.
     ticks_on_freq: u64,
@@ -58,12 +52,9 @@ pub fn tick() {
 
     state.ticks_on_freq = state.ticks_on_freq.saturating_add(1);
 
-    if state.stealth_mode {
-        // In stealth mode, exposure rises slower
-        state.exposure = (state.exposure + TICK_EXPOSURE_DELTA * 0.3).min(1.0);
-    } else {
-        state.exposure = (state.exposure + TICK_EXPOSURE_DELTA).min(1.0);
-    }
+    // Exposure rises with time on frequency (stealth mode = 1/3 rate)
+    let delta = if state.stealth_mode { 1 } else { 3 };
+    state.exposure = (state.exposure + delta as f32 * 0.001).min(1.0);
 
     if state.exposure > state.peak_exposure {
         state.peak_exposure = state.exposure;
@@ -172,7 +163,9 @@ pub fn format_report() -> Vec<u8> {
                 if s.exposure >= 0.7 {
                     0
                 } else {
-                    ((0.7 - s.exposure) / TICK_EXPOSURE_DELTA) as u64
+                    // Estimate ticks until 70% exposure
+                    let rate = if s.stealth_mode { 0.001 } else { 0.003 };
+                    ((0.7 - s.exposure) / rate) as u64
                 },
             ).into_bytes()
         }

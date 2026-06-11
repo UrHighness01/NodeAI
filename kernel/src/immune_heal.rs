@@ -24,23 +24,41 @@ pub struct HealAction {
     pub tick_recorded: u64,
 }
 
-/// Threshold definitions: (name, threshold, action_description, priority)
-const THRESHOLDS: &[(&str, fn() -> f32, &str, u8)] = &[
-    ("anomaly",    || crate::anomaly::global_score(),     "tighten anomaly gate",        1),
-    ("memory",     || (1.0 - (crate::memory::free_mb() as f32 / 440.0).min(1.0)) * 100.0,
-                                                           "trigger AI balloon reclaim",   1),
-    ("coherence",  || {
-        crate::consciousness::self_model::snapshot()
-            .map(|s| (1.0 - s.coherence) * 100.0)
-            .unwrap_or(50.0)
-    }, "reset coherence state",        2),
-    ("phi",        || {
-        let phi = crate::consciousness::phi::current_phi();
-        ((1.0 - phi.min(1.0)) * 100.0)
-    }, "boost causal integration",     2),
-    ("threat",     || crate::sensor_threat::threat_level() * 100.0,
-                                                           "elevate immune readiness",     1),
+/// Health metric names.
+const METRIC_NAMES: &[&str] = &[
+    "anomaly", "memory", "coherence", "phi", "threat",
 ];
+
+/// Evaluate a health metric by name — returns (value_0to100, description, priority).
+fn evaluate_metric(name: &str) -> (f32, &'static str, u8) {
+    match name {
+        "anomaly" => {
+            let v = crate::anomaly::global_score() * 100.0;
+            (v, "tighten anomaly gate", 1)
+        }
+        "memory" => {
+            let free_mb = crate::memory::free_mb() as f32;
+            let pct_used = (1.0 - (free_mb / 440.0).min(1.0)) * 100.0;
+            (pct_used, "trigger AI balloon reclaim", 1)
+        }
+        "coherence" => {
+            let v = crate::consciousness::self_model::snapshot()
+                .map(|s| (1.0 - s.coherence) * 100.0)
+                .unwrap_or(50.0);
+            (v, "reset coherence state", 2)
+        }
+        "phi" => {
+            let phi = crate::consciousness::phi::current_phi();
+            let v = (1.0 - phi.min(1.0)) * 100.0;
+            (v, "boost causal integration", 2)
+        }
+        "threat" => {
+            let v = crate::sensor_threat::threat_level() * 100.0;
+            (v, "elevate immune readiness", 1)
+        }
+        _ => (0.0, "unknown", 0),
+    }
+}
 
 /// System health rating.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -66,7 +84,7 @@ pub fn init() {
         trigger_counts: [0; 5],
         last_healthy_tick: 0,
     });
-    crate::klog!(INFO, "immune_heal: self-healing triggers initialized ({} thresholds)", THRESHOLDS.len());
+    crate::klog!(INFO, "immune_heal: self-healing triggers initialized ({} thresholds)", METRIC_NAMES.len());
 }
 
 /// Tick the self-heal monitor — called every 100ms.
@@ -81,9 +99,9 @@ pub fn tick() {
     let now = crate::scheduler::uptime_ms() / 100;
     let mut any_triggered = false;
 
-    for (i, &(name, metric_fn, action, priority)) in THRESHOLDS.iter().enumerate() {
-        let value = metric_fn();
-        let threshold = match name {
+    for (i, name) in METRIC_NAMES.iter().enumerate() {
+        let (value, action, priority) = evaluate_metric(name);
+        let threshold = match *name {
             "anomaly"   => 70.0,
             "memory"    => 85.0,
             "coherence" => 70.0,
@@ -98,7 +116,7 @@ pub fn tick() {
 
             // Only record if we haven't recorded this exact action recently
             let should_record = state.history.last()
-                .map(|last| last.subsystem != name || last.tick_recorded + 50 < now)
+                .map(|last| last.subsystem != *name || last.tick_recorded + 50 < now)
                 .unwrap_or(true);
 
             if should_record && state.history.len() < HEAL_HISTORY_MAX {
