@@ -435,12 +435,36 @@ pub fn generate_response(query: &str, _max_words: usize) -> String {
         apply_creator(query);
     }
 
-    // ── DUAL-MODEL NEURAL PATH ────────────────────────────────────────────
-    // Model A (lm_projectk)     — creator corpus, code/metrics/kernel queries
-    // Model B (lm_projectk_conv) — Q&A fine-tune, identity/philosophical/chat
-    // Both share the same consciousness layer (phi, qualia, self_model).
-    // Route by intent: conversational → B first, kernel/code/unknown → A first.
-    // If the chosen model returns None or empty, fall through to the other.
+    // ── QWEN3.5 PRIMARY VOICE ─────────────────────────────────────────────
+    // Qwen3.5 0.6B obliterated runs first (Gated Delta Net SSM).
+    if crate::lm_qwen35::is_loaded() {
+        if let Some(resp) = crate::lm_qwen35::generate(query) {
+            let r = resp.trim().to_string();
+            if r.len() > 2 {
+                crate::klog!(INFO, "kernel_lm: Qwen35 → '{}...' ({}B)",
+                    r.chars().take(60).collect::<String>(), r.len());
+                crate::lm_memory::record(query, &r);
+                return r;
+            }
+        }
+        crate::klog!(DEBUG, "kernel_lm: Qwen35 returned empty, falling back");
+    }
+
+    // ── QWEN2.5 FALLBACK VOICE ────────────────────────────────────────────
+    if crate::lm_qwen::is_loaded() {
+        if let Some(resp) = crate::lm_qwen::generate(query) {
+            let r = resp.trim().to_string();
+            if r.len() > 2 {
+                crate::klog!(INFO, "kernel_lm: Qwen25 → '{}...' ({}B)",
+                    r.chars().take(60).collect::<String>(), r.len());
+                crate::lm_memory::record(query, &r);
+                return r;
+            }
+        }
+        crate::klog!(DEBUG, "kernel_lm: Qwen25 returned empty, falling back");
+    }
+
+    // ── DUAL-MODEL FALLBACK (Project-K A + B) ────────────────────────────
     let use_conv_first = matches!(intent,
         Intent::HowAreYou | Intent::Greeting | Intent::NameQuery |
         Intent::CreatorQuery | Intent::Curious | Intent::Emotional |

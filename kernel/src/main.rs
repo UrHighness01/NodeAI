@@ -37,7 +37,8 @@ pub mod vfs;
 pub mod vga;
 
 // ── Hardware drivers ──────────────────────────────────────────────────────────
-mod ahci;
+pub mod ahci;
+pub use ahci as storage;  // storage::read_all(drive_idx) → raw disk bytes
 mod crash_dump;
 mod efi_vars;
 mod fsck;
@@ -113,6 +114,8 @@ pub mod lm_templates;   // multi-variant LM templates
 pub mod lm_mhs_prompt;  // MHS prompt builder with context
 pub mod lm_projectk;      // Project-K Model A — creator corpus (code/metrics)
 pub mod lm_projectk_conv; // Project-K Model B — Q&A fine-tune (chat/identity)
+pub mod lm_qwen;          // Qwen2.x/3.x in-kernel inference (dynamic arch, INT4)
+pub mod lm_qwen35;        // Qwen3.5 0.6B Gated Delta Net + GQA in-kernel inference
 // lm_mhs_tok / lm_projectk_tok are child modules of their respective parents
 pub mod swarm_consensus; // EW-5 swarm consciousness
 pub mod nano_nn;        // nano-NN intent embedding classifier
