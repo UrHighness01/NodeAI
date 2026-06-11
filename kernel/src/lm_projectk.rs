@@ -60,7 +60,7 @@ fn f32_r(d: &[u8], o: &mut usize) -> f32 {
 }
 
 pub fn init() {
-    let bin = include_bytes!("projectk_weights.bin");
+    let bin = include_bytes!("../../models/projectk_weights.bin");
     let mut o = 4usize;
     let _v=rd4(bin,&mut o);let _d=rd4(bin,&mut o);let _nl=rd4(bin,&mut o);
     let _h0=rd4(bin,&mut o);let _h1=rd4(bin,&mut o);let _gs=rd4(bin,&mut o);

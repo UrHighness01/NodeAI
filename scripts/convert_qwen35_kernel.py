@@ -47,10 +47,9 @@ Attention layer block:
 import sys, os, struct
 import numpy as np
 
-GGUF_PATH = os.path.expanduser(
-    "~/.openclaw/models/qwen_obliterated/qwen35_0.6b_obliterated.gguf"
-)
-OUT_PATH = os.path.expanduser("~/.openclaw/workspace/GitHub/NodeAI/models/lm_qwen35.bin")
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+GGUF_PATH = os.path.join(SCRIPT_DIR, "..", "..", "..", "models", "qwen_obliterated", "qwen35_0.6b_obliterated.gguf")
+OUT_PATH   = os.path.join(SCRIPT_DIR, "..", "models", "lm_qwen35.bin")
 
 GS      = 32
 BSIZE   = 34   # Q8_0 block bytes: 2(f16) + 32(i8)

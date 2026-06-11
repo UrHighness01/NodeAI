@@ -20,3 +20,6 @@ Alpha8-Protect/
 intelli/
 output/
 kernel/src/mhs_kernel.bin
+# Model weights moved to models/ — old locations
+kernel/src/projectk_weights.bin
+kernel/src/projectk_conv_weights.bin

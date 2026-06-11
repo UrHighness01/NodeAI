@@ -79,7 +79,7 @@ pub fn init() {
     // but is_loaded() returns false (routing falls back to Model A).
     #[cfg(not(feature = "no_conv_model"))]
     {
-        static CONV_BIN: &[u8] = include_bytes!("projectk_conv_weights.bin");
+        static CONV_BIN: &[u8] = include_bytes!("../../models/projectk_conv_weights.bin");
         let bin = CONV_BIN;
         let mut o = 4usize;
         let _v=rd4(bin,&mut o);let _d=rd4(bin,&mut o);let _nl=rd4(bin,&mut o);
