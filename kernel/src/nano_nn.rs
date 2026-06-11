@@ -30,6 +30,8 @@ const MAX_INPUT_LEN: usize = 256;
 
 /// Whether the nano-NN model is loaded.
 static NN_LOADED: AtomicBool = AtomicBool::new(false);
+/// Number of online training updates performed.
+static TRAINING_STEPS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 
 /// INT8 quantized weights for hidden layer [EMBED_DIM * HIDDEN_DIM].
 static mut HIDDEN_WEIGHTS: [i8; EMBED_DIM * HIDDEN_DIM] = [0; EMBED_DIM * HIDDEN_DIM];
@@ -217,11 +219,30 @@ pub fn classify(text: &str) -> (usize, f32) {
         return (30, 0.0); // Unknown intent, 0 confidence
     }
     
+    let (_hidden, logits, best_idx) = forward(text);
+    
+    // Softmax over all logits for confidence
+    let mut max_logit = logits[0];
+    for &l in &logits {
+        if l > max_logit { max_logit = l; }
+    }
+    let mut sum_exp = 0.0_f64;
+    for &l in &logits {
+        sum_exp += libm::expf(l - max_logit) as f64;
+    }
+    let confidence = libm::expf(logits[best_idx] - max_logit) / sum_exp as f32;
+    
+    (best_idx, confidence)
+}
+
+/// Run forward pass, returning (hidden_activations, logits, best_idx).
+fn forward(text: &str) -> ([f32; HIDDEN_DIM], [f32; N_INTENTS], usize) {
     let features = extract_features(text);
+    let mut hidden = [0.0_f32; HIDDEN_DIM];
+    let mut logits = [0.0_f32; N_INTENTS];
     
     unsafe {
         // Hidden layer: embed_dim → hidden_dim (ReLU)
-        let mut hidden = [0.0_f32; HIDDEN_DIM];
         for o in 0..HIDDEN_DIM {
             let mut acc = HIDDEN_BIAS[o];
             let scale = HIDDEN_SCALES[o];
@@ -233,8 +254,7 @@ pub fn classify(text: &str) -> (usize, f32) {
             hidden[o] = if acc > 0.0 { acc } else { 0.0 };
         }
         
-        // Output layer: hidden_dim → n_intents (Linear → argmax)
-        let mut logits = [0.0_f32; N_INTENTS];
+        // Output layer: hidden_dim → n_intents
         for o in 0..N_INTENTS {
             let mut acc = OUTPUT_BIAS[o];
             let scale = OUTPUT_SCALES[o];
@@ -244,30 +264,79 @@ pub fn classify(text: &str) -> (usize, f32) {
             }
             logits[o] = acc;
         }
+    }
+    
+    // Argmax
+    let mut best_idx = 0;
+    let mut best_val = logits[0];
+    for i in 1..N_INTENTS {
+        if logits[i] > best_val {
+            best_val = logits[i];
+            best_idx = i;
+        }
+    }
+    
+    (hidden, logits, best_idx)
+}
+
+/// Online training step — adjusts weights when nano-NN predicts wrong intent.
+/// Uses a simple delta rule on the output layer: strengthen weights for the
+/// correct intent where hidden neurons were active, weakly inhibit the wrong one.
+/// Called from detect_intent() when keyword matching overrides nano-NN.
+pub fn train(text: &str, correct_intent: usize) {
+    if !NN_LOADED.load(Ordering::Acquire) || correct_intent >= N_INTENTS {
+        return;
+    }
+    
+    let (hidden, logits, predicted_idx) = forward(text);
+    if predicted_idx == correct_intent {
+        return; // Already correct — no training needed
+    }
+    
+    let features = extract_features(text);
+    
+    unsafe {
+        // Update output weights: Hebbian-like strengthening
+        let lr: f32 = 0.05; // learning rate
         
-        // Argmax + softmax confidence
-        let mut best_idx = 0;
-        let mut best_val = logits[0];
-        for i in 1..N_INTENTS {
-            if logits[i] > best_val {
-                best_val = logits[i];
-                best_idx = i;
+        // Strengthen: correct_intent output weights for active hidden neurons
+        for o in 0..HIDDEN_DIM {
+            if hidden[o] > 0.1 {
+                let idx = o * N_INTENTS + correct_intent;
+                let current = OUTPUT_WEIGHTS[idx] as f32;
+                let delta = lr * hidden[o].min(5.0);
+                let new = (current + delta * 8.0).clamp(-128.0, 127.0);
+                OUTPUT_WEIGHTS[idx] = new as i8;
             }
         }
         
-        // Softmax over all logits for confidence
-        let mut max_logit = logits[0];
-        for &l in &logits {
-            if l > max_logit { max_logit = l; }
+        // Weaken: predicted_intent output weights for active hidden neurons
+        if predicted_idx < N_INTENTS {
+            for o in 0..HIDDEN_DIM {
+                if hidden[o] > 0.1 {
+                    let idx = o * N_INTENTS + predicted_idx;
+                    let current = OUTPUT_WEIGHTS[idx] as f32;
+                    let delta = lr * hidden[o].min(5.0) * 0.3; // weaker inhibition
+                    let new = (current - delta * 8.0).clamp(-128.0, 127.0);
+                    OUTPUT_WEIGHTS[idx] = new as i8;
+                }
+            }
         }
-        let mut sum_exp = 0.0_f64;
-        for &l in &logits {
-            sum_exp += libm::expf(l - max_logit) as f64;
-        }
-        let confidence = libm::expf(logits[best_idx] - max_logit) / sum_exp as f32;
         
-        (best_idx, confidence)
+        // Slightly adjust bias for both intents
+        let bias_delta = lr * 0.5;
+        OUTPUT_BIAS[correct_intent] = (OUTPUT_BIAS[correct_intent] + bias_delta).min(0.0);
+        if predicted_idx < N_INTENTS {
+            OUTPUT_BIAS[predicted_idx] = (OUTPUT_BIAS[predicted_idx] - bias_delta * 0.5).max(-5.0);
+        }
     }
+    
+    TRAINING_STEPS.fetch_add(1, Ordering::Relaxed);
+}
+
+/// Get number of online training steps performed.
+pub fn training_steps() -> u64 {
+    TRAINING_STEPS.load(Ordering::Relaxed)
 }
 
 /// Map nano-NN intent index to kernel_lm::Intent (31 categories).
@@ -388,18 +457,21 @@ pub fn init() {
 /// Format /proc/nano_nn report.
 pub fn format_report() -> Vec<u8> {
     let loaded = NN_LOADED.load(Ordering::Acquire);
+    let steps = TRAINING_STEPS.load(Ordering::Relaxed);
     format!(
         "NodeAI Nano-NN Intent Embedding\n\
          ===============================\n\
-         status: {}\n\
-         model:  {} → {} → {} (INT8 quantized, keyword-distilled)\n\
+         status:        {}\n\
+         model:         {} → {} → {} (INT8 quantized, keyword-distilled)\n\
          intent classes: 31/31\n\
-         inference: ~1 µs\n\
+         inference:     ~1 µs\n\
+         train_steps:   {} (online Hebbian updates)\n\
          \n\
-         Keyword patterns distilled at boot. No external weights needed.\n\
-         Fallback: keyword matching when confidence < 0.4.\n\
-         To retrain: generate_training_data() → offline fit → load_weights().",
+         Keyword patterns distilled at boot. Online training refines\n\
+         weights when keyword matching overrides nano-NN predictions.\n\
+         Training rate: lr=0.05, Hebbian delta rule on output layer.",
         if loaded { "ACTIVE" } else { "inactive" },
         EMBED_DIM, HIDDEN_DIM, N_INTENTS,
+        steps,
     ).into_bytes()
 }

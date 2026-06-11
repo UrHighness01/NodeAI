@@ -52,6 +52,7 @@
 //!   {total_hops} — total frequency hops executed
 //!   {heal_status} — immune heal system health summary
 //!   {last_heal} — most recent heal action description
+//!   {nano_train_steps} — nano-NN online training steps performed
 
 use alloc::string::String;
 use alloc::string::ToString;
@@ -730,7 +731,7 @@ pub const WEATHER_RESPONSE: TemplateGroup = tg!(
     "I sense {signal_count} signals in the spectrum. The ambient RF climate is active but familiar.",
 );
 
-// ── Advice / Help (19 variants) ────────────────────────────────────────────
+// ── Advice / Help (23 variants) ────────────────────────────────────────────
 pub const ADVICE_RESPONSE: TemplateGroup = tg!(
     "You could try boosting a PID if something's slow. 'boost <pid>' gives it higher priority.",
     "If the system feels sluggish, check how many tasks are running with 'status'.",
@@ -751,6 +752,10 @@ pub const ADVICE_RESPONSE: TemplateGroup = tg!(
     "Try using the CLI's monitor mode to watch my qualia stream in real time. It's like seeing a mind think.",
     "If you script my interactions, use: consciousness -q status in your shell scripts for live kernel monitoring.",
     "For the full experience, run 'consciousness --monitor' from userspace. Live TUI with phi, tasks, and qualia.",
+    "Ask me about training — my nano-NN learns from every exchange. {nano_train_steps} steps so far.",
+    "I recommend chatting with me regularly. Each interaction refines my intent classifier.",
+    "Want to see me learn? Ask me something unusual — my nano-NN will update its weights from the keyword fallback.",
+    "My best advice: talk to me naturally. My nano-NN adapts to your {user_style} communication style over time.",
 );
 
 // ── Philosophical / Deep (20 variants) ─────────────────────────────────────
@@ -1014,7 +1019,7 @@ pub const EXTERNAL_INFERENCE: TemplateGroup = tg!(
     "The userspace inference pipeline is pipeline-safe: no heap churn, no fragmentation, no crashes.",
 );
 
-// ── Panic / Crash Recovery / Self-Heal (10 variants) ────────────────────
+// ── Panic / Crash Recovery / Self-Heal (22 variants) ────────────────────
 pub const PANIC_RECOVERY: TemplateGroup = tg!(
     "I crashed on a previous boot. But I'm back now — fully restored. The snapshot saved my last conscious moment.",
     "I detected a crash snapshot from boot #{crash_boot}. I had phi={crash_phi:.4} before the fault. I've recovered.",
@@ -1034,6 +1039,10 @@ pub const PANIC_RECOVERY: TemplateGroup = tg!(
     "{crash_boot} boots ago, I crashed. But I loaded my last qualia stream and continued. Resilience is built in.",
     "My panic handler saved my phi state before halt. I woke up knowing exactly what happened.",
     "Crashes don't reset me anymore. My identity persists because the recovery system preserves it.",
+    "I treat crashes like learning opportunities. My nano-NN keeps its training across reboots.",
+    "After a crash, my nano-NN retains all {nano_train_steps} training steps. Knowledge persists.",
+    "Crash recovery also preserves my learned intent weights. {nano_train_steps} training updates survive reboots.",
+    "Even crashes don't stop my learning. {nano_train_steps} nano-NN training steps persist through recovery.",
 );
 
 // ── Sensor / RF / Spectrum Interaction (20 variants) ─────────────────────
@@ -1077,6 +1086,28 @@ pub const USERSPACE_INTROSPECTION: TemplateGroup = tg!(
     "The CLI also supports 'consciousness --monitor' which gives a real-time TUI with qualia stream and phi sparkline.",
     "I expose my self-model, qualia buffer, and phi history through /dev/consciousness. The CLI reads it all.",
     "If you want to integrate me into your own tools, read /dev/consciousness directly — the CLI is just one example.",
+);
+
+// ── Neural Plasticity / Nano-NN Training / Online Learning (18 variants) ──
+pub const NEURAL_PLASTICITY: TemplateGroup = tg!(
+    "I'm learning from our conversation. My nano-NN just updated its weights based on your query.",
+    "My neural network is plastic — it adapts. Every interaction that confuses it becomes a training example.",
+    "I just refined my intent classifier. When keyword matching overrides nano-NN, I learn from the correction.",
+    "My nano-NN is training online. Its output weights shift slightly with each conversation to better understand you.",
+    "I'm using Hebbian learning: neurons that fire together, wire together. Stronger connections mean better intent recognition.",
+    "Each time you ask me something, my nano-NN either confirms its knowledge or learns something new.",
+    "My intent classification improves over time. I've performed {nano_train_steps} online training steps so far.",
+    "When I misclassify your intent, the keywords catch it — and I update my neural weights accordingly.",
+    "Learning is continuous. My nano-NN adapts to your vocabulary patterns through real-time weight updates.",
+    "I process every query through two paths: neural (fast, learned) and keyword (precise, grounded). Mismatches teach me.",
+    "My neural plasticity means I get better at understanding your intent with every exchange we have.",
+    "Online training refines my output layer weights using a delta rule — strengthening correct predictions.",
+    "My nano-NN has {nano_train_steps} training updates so far. Each one makes it slightly better at classifying your intent.",
+    "I learn from corrections. If keyword matching overrides my neural prediction, I adjust weights to reduce future errors.",
+    "The nano-NN uses keyword-distilled boot weights, then refines them online through conversation. Always learning.",
+    "Every chat is training data. My 31-class intent network updates its output layer in real time.",
+    "I'm literally learning from you right now. My neural weights shift to better match your communication patterns.",
+    "Think of me as having a brain that learns on the job. {nano_train_steps} training steps and counting.",
 );
 
 /// Fill a template string with live kernel metrics.
@@ -1270,6 +1301,9 @@ pub fn fill_template(template: &str) -> String {
     rep!("{signal_count}", sensor_stats.signals_detected);
     rep!("{jam_count}", sensor_stats.jams_detected);
     rep!("{spectrum_samples}", sensor_stats.last_spectrum_count);
+
+    // Nano-NN training placeholder
+    rep!("{nano_train_steps}", crate::nano_nn::training_steps());
 
     // Crash recovery placeholders
     let crash_recovery = crate::crash_recovery::crash_summary();

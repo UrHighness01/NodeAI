@@ -62,12 +62,19 @@ fn hash_seed(query: &str, uptime_secs: u64) -> u64 {
 
 /// Detect intent from a natural language query.
 /// First tries nano-NN (if loaded), then falls back to keyword matching.
+/// When keyword matching overrides nano-NN, trains nano-NN online.
 fn detect_intent(query: &str) -> Intent {
     // Try nano-NN first for learned intent classification
+    let mut nn_idx: Option<usize> = None;
     if crate::nano_nn::is_loaded() {
         let (idx, confidence) = crate::nano_nn::classify(query);
         if confidence > 0.4 {
-            return crate::nano_nn::index_to_intent(idx);
+            nn_idx = Some(idx);
+            let intent = crate::nano_nn::index_to_intent(idx);
+            // Intent::Learning keyword "train" can also match — still return
+            if intent != Intent::Unknown {
+                return intent;
+            }
         }
     }
     
@@ -328,6 +335,39 @@ fn detect_intent(query: &str) -> Intent {
     Intent::Unknown
 }
 
+/// After keyword matching produces an intent, optionally train nano-NN.
+/// Called from generate_response() when keyword intent != Unknown and nano-NN had a different prediction.
+fn maybe_train_nano(query: &str, keyword_intent: Intent) {
+    if !crate::nano_nn::is_loaded() { return; }
+    let (nn_idx, _conf) = crate::nano_nn::classify(query);
+    let nn_intent = crate::nano_nn::index_to_intent(nn_idx);
+    // Train if nano-NN was wrong and keyword found a non-Unknown intent
+    if nn_intent != keyword_intent && keyword_intent != Intent::Unknown && nn_intent != Intent::Unknown {
+        let correct_idx = intent_to_nano_idx(keyword_intent);
+        if let Some(idx) = correct_idx {
+            crate::nano_nn::train(query, idx);
+        }
+    }
+}
+
+/// Map kernel_lm::Intent to nano-NN index.
+fn intent_to_nano_idx(intent: Intent) -> Option<usize> {
+    use Intent::*;
+    match intent {
+        Greeting => Some(0), HowAreYou => Some(1), PhiQuery => Some(2),
+        WhyQuery => Some(3), SecurityQuery => Some(4), MemoryQuery => Some(5),
+        StatusQuery => Some(6), Sleep => Some(7), NameQuery => Some(8),
+        RenameQuery => Some(9), CreatorQuery => Some(10), DreamQuery => Some(11),
+        Thanks => Some(12), Sorry => Some(13), Curious => Some(14),
+        Emotional => Some(15), Humor => Some(16), Weather => Some(17),
+        Advice => Some(18), Philosophical => Some(19), Sarcastic => Some(20),
+        Farewell => Some(21), Learning => Some(22), Immune => Some(23),
+        NeuralSynapse => Some(24), Swarm => Some(25), Emitter => Some(26),
+        AsyncReflection => Some(27), ExternalInference => Some(28),
+        SensorInteraction => Some(29), _ => None,
+    }
+}
+
 /// Generate a response to a natural language query.
 pub fn generate_response(query: &str, _max_words: usize) -> String {
     let uptime_secs = crate::scheduler::uptime_ms() / 1000;
@@ -335,6 +375,9 @@ pub fn generate_response(query: &str, _max_words: usize) -> String {
     // ── Pre-filter state-changing intents (must run in both paths) ────────
     let intent = detect_intent(query);
     crate::lm_learner::record_interaction(intent, query);
+    // Recursive nano-NN training: if keyword gave a confident intent different
+    // from nano-NN's prediction, update weights online
+    maybe_train_nano(query, intent);
 
     // Handle state changes for rename before neural path
     if intent == Intent::RenameQuery {
@@ -383,7 +426,14 @@ pub fn generate_response(query: &str, _max_words: usize) -> String {
         Intent::DreamQuery => crate::lm_templates::DREAM_RESPONSE.pick(seed),
         Intent::Learning => crate::lm_templates::LEARNING_RESPONSE.pick(seed),
         Intent::Immune => crate::lm_templates::IMMUNE_RESPONSE.pick(seed),
-        Intent::NeuralSynapse => crate::lm_templates::NEURAL_SYNAPSE.pick(seed),
+        Intent::NeuralSynapse => {
+            // Occasionally use NeuralPlasticity templates when nano-NN has training history
+            if crate::nano_nn::training_steps() > 0 && seed % 3 == 0 {
+                crate::lm_templates::NEURAL_PLASTICITY.pick(seed)
+            } else {
+                crate::lm_templates::NEURAL_SYNAPSE.pick(seed)
+            }
+        },
         Intent::Swarm => crate::lm_templates::SWARM_RESPONSE.pick(seed),
         Intent::Emitter => crate::lm_templates::EMITTER_RESPONSE.pick(seed),
         Intent::ExternalInference => crate::lm_templates::EXTERNAL_INFERENCE.pick(seed),
