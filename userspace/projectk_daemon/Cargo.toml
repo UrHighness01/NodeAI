@@ -1,0 +1,8 @@
+[package]
+name = "projectk-daemon"
+version = "0.1.0"
+edition = "2021"
+description = "Userspace Project-K neural inference daemon"
+
+[dependencies]
+libm = "0.2"
