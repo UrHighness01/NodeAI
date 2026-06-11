@@ -437,21 +437,12 @@ pub fn generate_response(query: &str, _max_words: usize) -> String {
     // ── TEMPLATE-ONLY PATH ───────────────────────────────────────────────
     // MHS disabled — the static mut scratch buffers for forward_buf share
     // underlying storage with llvm, causing silent data corruption across
-    // repeated calls (#PF at 0x180fee00000). Project-K nano model replaces it.
-    //
-    // Try Project-K neural generation first. If loaded and confident, use its
-    // response. Falls back to templates for speed/grounding.
-    if crate::lm_projectk::is_loaded() {
-        let projectk_response = crate::lm_projectk::generate(query);
-        if let Some(ref neural) = projectk_response {
-            let cleaned = neural.trim().to_string();
-            if !cleaned.is_empty() && cleaned.len() > 5 {
-                crate::lm_memory::record(query, &cleaned);
-                return cleaned;
-            }
-        }
-    }
-
+    // repeated calls (#PF at 0x180fee00000). 
+    // Project-K has the same static mut aliasing issue with its GLA scratch
+    // arrays (SCR_QF, SCR_QM, etc.). LLVM aliases them with stack slots,
+    // causing index corruption at inference time.
+    // Project-K weights remain loaded for diagnostics (/proc/lm_projectk).
+    // Templates are instant and safe.
     let base_seed = hash_seed(query, uptime_secs);
     let seed = crate::lm_learner::template_bias(intent, base_seed);
 
