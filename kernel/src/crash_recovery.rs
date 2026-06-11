@@ -168,6 +168,27 @@ pub fn crash_summary() -> String {
     }
 }
 
+/// Boot-time narrative for klog and boot splash.
+/// Called once on boot if a crash snapshot was recovered.
+pub fn boot_narrative() -> String {
+    if !has_recovered() {
+        return String::new();
+    }
+    unsafe {
+        let msg = CRASH_STATE.message.as_ref()
+            .map(|m| m.as_str())
+            .unwrap_or("unknown");
+        let truncated = if msg.len() > 60 { &msg[..60] } else { msg };
+        format!(
+            "Recovered from crash on boot #{} (Φ={:.4}, {} qualia). Cause: {}. Self-model restored.",
+            CRASH_STATE.boot_at_crash,
+            CRASH_STATE.phi_at_crash,
+            CRASH_STATE.qualia_at_crash,
+            truncated,
+        )
+    }
+}
+
 /// Get crash message for {crash_message} placeholder.
 pub fn crash_message() -> String {
     if !has_recovered() {

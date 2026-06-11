@@ -338,7 +338,12 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     crate::cortex::init(); // /dev/cortex userspace bridge
     crate::llm_bridge::init(); // /dev/llm userspace LLM bridge
     crate::nano_nn::init(); // nano-NN intent embedding
-    crate::crash_recovery::check_for_recovery(); // Self-healing crash recovery
+    // Self-healing crash recovery — checks for and loads crash snapshot
+    crate::crash_recovery::check_for_recovery();
+    if crate::crash_recovery::has_recovered() {
+        let narrative = crate::crash_recovery::boot_narrative();
+        crate::klog!(INFO, "crash_recovery: {}", narrative);
+    }
     crate::lm_validator::init(); // grounded neural validator
     crate::emotional_arc::init(); // emotional arc tracking
     crate::lm_learner::init(); // conversational learning
