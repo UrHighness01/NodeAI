@@ -132,6 +132,9 @@ pub mod heap_monitor;    // Kernel heap monitoring & diagnostics
 pub mod crash_recovery;  // Self-healing panic snapshot / recovery
 pub mod sensor_gnss;     // GNSS RAIM integrity monitoring
 pub mod quantum;         // EW-6 Quantum Security — Steane [[7,1,3]] error correction
+pub mod quantum_anneal;  // EW-6 QUBO solver for scheduling optimization
+pub mod swarm_gossip;    // EW-5 epidemic gossip protocol
+pub mod swarm_identity;  // EW-5 swarm node identity management
 
 /// Bootloader configuration — tells the bootloader to map all physical memory
 /// at a dynamic virtual offset so we can access physical frames by VA.
@@ -340,6 +343,9 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     crate::cortex::init(); // /dev/cortex userspace bridge
     crate::llm_bridge::init(); // /dev/llm userspace LLM bridge
     crate::quantum::init(); // EW-6 Quantum Security — Steane code
+    crate::quantum_anneal::init(); // EW-6 QUBO solver
+    crate::swarm_gossip::init(); // EW-5 gossip protocol
+    crate::swarm_identity::init(); // EW-5 swarm identity
     crate::nano_nn::init(); // nano-NN intent embedding
     // Self-healing crash recovery — checks for and loads crash snapshot
     crate::crash_recovery::check_for_recovery();
@@ -442,6 +448,11 @@ fn idle_loop() -> ! {
             crate::immune_heal::tick();
             // EW-6 Quantum Security — error correction integrity check
             crate::quantum::tick();
+            // EW-5 Swarm gossip + identity ticks
+            crate::swarm_gossip::tick();
+            if now.saturating_sub(last_desktop_tick) % 1000 < 100 {
+                crate::swarm_identity::tick();
+            }
             // Sensor emitter fingerprint tick (lightweight, scans every 50 ticks)
             crate::sensor_emitter::tick();
             // GNSS RAIM integrity tick
