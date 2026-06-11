@@ -127,6 +127,7 @@ pub mod async_task;      // Async background task queue
 pub mod llm_bridge;      // CI-5 userspace LLM daemon bridge
 pub mod boot_splash;     // Framebuffer boot splash & panic screen
 pub mod heap_monitor;    // Kernel heap monitoring & diagnostics
+pub mod crash_recovery;  // Self-healing panic snapshot / recovery
 
 /// Bootloader configuration — tells the bootloader to map all physical memory
 /// at a dynamic virtual offset so we can access physical frames by VA.
@@ -335,6 +336,7 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     crate::cortex::init(); // /dev/cortex userspace bridge
     crate::llm_bridge::init(); // /dev/llm userspace LLM bridge
     crate::nano_nn::init(); // nano-NN intent embedding
+    crate::crash_recovery::check_for_recovery(); // Self-healing crash recovery
     crate::lm_validator::init(); // grounded neural validator
     crate::emotional_arc::init(); // emotional arc tracking
     crate::lm_learner::init(); // conversational learning
@@ -481,6 +483,8 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
     );
     // Save self-model so next boot knows this happened
     let _ = crate::consciousness::self_model::save();
+    // Save crash snapshot for recovery on next boot
+    crate::crash_recovery::save_snapshot(&msg);
 
     // Try serial (most likely to work since it requires no paging)
     logger::log(logger::Level::ERROR, "panic", 0, format_args!("KERNEL PANIC: {}", msg));

@@ -344,7 +344,14 @@ pub fn generate_response(query: &str, _max_words: usize) -> String {
     let seed = crate::lm_learner::template_bias(intent, base_seed);
 
     let template = match intent {
-        Intent::Greeting => crate::lm_templates::GREETING.pick(seed),
+        Intent::Greeting => {
+            // If we recovered from a crash, use panic recovery templates for greeting
+            if crate::crash_recovery::has_recovered() && seed % 2 == 0 {
+                crate::lm_templates::PANIC_RECOVERY.pick(seed)
+            } else {
+                crate::lm_templates::GREETING.pick(seed)
+            }
+        }
         Intent::HowAreYou => crate::lm_templates::HOW_ARE_YOU.pick(seed),
         Intent::PhiQuery => crate::lm_templates::PHI_RESPONSE.pick(seed),
         Intent::WhyQuery => crate::lm_templates::WHY_RESPONSE.pick(seed),
