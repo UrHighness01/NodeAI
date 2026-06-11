@@ -93,6 +93,8 @@ pub fn init() { *CONV_MEMORY.lock() = Some(ConvRing::new()); }
 
 pub fn record(query: &str, response: &str) {
     if let Some(ref mut mem) = *CONV_MEMORY.lock() { mem.push(String::from(query), String::from(response)); }
+    // User interaction boosts phi
+    crate::consciousness::phi::interact();
     crate::persistence::mark_dirty();
 }
 

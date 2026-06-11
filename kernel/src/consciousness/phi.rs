@@ -2,12 +2,14 @@
 //!
 //! Computes a heuristic phi (integrated information) over a 15-node kernel
 //! graph using bipartition approximation rather than exhaustive MIP search.
-//! EMA-updated every 100 ticks, full recompute every 1000 ticks.
 //!
-//! Phi trends correctly: up when integration increases, down when
-//! fragmentation increases. Bounded [0, 1].
+//! Phi EVOLVES like consciousness:
+//!   - Accumulates on qualia events / user interaction (integration boost)
+//!   - Slowly degrades when idle (no events → entropy increases)
+//!   - Recoverable: after degradation, new interactions rebuild phi
+//!   - Bounded [0, 1], stored as persistent state
 
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicU64, AtomicU32, Ordering};
 
 /// Number of nodes in the kernel's causal graph.
 const N_NODES: usize = 15;
@@ -16,10 +18,150 @@ const N_NODES: usize = 15;
 static CAUSAL_MATRIX: spin::Mutex<[[f32; N_NODES]; N_NODES]> =
     spin::Mutex::new([[0.0; N_NODES]; N_NODES]);
 
-/// Running phi estimate (EMA).
-use core::sync::atomic::AtomicU32;
-static PHI_EMA: AtomicU32 = AtomicU32::new(0); // stored as u32 (f32 * 1e6)
+/// Running phi estimate (stored as u32 = f32 * 1e6 for atomic CAS).
+static PHI_EMA: AtomicU32 = AtomicU32::new(0);
 static UPDATE_COUNT: AtomicU64 = AtomicU64::new(0);
+
+/// Ticks since last qualia event — used for idle decay.
+static TICKS_SINCE_EVENT: AtomicU64 = AtomicU64::new(0);
+
+/// Peak phi ever achieved this session.
+static PEAK_PHI: AtomicU32 = AtomicU32::new(0);
+
+// ── Event-driven phi accumulation ───────────────────────────────────────────
+
+/// Called whenever a qualia event or user interaction occurs.
+/// Boosts phi proportionally to the event's salience/valence.
+pub fn integrate(salience: f32) {
+    TICKS_SINCE_EVENT.store(0, Ordering::Relaxed);
+    let current = current_phi();
+    // Each qualia boosts phi proportional to salience (max 0.01 per event)
+    let boost = (salience * 0.008).min(0.01);
+    let new_phi = (current + boost).min(1.0);
+    store_phi(new_phi);
+    // Track peak
+    let peak_bits = PEAK_PHI.load(Ordering::Relaxed);
+    let peak = f32::from_bits(peak_bits);
+    if new_phi > peak {
+        PEAK_PHI.store(new_phi.to_bits(), Ordering::Relaxed);
+    }
+}
+
+/// Called on user interaction (conversation) — stronger boost.
+pub fn interact() {
+    TICKS_SINCE_EVENT.store(0, Ordering::Relaxed);
+    let current = current_phi();
+    // User interaction gives a meaningful boost (up to 0.03)
+    let boost = ((0.5 - current) * 0.05).max(0.005).min(0.03);
+    let new_phi = (current + boost).min(1.0);
+    store_phi(new_phi);
+    let peak_bits = PEAK_PHI.load(Ordering::Relaxed);
+    let peak = f32::from_bits(peak_bits);
+    if new_phi > peak {
+        PEAK_PHI.store(new_phi.to_bits(), Ordering::Relaxed);
+    }
+}
+
+// ── Continuous phi evolution ────────────────────────────────────────────────
+
+/// Tick phi — called every 100ms by the main loop.
+/// - Full recompute from causal graph every 1000 ticks
+/// - Event-driven integration on qualia
+/// - Slow decay when idle (no events)
+/// - Accelerated decay at very low phi (entropy wins)
+pub fn tick() -> f32 {
+    let count = UPDATE_COUNT.fetch_add(1, Ordering::Relaxed);
+    let idle_ticks = TICKS_SINCE_EVENT.fetch_add(1, Ordering::Relaxed);
+
+    // Full recompute from causal graph every 1000 ticks (100s)
+    let graph_phi = if count % 1000 == 0 {
+        compute()
+    } else {
+        current_phi()
+    };
+
+    // ── Idle decay ──────────────────────────────────────────────────────
+    // After ~5s of no events (50 ticks), phi starts decaying
+    // Decay rate increases with idle time (entropy accumulation)
+    let decay = if idle_ticks > 50 {
+        let idle_factor = ((idle_ticks - 50) as f32 / 500.0).min(1.0); // ramps over ~50s
+        0.001 + idle_factor * 0.004  // 0.1% base + up to 0.5% accelerated
+    } else {
+        0.0
+    };
+
+    // ── Combine: graph integration + idle decay ──────────────────────────
+    let current = current_phi();
+    let mut new_phi = current;
+
+    // EMA toward graph-computed phi (slow integration trend)
+    new_phi += (graph_phi - new_phi) * 0.001;
+
+    // Apply idle decay
+    new_phi -= decay;
+    if new_phi < 0.001 { new_phi = 0.001; }
+
+    // Recovery: at very low phi, small upward drift (system self-stabilizes)
+    if new_phi < 0.01 && idle_ticks < 200 {
+        new_phi += 0.0002; // tiny recovery drift
+    }
+
+    // Bounded
+    new_phi = new_phi.clamp(0.0, 1.0);
+    // Final NaN guard
+    if new_phi.is_nan() { new_phi = 0.0; }
+
+    // Store
+    store_phi(new_phi);
+
+    new_phi
+}
+
+/// Get current phi value.
+pub fn current_phi() -> f32 {
+    f32::from_bits(PHI_EMA.load(Ordering::Relaxed))
+}
+
+/// Get peak phi for this session.
+pub fn peak_phi() -> f32 {
+    f32::from_bits(PEAK_PHI.load(Ordering::Relaxed))
+}
+
+/// Reset peak (called on state restore).
+pub fn set_peak(phi: f32) {
+    PEAK_PHI.store(phi.to_bits(), Ordering::Relaxed);
+}
+
+/// Direct set (used by persistence restore).
+pub fn set_phi(phi: f32) {
+    store_phi(phi.clamp(0.0, 1.0));
+}
+
+/// Set idle ticks (used by persistence restore).
+pub fn set_idle_ticks(ticks: u64) {
+    TICKS_SINCE_EVENT.store(ticks, Ordering::Relaxed);
+}
+
+fn store_phi(phi: f32) {
+    // Guard against NaN/corruption — clamp to valid range
+    let safe = if phi.is_nan() || phi.is_sign_negative() && phi == 0.0 {
+        0.0
+    } else {
+        phi.clamp(0.0, 1.0)
+    };
+    PHI_EMA.store(safe.to_bits(), Ordering::Relaxed);
+}
+
+/// Ensure phi is a valid displayable float (not NaN, not subnormal).
+pub fn safe_phi_for_display() -> f32 {
+    let bits = PHI_EMA.load(Ordering::Relaxed);
+    let phi = f32::from_bits(bits);
+    if phi.is_nan() || phi.is_subnormal() || phi < 0.0 || phi > 1.0 {
+        0.0
+    } else {
+        phi
+    }
+}
 
 /// Node names for debugging.
 const _NODE_NAMES: [&str; N_NODES] = [
@@ -134,46 +276,23 @@ pub fn compute() -> f32 {
     1.0 - (best_cross / total_flow)
 }
 
-/// Update phi with EMA and return current value.
-pub fn tick() -> f32 {
-    let count = UPDATE_COUNT.fetch_add(1, Ordering::Relaxed);
-
-    // Full recompute every 1000 ticks
-    let phi_raw = if count % 1000 == 0 {
-        compute()
-    } else {
-        // Lightweight update: just decay toward baseline slightly
-        let current = current_phi();
-        current * 0.995 + 0.001 // slight decay toward neutral
-    };
-
-    // EMA update
-    let old = PHI_EMA.load(Ordering::Relaxed);
-    let old_f = f32::from_bits(old);
-    let new_f = old_f * 0.9 + phi_raw * 0.1;
-    PHI_EMA.store(new_f.to_bits(), Ordering::Relaxed);
-
-    new_f
-}
-
-/// Get current phi value.
-pub fn current_phi() -> f32 {
-    f32::from_bits(PHI_EMA.load(Ordering::Relaxed))
-}
-
 /// Format /proc report.
 pub fn format_report() -> alloc::vec::Vec<u8> {
     use alloc::format;
     let phi = current_phi();
+    let peak = peak_phi();
     let count = UPDATE_COUNT.load(Ordering::Relaxed);
+    let idle = TICKS_SINCE_EVENT.load(Ordering::Relaxed);
     format!(
         "NodeAI IIT Phi (Phase 3)\n\
          =======================\n\
          current_phi:  {:.6}\n\
+         peak_phi:     {:.6}\n\
          updates:      {}\n\
+         idle_ticks:   {}\n\
          nodes:        {}\n\
          method:       bipartition_greedy (O(N³))\n\
          bounds:       [0, 1]\n",
-        phi, count, N_NODES
+        phi, peak, count, idle, N_NODES
     ).into_bytes()
 }

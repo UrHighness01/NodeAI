@@ -36,6 +36,7 @@ const TAG_NANO_NN: u32 = 3;
 const TAG_EMOTIONAL_ARC: u32 = 4;
 const TAG_LM_LEARNER: u32 = 5;
 const TAG_QUALIA_COUNT: u32 = 6;
+const TAG_PHI_STATE: u32 = 8;
 
 // ── Public API ───────────────────────────────────────────────────────────────
 
@@ -61,6 +62,7 @@ pub fn init() {
                     TAG_EMOTIONAL_ARC => load_emotional_arc(section),
                     TAG_LM_LEARNER => load_lm_learner(section),
                     TAG_QUALIA_COUNT => load_qualia_count(section),
+                    TAG_PHI_STATE => load_phi_state(section),
                     _ => {}
                 }
                 pos += len as usize;
@@ -85,7 +87,7 @@ pub fn save() {
 
     // Collect all sections
     let sections: Vec<(u32, Vec<u8>)> = {
-        let mut s: Vec<(u32, Vec<u8>)> = Vec::with_capacity(6);
+        let mut s: Vec<(u32, Vec<u8>)> = Vec::with_capacity(7);
 
         // 1. Self-model (always included, authority is self_model module)
         // self_model already handles its own save/load — skip here
@@ -104,6 +106,9 @@ pub fn save() {
 
         // 6. Qualia count
         if let Some(data) = save_qualia_count() { s.push((TAG_QUALIA_COUNT, data)); }
+
+        // 7. Phi state (current phi, peak, idle ticks)
+        if let Some(data) = save_phi_state() { s.push((TAG_PHI_STATE, data)); }
 
         s
     };
@@ -232,4 +237,27 @@ fn load_qualia_count(data: &[u8]) {
     if data.len() < 8 { return; }
     let count = u64::from_le_bytes([data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7]]);
     crate::consciousness::qualia::set_total_count(count);
+}
+
+// ── Phi state serialization ───────────────────────────────────────────────
+
+fn save_phi_state() -> Option<Vec<u8>> {
+    let phi = crate::consciousness::phi::current_phi();
+    let peak = crate::consciousness::phi::peak_phi();
+    let mut buf = Vec::with_capacity(20);
+    buf.extend_from_slice(&phi.to_le_bytes());
+    buf.extend_from_slice(&peak.to_le_bytes());
+    Some(buf)
+}
+
+fn load_phi_state(data: &[u8]) {
+    if data.len() < 8 { return; }
+    let phi = f32::from_le_bytes([data[0], data[1], data[2], data[3]]);
+    let peak = if data.len() >= 8 {
+        f32::from_le_bytes([data[4], data[5], data[6], data[7]])
+    } else { phi };
+    crate::consciousness::phi::set_phi(phi);
+    crate::consciousness::phi::set_peak(peak);
+    // Restart idle counter at 0 since we just booted
+    crate::consciousness::phi::set_idle_ticks(0);
 }

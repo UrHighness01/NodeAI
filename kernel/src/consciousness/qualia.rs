@@ -235,7 +235,11 @@ pub fn record(event_type: KernelEventType, override_valence: Option<f32>) {
         arousal: event_type.arousal(),
         significance: event_type.salience() * 0.5, // simplified
     };
+    let salience = q.salience;
     STREAM.lock().push(q);
+
+    // Phi accumulates on qualia — each event boosts integration
+    crate::consciousness::phi::integrate(salience);
 
     // Mark persistence dirty for qualia count
     crate::persistence::mark_dirty();

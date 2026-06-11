@@ -63,7 +63,7 @@ pub fn save_snapshot(panic_msg: &str) {
 
 /// Collect crash state atomically (no locks that could deadlock during panic).
 fn crash_state_for_save() -> CrashSnapshot {
-    let phi = crate::consciousness::phi::current_phi();
+    let phi = crate::consciousness::phi::safe_phi_for_display();
     let qualia = crate::consciousness::qualia::total_count();
     let boot = crate::consciousness::self_model::snapshot()
         .map(|s| s.boot_number)
