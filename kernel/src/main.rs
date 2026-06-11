@@ -131,6 +131,7 @@ pub mod boot_splash;     // Framebuffer boot splash & panic screen
 pub mod heap_monitor;    // Kernel heap monitoring & diagnostics
 pub mod crash_recovery;  // Self-healing panic snapshot / recovery
 pub mod sensor_gnss;     // GNSS RAIM integrity monitoring
+pub mod smp;             // SMP multicore management
 pub mod quantum;         // EW-6 Quantum Security — Steane [[7,1,3]] error correction
 pub mod quantum_anneal;  // EW-6 QUBO solver for scheduling optimization
 pub mod swarm_gossip;    // EW-5 epidemic gossip protocol
@@ -342,6 +343,7 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     crate::consciousness::global_workspace::init();
     crate::cortex::init(); // /dev/cortex userspace bridge
     crate::llm_bridge::init(); // /dev/llm userspace LLM bridge
+    crate::smp::init();      // SMP multicore — per-CPU data
     crate::quantum::init(); // EW-6 Quantum Security — Steane code
     crate::quantum_anneal::init(); // EW-6 QUBO solver
     crate::swarm_gossip::init(); // EW-5 gossip protocol

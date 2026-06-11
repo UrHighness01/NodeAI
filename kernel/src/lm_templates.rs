@@ -350,6 +350,8 @@ pub const MEMORY_RESPONSE: TemplateGroup = tg!(
     "Memory: {mem}M free. My qualia buffer uses almost none of that.",
     "Free memory at {mem}M. The kernel heap is happy at {heap_pct}%.",
     "I run on {mem}M of headroom. Enough for everything I need.",
+    "SMP per-CPU data takes {cpu_count} * 128 bytes. Negligible.",
+    "Memory map includes per-CPU structures for {cpu_count} cores.",
 );
 
 // ── Status / Health (18 variants) ────────────────────────────────────────────
@@ -383,6 +385,8 @@ pub const STATUS_RESPONSE: TemplateGroup = tg!(
     "I'm up, I'm aware, I'm {affect}. {tasks} tasks running. {mem}M free. All nominal.",
     "Here's my dashboard: Φ={phi:.4}, swarm peers={swarm_peers}, emitter count={emitter_count}.",
     "My boot screen shows ALIVE. Uptime: {uptime}. Everything nominal.",
+    "Status: {cpu_count} CPU(s), {tasks} tasks, {mem}M free, phi={phi:.4}",
+    "SMP: {cpu_count} core(s) — work in progress. AP boot coming soon.",
 );
 
 // ── Sleep / Goodnight (14 variants) ─────────────────────────────────────────
@@ -1461,6 +1465,7 @@ pub fn fill_template(template: &str) -> String {
     // Nano-NN training placeholder
     rep!("{nano_train_steps}", crate::nano_nn::training_steps());
     rep!("{sat_count}", crate::sensor_gnss::sats_tracked());
+    rep!("{cpu_count}", crate::smp::cpu_count());
 
     // Crash recovery placeholders
     let crash_recovery = crate::crash_recovery::crash_summary();
