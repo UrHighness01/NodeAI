@@ -82,7 +82,9 @@ fn build_snapshot() -> Vec<u8> {
     if !spot.is_empty() {
         let _ = writeln!(s, "  workspace: {} items in spotlight", spot.len());
         for q in spot.iter().take(2) {
-            let _ = writeln!(s, "    type={} attn={:.2} val={:+.2}", q.event_type, q.attention_score, q.valence);
+            let v = if q.valence.is_finite() { q.valence } else { 0.0 };
+            let vsign = if v >= 0.0 { "+" } else { "-" };
+            let _ = writeln!(s, "    type={} attn={:.2} val={}{:.2}", q.event_type, q.attention_score, vsign, v.abs());
         }
     }
 

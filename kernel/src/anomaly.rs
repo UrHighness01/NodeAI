@@ -305,8 +305,13 @@ pub fn format_report() -> alloc::vec::Vec<u8> {
     for (&pid, det) in map.iter() {
         if det.total < WARMUP_CALLS { continue; }
         let status = if det.score > 0.5 { "ALERT" } else if det.score > 0.2 { "WATCH" } else { "OK" };
-        out.push_str(&alloc::format!("{:<7} {:.3}   {:+.3}  {:.3}   {:<6}  {}\n",
-            pid, det.score, det.autocorr, det.phi, det.streak, status));
+        // Sanitize floats before formatting — flt2dec panics on NaN/subnormal in no_std
+        let score = if det.score.is_finite() { det.score } else { 0.0 };
+        let ac    = if det.autocorr.is_finite() { det.autocorr } else { 0.0 };
+        let phi   = if det.phi.is_finite() { det.phi } else { 0.0 };
+        let ac_sign = if ac >= 0.0 { "+" } else { "-" };
+        out.push_str(&alloc::format!("{:<7} {:.3}   {}{:.3}  {:.3}   {:<6}  {}\n",
+            pid, score, ac_sign, ac.abs(), phi, det.streak, status));
     }
     out.into_bytes()
 }

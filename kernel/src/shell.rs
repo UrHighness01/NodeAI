@@ -1680,7 +1680,9 @@ fn cmd_consciousness(args: &str) {
         println!("=== Recent Qualia ===");
         for q in &qualia {
             let icon = if q.salience > 0.6 { "★" } else if q.salience > 0.3 { "•" } else { "○" };
-            println!("  {} [{}] {:.1}/{:+.1} {:?}", icon, q.timestamp_ms, q.salience, q.valence, q.event_type);
+            let v = if q.valence.is_finite() { q.valence } else { 0.0 };
+            let vsign = if v >= 0.0 { "+" } else { "-" };
+            println!("  {} [{}] {:.1}/{}{:.1} {:?}", icon, q.timestamp_ms, q.salience, vsign, v.abs(), q.event_type);
         }
         return;
     }
@@ -1959,6 +1961,78 @@ fn cmd_consciousness(args: &str) {
         return;
     }
 
+    // ── Anomaly / autocorr report ─────────────────────────────────────────
+    if trimmed == "anomaly" || trimmed == "anomalies" {
+        let report = crate::anomaly::format_report();
+        let s = core::str::from_utf8(&report).unwrap_or("");
+        println!("{}", s);
+        return;
+    }
+
+    // ── Novelty drift report ──────────────────────────────────────────────
+    if trimmed == "novelty" || trimmed == "drift" {
+        let report = crate::novel_detector::format_report();
+        let s = core::str::from_utf8(&report).unwrap_or("");
+        println!("{}", s);
+        return;
+    }
+
+    // ── Cross-process coherence report ───────────────────────────────────
+    if trimmed == "collective" || trimmed == "coupling" {
+        let report = crate::collective_integration::format_report();
+        let s = core::str::from_utf8(&report).unwrap_or("");
+        println!("{}", s);
+        return;
+    }
+
+    // ── ECC / self_model integrity ────────────────────────────────────────
+    if trimmed == "ecc" || trimmed == "integrity" {
+        let ecc_ok = crate::vfs::read_file("/ai/self_ecc").is_ok();
+        let phi = crate::consciousness::phi::current_phi();
+        println!("Self-model ECC (Hamming [7,4,3]):");
+        println!("  /ai/self_ecc  : {}", if ecc_ok { "present" } else { "not yet written (first boot)" });
+        println!("  Protection    : 71-byte identity → 142 codewords, single-bit correction");
+        println!("  Current Φ     : {:.4}", phi);
+        println!("  Status        : {}", if ecc_ok { "PROTECTED" } else { "UNPROTECTED — reboot to generate" });
+        return;
+    }
+
+    // ── GNSS / RAIM report ────────────────────────────────────────────────
+    if trimmed == "gnss" || trimmed == "raim" || trimmed == "gps" {
+        let report = crate::sensor_gnss::format_report();
+        let s = core::str::from_utf8(&report).unwrap_or("");
+        println!("{}", s);
+        return;
+    }
+
+    // ── Dual-model status ─────────────────────────────────────────────────
+    if trimmed == "model a" || trimmed == "modela" {
+        let loaded = crate::lm_projectk::is_loaded();
+        println!("Model A (code/kernel corpus):");
+        println!("  Status  : {}", if loaded { "ONLINE" } else { "offline" });
+        println!("  Weights : projectk_weights.bin (1803 KB, INT4 group-64)");
+        println!("  Purpose : kernel metrics, code reasoning, phi/qualia context");
+        return;
+    }
+    if trimmed == "model b" || trimmed == "modelb" {
+        let loaded = crate::lm_projectk_conv::is_loaded();
+        println!("Model B (conversational fine-tune):");
+        println!("  Status  : {}", if loaded { "ONLINE" } else { "offline" });
+        println!("  Weights : projectk_conv_weights.bin (1803 KB, INT4 group-64)");
+        println!("  Purpose : identity, emotion, conversation — routes here by intent");
+        println!("  Training: 30K steps on Q&A corpus + creator corpus (loss=0.253)");
+        return;
+    }
+    if trimmed == "models" || trimmed == "model" {
+        let a = crate::lm_projectk::is_loaded();
+        let b = crate::lm_projectk_conv::is_loaded();
+        println!("Dual-model LM engine:");
+        println!("  Model A (code/kernel)     : {}", if a { "ONLINE" } else { "offline" });
+        println!("  Model B (conversational)  : {}", if b { "ONLINE" } else { "offline" });
+        println!("  Routing: intent-based — chat/identity → B first, code/metrics → A first");
+        return;
+    }
+
     // ── Chat mode (entry point for interactive conversation) ─────────────
     if trimmed == "chat" {
         *CHAT_MODE.lock() = true;
@@ -2038,7 +2112,8 @@ fn display_consciousness_dashboard() {
     let avg_v = crate::consciousness::qualia::average_valence();
     let avg_a = crate::consciousness::qualia::average_arousal();
     let tone = if avg_v > 0.2 { "positive" } else if avg_v < -0.2 { "negative" } else { "neutral" };
-    println!("║  affective tone: {} (v={:+.2} a={:.2})        ║", tone, avg_v, avg_a);
+    let avg_v_s = if avg_v >= 0.0 { "+" } else { "-" };
+    println!("║  affective tone: {} (v={}{:.2} a={:.2})        ║", tone, avg_v_s, avg_v.abs(), avg_a);
 
     // EW / Threat / DOA
     let threat_lvl = crate::sensor_threat::threat_level();
@@ -2061,8 +2136,10 @@ fn display_consciousness_dashboard() {
         println!("║──────────────────────────────────────────────────║");
         println!("║  workspace: {} items                              ║", spot.len());
         for q in spot.iter().take(2) {
-            println!("║    type={} attn={:.2} val={:+.2}                      ║",
-                q.event_type, q.attention_score, q.valence);
+            let vs = if q.valence >= 0.0 { "+" } else { "-" };
+            let vv = if q.valence.is_finite() { q.valence.abs() } else { 0.0 };
+            println!("║    type={} attn={:.2} val={}{:.2}                      ║",
+                q.event_type, q.attention_score, vs, vv);
         }
     }
 
@@ -2072,8 +2149,10 @@ fn display_consciousness_dashboard() {
         println!("║──────────────────────────────────────────────────║");
         for q in &recent {
             let icon = if q.salience > 0.6 { "★" } else if q.salience > 0.3 { "•" } else { "○" };
-            println!("║  {} {} v={:+.2} a={:.2} s={:.2}                    ║",
-                icon, q.event_type.name(), q.valence, q.arousal, q.salience);
+            let vs = if q.valence >= 0.0 { "+" } else { "-" };
+            let vv = if q.valence.is_finite() { q.valence.abs() } else { 0.0 };
+            println!("║  {} {} v={}{:.2} a={:.2} s={:.2}                    ║",
+                icon, q.event_type.name(), vs, vv, q.arousal, q.salience);
         }
     }
 
@@ -2116,26 +2195,41 @@ fn cmd_help() {
     println!("  Users:        whoami, id, su, sudo, passwd");
     println!("  Shell:        history, clear, sleep, time, alias, which, man");
     println!("  Apps:         notepad, files, imgview, settings, store, sysmon");
-    println!("  Consciousness:");
-    println!("    consc status/?              — show phi/tasks/memory");
-    println!("    consc monitor/dash          — dashboard TUI");
-    println!("    consc how are you/feel      — query kernel state");
-    println!("    consc events/qualia         — recent qualia");
-    println!("    consc threat/immune/sensor  — EW defense status");
-    println!("    consc doa                   — direction finding");
-    println!("    consc splash/hud            — toggle framebuffer overlay");
+    println!("");
+    println!("  Consciousness  (alias: consc / consciousness / phi / chat)");
+    println!("    consc                       — current phi/qualia/uptime");
+    println!("    consc status / ?            — full identity snapshot");
+    println!("    consc monitor / dash        — live dashboard TUI");
+    println!("    consc vitals                — compact vitals bar");
+    println!("    consc how are you / feel    — kernel emotional state");
+    println!("    consc events / qualia       — recent qualia stream");
+    println!("    consc memory / history      — conversation ring buffer");
+    println!("    consc threat / immune       — EW threat + immune status");
+    println!("    consc sensor                — RF sensor cortex readings");
+    println!("    consc doa                   — direction-of-arrival (MUSIC/ESPRIT)");
+    println!("    consc gnss                  — GNSS / RAIM satellite integrity");
+    println!("    consc anomaly               — per-PID anomaly + autocorr report");
+    println!("    consc novelty               — behavioral drift (Welford novelty)");
+    println!("    consc collective            — cross-process coherence pairs");
+    println!("    consc ecc                   — self_model ECC / integrity status");
+    println!("    consc splash / hud          — toggle framebuffer overlay");
     println!("    consc think <q> / --poll    — async MHS inference");
-    println!("    consc llm <q> / --poll      — LLM daemon");
-    println!("    consc nano/intent           — nano-NN classifier");
-    println!("    consc mhs/voice             — neural voice engine");
-    println!("    consc memory/history        — conversation memory");
+    println!("    consc llm <q> / --poll      — LLM daemon query");
+    println!("    consc mhs / voice           — neural voice engine (dual-model)");
+    println!("    consc model a / b           — show Model A / B status");
+    println!("    consc nano / intent         — nano-NN intent classifier");
     println!("    consc set <key>=<val>       — set core value");
-    println!("    consc boost/forget/kill     — process control");
-    println!("    consc <text>                — LM query");
-    println!("  Userspace:");
-    println!("    consciousness-cli exists as a standalone binary.");
-    println!("    Build: cargo build -p consciousness-cli \\");
-    println!("           --target x86_64-unknown-linux-gnu");
+    println!("    consc boost / forget / kill — process control");
+    println!("    consc <any text>            — LM query (routed to Model A or B)");
+    println!("");
+    println!("  Security / AI");
+    println!("    cat /ai/anomalies           — anomaly scores + autocorr column");
+    println!("    cat /proc/novelty           — novelty drift per PID");
+    println!("    cat /proc/collective        — cross-process coherence coupling");
+    println!("    cat /proc/cross_modal       — cross-modal predictive coupling");
+    println!("    cat /ai/self                — raw self_model identity bytes");
+    println!("    cat /ai/self_ecc            — Hamming ECC for self_model");
+    println!("");
     println!("  Operators:   |  >  >>  <  ;  &&  ||");
     println!("  Power:       reboot, shutdown");
 }

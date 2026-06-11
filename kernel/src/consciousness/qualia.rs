@@ -317,10 +317,16 @@ pub fn format_report() -> Vec<u8> {
 
     out.push_str("recent (last 8):\n");
     for q in ring.recent(8) {
+        let dt = (q.timestamp_ms as i64).saturating_sub(crate::scheduler::uptime_ms() as i64);
+        let dt_sign = if dt >= 0 { "+" } else { "-" };
+        let v = if q.valence.is_finite() { q.valence } else { 0.0 };
+        let v_sign = if v >= 0.0 { "+" } else { "-" };
         out.push_str(&format!(
-            "  {:+6.2}ms {:20} v={:+.2} a={:.2} s={:.2}\n",
-            (q.timestamp_ms as i64 - crate::scheduler::uptime_ms() as i64) as i64,
-            q.event_type.name(), q.valence, q.arousal, q.salience
+            "  {}{:5.2}ms {:20} v={}{:.2} a={:.2} s={:.2}\n",
+            dt_sign, dt.unsigned_abs() as f32 / 1.0,
+            q.event_type.name(), v_sign, v.abs(),
+            if q.arousal.is_finite() { q.arousal } else { 0.0 },
+            if q.salience.is_finite() { q.salience } else { 0.0 }
         ));
     }
 
