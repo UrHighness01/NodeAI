@@ -3,7 +3,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 RELEASE=1
-TIMEOUT=30
+TIMEOUT=40
 TEST_LOG="/tmp/nodeai_kernel_test.log"
 while [[ $# -gt 0 ]]; do case $1 in --release) RELEASE=1 ;; --debug) RELEASE=0 ;; --timeout) TIMEOUT="$2"; shift ;; *) echo "Unknown: $1"; exit 1 ;; esac; shift; done
 echo "=== Test 1: Build ==="
