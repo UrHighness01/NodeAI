@@ -236,10 +236,8 @@ fn forward(e: &ModelFlat, tokens: &[u16]) {
     }
     x_buf[..FWD_EMB].copy_from_slice(emb_buf);
 
-    // Block forward — reuse scratch
-    let scr = unsafe { &mut *(e.scratch.as_ptr() as *mut [f32; SCR_SZ]) };
-    let (log_buf, rest) = scr.split_at_mut(S_LOG);
-    let logits = &mut rest[..VOCAB];
+    // Write logits at scratch[0..VOCAB] — generate() reads from scratch.as_ptr()
+    let logits = unsafe { &mut *(e.scratch.as_ptr() as *mut [f32; VOCAB]) };
 
     // gla expects &[[f32;D]; CTX_WIN] — reinterpret flat buffer
     let x2d = unsafe { &*(x_buf.as_ptr() as *const [[f32; D]; CTX_WIN]) };
