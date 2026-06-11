@@ -120,7 +120,7 @@ if [[ $NOGRAPHIC -eq 1 ]]; then
 elif [[ $GUI -eq 1 ]]; then
     # SDL window: keyboard → PS/2 IRQ1 → kernel shell. Type commands in the SDL window.
     # Serial output still goes to this terminal so you can see kernel logs.
-    QEMU_ARGS+=(-serial stdio -display sdl,grab-on-hover=off)
+    QEMU_ARGS+=(-serial stdio -display sdl)
     echo "  Display: SDL window — click the window to focus it, then type commands"
     echo "  Serial logs appear in this terminal"
 else
