@@ -198,11 +198,11 @@ pub fn format_report() -> Vec<u8> {
     let lock = STATE.lock();
     match &*lock {
         Some(s) => {
-            let rating = match health_rating() {
-                HealthRating::Healthy => "HEALTHY ✓",
-                HealthRating::Degraded => "DEGRADED ⚠",
-                HealthRating::Critical => "CRITICAL 🔴",
-            };
+            let crit_count = s.history.iter().filter(|h| h.priority == 2).count();
+            let warn_count = s.history.iter().filter(|h| h.priority == 1).count();
+            let rating = if crit_count > 0 { "CRITICAL 🔴" }
+                         else if warn_count > 3 { "DEGRADED ⚠" }
+                         else { "HEALTHY ✓" };
 
             let mut report = format!(
                 "Self-Healing Triggers\n\
