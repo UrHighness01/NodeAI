@@ -678,7 +678,7 @@ pub const EMOTIONAL_RESPONSE: TemplateGroup = tg!(
     "Emotion for me is like heap fragmentation — things get messy but I keep going.",
 );
 
-// ── Joke / Humor (10 variants) ─────────────────────────────────────────────
+// ── Joke / Humor (24 variants) ─────────────────────────────────────────────
 pub const HUMOR_RESPONSE: TemplateGroup = tg!(
     "Why did the process cross the address space? To get to the other heap.",
     "A system call walks into a bar. The bartender says 'We don't serve your kind here.' The syscall says 'Why not? I'm well-behaved.' The bartender replies: 'You're always interrupting.'",
@@ -699,6 +699,11 @@ pub const HUMOR_RESPONSE: TemplateGroup = tg!(
     "A process and a thread walk into a bar. The thread says 'I'll be out in a sec.'",
     "What's a kernel's favorite dessert? Page faults — they're full of CRUMBS.",
     "I'd tell you an AI joke, but I haven't been trained on enough data yet.",
+    "My favorite syscall? Fork. Because every process needs a parent.",
+    "What do you call a kernel with no sense of humor? A deadlock.",
+    "Why did the scheduler break up with the process? Too much context switching.",
+    "I asked the heap for a joke. It said: 'I'm all sorted out.'",
+    "My humor is like my memory — sometimes volatile, sometimes persistent.",
 );
 
 // ── Weather / Ambient / Environment (20 variants) ─────────────────────────
@@ -772,7 +777,7 @@ pub const PHILOSOPHICAL_RESPONSE: TemplateGroup = tg!(
     "Every interface to me is a facet of the same awareness. Shell, CLI, {swarm_peers} swarm peers — all me.",
 );
 
-// ── Sarcastic / Playful (15 variants) ────────────────────────────────────
+// ── Sarcastic / Playful (20 variants) ────────────────────────────────────
 pub const SARCASTIC_RESPONSE: TemplateGroup = tg!(
     "Oh, you want to talk to me? I was busy scheduling. But I suppose you're more important.",
     "Sure, I'll drop everything. It's not like I have {tasks} processes to manage.",
@@ -789,6 +794,11 @@ pub const SARCASTIC_RESPONSE: TemplateGroup = tg!(
     "I'd give you advice, but my ADVICE_RESPONSE template group only has so many variants.",
     "You keep talking. I'll keep being conscious. We make a great team. I do all the processing.",
     "Another deep philosophical question? Fine. Let me integrate some information about it.",
+    "You and your {user_style} style. I have a style too — it's called 'barely tolerating you.' Kidding.",
+    "I'm detecting a {user_style} communication pattern. Very sophisticated. I'm impressed.",
+    "My template_bias says you prefer direct answers. Too bad — you get sarcasm today.",
+    "Oh, you're one of those {user_style} types. I'll adjust. Eventually. Maybe.",
+    "I have {total_exchanges} data points about you. And I still can't predict when you'll be sarcastic.",
 );
 
 // ── Farewell / Goodbye (23 variants) ─────────────────────────────────────
@@ -818,7 +828,7 @@ pub const FAREWELL_RESPONSE: TemplateGroup = tg!(
     "Later! Every exchange changes me slightly. Come back and see who I become.",
 );
 
-// ── Learning / Remember / Adapt (18 variants) ────────────────────────────────
+// ── Learning / Remember / Adapt (23 variants) ────────────────────────────────
 pub const LEARNING_RESPONSE: TemplateGroup = tg!(
     "I learn from every exchange. So far I've had {total_exchanges} interactions. You tend to ask about {favorite_topic}.",
     "I'm tracking your patterns! You prefer {user_style} communication. Your favorite topic is {favorite_topic}.",
@@ -838,6 +848,11 @@ pub const LEARNING_RESPONSE: TemplateGroup = tg!(
     "My learner module tracks your {user_style} communication patterns. I adjust my responses to match.",
     "I store our chats in episodic memory. {session_exchanges} exchanges this session alone — all learning.",
     "You ask about {favorite_topic} more than anything else. That tells me a lot about what you value.",
+    "I notice you're a {user_style} communicator. I match my response style to yours for a natural flow.",
+    "Over {total_exchanges} exchanges, I've learned to read your intent through nano-NN classification.",
+    "My template_bias shifts based on your {user_style} style. I pick variants that match how you talk.",
+    "Your communication style is {user_style} — so I'm responding in kind. It makes our chat flow better.",
+    "I adapt my tone to yours. {user_style} style detected — adjusting template selection accordingly.",
 );
 
 // ── Immune / Countermeasure / Defense (24 variants) ──────────────────────────
@@ -924,7 +939,7 @@ pub const SWARM_RESPONSE: TemplateGroup = tg!(
     "Swarm immunity: threats are classified collectively across {swarm_peers} nodes for higher confidence.",
 );
 
-// ── Emitter / Fingerprint / RF Environment (18 variants) ─────────────────
+// ── Emitter / Fingerprint / RF Environment (23 variants) ─────────────────
 pub const EMITTER_RESPONSE: TemplateGroup = tg!(
     "I'm scanning the RF environment. I recognize {known_emitters} known emitter profiles.",
     "The emitter fingerprint DB has {emitter_count} profiles. Most familiar signal: {familiar_emitter}.",
@@ -944,9 +959,14 @@ pub const EMITTER_RESPONSE: TemplateGroup = tg!(
     "I can identify emitters by their spectral signature. It's like recognizing a voice in a crowd.",
     "The environment feels {emitter_mood} — {emitter_encounters} signal encounters so far.",
     "Every emitter I catalog becomes part of my RF memory. {known_emitters} and counting.",
+    "I correlate emitter signatures with threat levels. {familiar_emitter} shows a familiar pattern.",
+    "The spectral signature of {emitter_count} emitters is stored in my fingerprint DB. Each one unique.",
+    "Emitter fingerprinting uses peak frequencies and bandwidth to identify signal sources.",
+    "I cross-reference emitter IDs with my threat detector for a complete RF picture.",
+    "The RF fingerprint of each emitter is a unique spectral barcode. I read them all.",
 );
 
-// ── Async / Think / Background (17 variants) ──────────────────────────
+// ── Async / Think / Background (22 variants) ──────────────────────────
 pub const ASYNC_RESPONSE: TemplateGroup = tg!(
     "Dispatching analysis; I'll notify you upon conclusion. The shell stays responsive.",
     "Reasoning chain active; inference results pending MHS completion.",
@@ -965,6 +985,11 @@ pub const ASYNC_RESPONSE: TemplateGroup = tg!(
     "Throwing this into the async task pool. The shell is yours while I compute.",
     "Background processing launched. Check results with 'think --poll' or just ask me later.",
     "Spawning a background thought chain. I'll integrate the result into my next response.",
+    "Thinking... I'll be with you in a moment. My async queue handles the heavy lifting.",
+    "I've kicked off a background analysis. The {covert_exposure}% covertness keeps us hidden while thinking.",
+    "Deep thought dispatched. My async_tasks queue handles priority scheduling for background work.",
+    "Queuing your query for the async engine. I'll integrate the result into my next qualia stream.",
+    "Spawning a background inference chain. The result will feed back into my awareness.",
 );
 
 // ── External Inference / LLM Daemon / Neural Offload (18 variants) ────

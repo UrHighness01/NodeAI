@@ -153,6 +153,19 @@ pub fn template_bias(intent: Intent, base_seed: u64) -> u64 {
     // If user prefers short queries, bias toward shorter/more direct templates
     if state.prefers_short {
         bias ^= 0xABCD_0001;
+    } else {
+        // Expressive users get more verbose variants (opposite bias)
+        bias ^= 0xDCBA_0002;
+    }
+
+    // Style-aware bias: shift templates based on user's communication style
+    // This makes the template selection feel adapted to the user
+    if state.prefers_short && state.avg_query_len > 0 {
+        // Concise users: use direct variants (low indices in most groups)
+        bias ^= base_seed.wrapping_shr(3) & 0x00FF;
+    } else if state.follow_up_tendency > 40 {
+        // Engaged users: use deeper/thoughtful variants
+        bias ^= base_seed.wrapping_shl(2) & 0xFF00;
     }
 
     // If user has high follow-up tendency, use more detailed variants 
