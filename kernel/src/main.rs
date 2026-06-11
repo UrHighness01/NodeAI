@@ -110,7 +110,8 @@ pub mod lm_memory;      // conversation memory ring buffer
 pub mod lm_templates;   // multi-variant LM templates
 // pub mod lm_mhs;         // MHS — disabled: static mut aliasing bug (#PF heap corruption)
 pub mod lm_mhs_prompt;  // MHS prompt builder with context
-pub mod lm_projectk;    // Project-K nano model (1.6MB INT4, d=192, vocab=2448)
+pub mod lm_projectk;      // Project-K Model A — creator corpus (code/metrics)
+pub mod lm_projectk_conv; // Project-K Model B — Q&A fine-tune (chat/identity)
 // lm_mhs_tok / lm_projectk_tok are child modules of their respective parents
 pub mod swarm_consensus; // EW-5 swarm consciousness
 pub mod nano_nn;        // nano-NN intent embedding classifier
@@ -363,7 +364,8 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     crate::emotional_arc::init(); // emotional arc tracking
     crate::lm_learner::init(); // conversational learning
     // crate::lm_mhs::init();       // Project-M — disabled: static mut aliasing bug (#PF)
-    crate::lm_projectk::init();  // Project-K nano model (1.6MB INT4)
+    crate::lm_projectk::init();      // Model A — creator corpus (code/metrics)
+    crate::lm_projectk_conv::init(); // Model B — Q&A fine-tune (chat/identity)
     crate::lm_memory::init(); // conversation memory for kernel LM
     crate::persistence::init(); // load state from VFS (restores self, memory, weights, etc.)
     // ── Phase EW-0: EW Sensory Cortex ────────────────────────────────────────

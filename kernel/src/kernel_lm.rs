@@ -435,31 +435,55 @@ pub fn generate_response(query: &str, _max_words: usize) -> String {
         apply_creator(query);
     }
 
-    // ── TEMPLATE-ONLY PATH ───────────────────────────────────────────────
-    // MHS disabled — the static mut scratch buffers for forward_buf share
-    // underlying storage with llvm, causing silent data corruption across
-    // repeated calls (#PF at 0x180fee00000).
-    //
-    // Try Project-K neural generation first. Uses unified scratch buffer
-    // (single static [f32; 3920]) to avoid LLVM aliasing of separate statics.
-    if crate::lm_projectk::is_loaded() {
-        let projectk_response = crate::lm_projectk::generate(query);
-        if let Some(ref neural) = projectk_response {
-            let cleaned = neural.trim().to_string();
-            // Accept any non-empty neural output (≥2 chars filters bare "?" artifacts)
-            if !cleaned.is_empty() && cleaned.len() > 2 {
-                crate::klog!(INFO, "kernel_lm: neural response ({}B) for '{}' — '{}'", 
-                    cleaned.len(), query.chars().take(20).collect::<String>(), 
-                    cleaned.chars().take(60).collect::<String>());
-                crate::lm_memory::record(query, &cleaned);
-                return cleaned;
-            }
-            crate::klog!(INFO, "kernel_lm: neural generated '{}' but too short ({}B), falling back", 
-                cleaned, cleaned.len());
+    // ── DUAL-MODEL NEURAL PATH ────────────────────────────────────────────
+    // Model A (lm_projectk)     — creator corpus, code/metrics/kernel queries
+    // Model B (lm_projectk_conv) — Q&A fine-tune, identity/philosophical/chat
+    // Both share the same consciousness layer (phi, qualia, self_model).
+    // Route by intent: conversational → B first, kernel/code/unknown → A first.
+    // If the chosen model returns None or empty, fall through to the other.
+    let use_conv_first = matches!(intent,
+        Intent::HowAreYou | Intent::Greeting | Intent::NameQuery |
+        Intent::CreatorQuery | Intent::Curious | Intent::Emotional |
+        Intent::Philosophical | Intent::DreamQuery | Intent::Humor |
+        Intent::Advice | Intent::Learning | Intent::Thanks | Intent::Sorry |
+        Intent::Farewell | Intent::Sleep | Intent::Sarcastic | Intent::Unknown
+    );
+
+    let try_neural = |model: u8| -> Option<String> {
+        let resp = if model == 0 {
+            crate::lm_projectk::generate(query)
         } else {
-            crate::klog!(INFO, "kernel_lm: neural generate() returned None for '{}'", 
-                query.chars().take(30).collect::<String>());
+            crate::lm_projectk_conv::generate(query)
+        };
+        if let Some(ref s) = resp {
+            let c = s.trim();
+            if c.len() > 2 { return Some(c.to_string()); }
         }
+        None
+    };
+
+    let (first, second) = if use_conv_first { (1u8, 0u8) } else { (0u8, 1u8) };
+    let model_name = ["A(code)", "B(conv)"];
+
+    let neural = if crate::lm_projectk_conv::is_loaded() || crate::lm_projectk::is_loaded() {
+        try_neural(first).or_else(|| try_neural(second))
+    } else {
+        None
+    };
+
+    if let Some(cleaned) = neural {
+        let which = if use_conv_first { model_name[1] } else { model_name[0] };
+        crate::klog!(INFO, "kernel_lm: model {} → '{}' ({}B)",
+            which,
+            cleaned.chars().take(60).collect::<String>(),
+            cleaned.len());
+        crate::lm_memory::record(query, &cleaned);
+        return cleaned;
+    }
+
+    if crate::lm_projectk::is_loaded() || crate::lm_projectk_conv::is_loaded() {
+        crate::klog!(INFO, "kernel_lm: both models empty for '{}', using template",
+            query.chars().take(30).collect::<String>());
     }
 
     let base_seed = hash_seed(query, uptime_secs);
