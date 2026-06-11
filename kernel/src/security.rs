@@ -203,6 +203,43 @@ pub fn has_capability(pid: u64, cap: u64) -> bool {
     }
 }
 
+/// Minimum PID eligible for coherence-horizon confinement.
+/// Kernel-internal threads (PID < 8) are never confinable.
+const MIN_CONFINABLE_PID: u64 = 8;
+
+/// Escalate namespace confinement for a task whose syscall autocorrelation has
+/// dropped below the coherence threshold for too many consecutive windows.
+/// Revokes non-essential capabilities atomically. Idempotent after first call.
+pub fn escalate_confinement(pid: u64) {
+    if pid < MIN_CONFINABLE_PID { return; }
+
+    // AI_OVERRIDE intentionally excluded — AI oversight is never revoked.
+    const REVOKE_MASK: u64 = cap::NET_BIND | cap::SYS_MODULE | cap::SETUID | cap::SYS_BOOT;
+
+    // Single write lock: check-then-mutate atomically — no TOCTOU.
+    let revoked = {
+        let mut w = SECURITY_CONTEXTS.write();
+        if let Some(ctx) = w.get_mut(&pid) {
+            let revoked = ctx.capabilities & REVOKE_MASK;
+            if revoked == 0 { return; } // already confined, nothing to revoke
+            ctx.capabilities &= !REVOKE_MASK;
+            revoked
+        } else {
+            return;
+        }
+    };
+
+    crate::klog!(WARN,
+        "COHERENCE_HORIZON: pid={} syscall autocorr below threshold — \
+         confinement escalated, revoked caps={:#x}", pid, revoked);
+
+    // Only call invalidate_handles for network caps (the only kind that can
+    // have open handles in the current FD subsystem).
+    if revoked & cap::NET_BIND != 0 {
+        crate::syscall::invalidate_handles(pid, cap::NET_RAW);
+    }
+}
+
 /// Revoke a specific capability from a task dynamically.
 pub fn revoke_capability(pid: u64, cap: u64) {
     if let Some(ctx) = SECURITY_CONTEXTS.write().get_mut(&pid) {

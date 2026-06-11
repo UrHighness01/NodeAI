@@ -21,6 +21,10 @@ use spin::Mutex;
 const WARMUP_CALLS: u32 = 200;  // transitions before scoring starts
 /// Window for lag-1 autocorrelation (Project-C coherence_horizon VAR idea).
 const AC_WINDOW: usize = 16;
+/// Autocorrelation below this value signals a chaotic (unpredictable) process.
+const CHAOTIC_AC_THRESHOLD: f32 = -0.2;
+/// How many consecutive chaotic AC readings before escalating namespace confinement.
+const CHAOTIC_STREAK_LIMIT: u8 = 3;
 
 /// Compute lag-1 autocorrelation of a circular buffer of syscall numbers.
 /// Returns a value in [-1, 1]: +1 = perfectly predictable, ~0 or negative = chaotic.
@@ -64,6 +68,9 @@ struct TaskAnomaly {
     ac_head: usize,
     /// How many samples are in ac_ring (capped at AC_WINDOW).
     ac_len:  usize,
+    /// Consecutive ring-fills where autocorr stayed below CHAOTIC_AC_THRESHOLD.
+    /// Resets to 0 when autocorr recovers. Used to trigger confinement escalation.
+    ac_chaotic_streak: u8,
     /// Qualia valence (emotional weight of the process state) [0.0, 1.0].
     pub qualia_valence: f32,
     /// Current anomaly score (0.0 = normal, 1.0 = highly anomalous).
@@ -78,13 +85,13 @@ impl TaskAnomaly {
             prev_nr: 0, total: 0,
             bigrams: BTreeMap::new(), marginals: BTreeMap::new(),
             phi: 1.0, autocorr: 1.0,
-            ac_ring: [0u16; AC_WINDOW], ac_head: 0, ac_len: 0,
+            ac_ring: [0u16; AC_WINDOW], ac_head: 0, ac_len: 0, ac_chaotic_streak: 0,
             qualia_valence: 0.5, score: 0.0, streak: 0,
         }
     }
 
-    /// Feed the next syscall number and return (is_anomalous, score).
-    fn observe(&mut self, nr: u16) -> (bool, f32) {
+    /// Feed the next syscall number and return (is_anomalous, score, escalate_confinement).
+    fn observe(&mut self, nr: u16) -> (bool, f32, bool) {
         let prev = self.prev_nr;
         let key = (prev, nr);
         self.prev_nr = nr;
@@ -96,6 +103,11 @@ impl TaskAnomaly {
         if self.ac_len < AC_WINDOW { self.ac_len += 1; }
         if self.ac_len == AC_WINDOW {
             self.autocorr = lag1_autocorr(&self.ac_ring, self.ac_head);
+            if self.autocorr < CHAOTIC_AC_THRESHOLD {
+                self.ac_chaotic_streak = self.ac_chaotic_streak.saturating_add(1);
+            } else {
+                self.ac_chaotic_streak = 0;
+            }
         }
 
         let marginal_count = self.marginals.get(&prev).copied().unwrap_or(0);
@@ -110,10 +122,9 @@ impl TaskAnomaly {
         }
 
         if self.total < WARMUP_CALLS {
-            // Warmup: just record, don't score.
             *self.marginals.entry(prev).or_insert(0) += 1;
             *self.bigrams.entry(key).or_insert(0) += 1;
-            return (false, 0.0);
+            return (false, 0.0, false);
         }
 
         let count = bigram_count;
@@ -137,15 +148,15 @@ impl TaskAnomaly {
         
         self.qualia_valence = (self.qualia_valence + delta_q).clamp(0.0, 1.0);
 
-        if anomalous { 
-            self.streak += 1; 
-            // Severe drop in valence when anomalies occur
+        if anomalous {
+            self.streak += 1;
             self.qualia_valence = (self.qualia_valence - 0.05).max(0.0);
-        } else { 
-            self.streak = 0; 
+        } else {
+            self.streak = 0;
         }
 
-        (anomalous && self.streak >= 3, self.score)
+        let escalate = self.ac_chaotic_streak >= CHAOTIC_STREAK_LIMIT;
+        (anomalous && self.streak >= 3, self.score, escalate)
     }
 }
 
@@ -156,15 +167,19 @@ static DETECTORS: Mutex<BTreeMap<u64, TaskAnomaly>> = Mutex::new(BTreeMap::new()
 /// When an alert fires, checks the causal waker for correlated anomalies —
 /// if the waker also shows rare bigrams, emits a cross-process security alert.
 pub fn observe(pid: u64, nr: u64) -> (bool, f32) {
-    let (alert, score, valence) = {
+    let (alert, score, valence, escalate) = {
         let mut map = DETECTORS.lock();
         let det = map.entry(pid).or_insert_with(TaskAnomaly::new);
-        let (alert, score) = det.observe(nr as u16);
-        (alert, score, det.qualia_valence)
+        let (alert, score, escalate) = det.observe(nr as u16);
+        (alert, score, det.qualia_valence, escalate)
     };
 
     if alert {
         check_cross_process(pid, score, valence);
+    }
+
+    if escalate {
+        crate::security::escalate_confinement(pid);
     }
 
     (alert, score)
