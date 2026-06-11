@@ -7,6 +7,7 @@
 use alloc::vec::Vec;
 use alloc::vec;
 use alloc::string::String;
+use alloc::boxed::Box;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 #[path = "lm_projectk_tok.rs"]
@@ -21,7 +22,7 @@ const D:        usize = 192;
 const DH0:      usize = 32;
 const DH1:      usize = 48;
 const N_LAYERS: usize = 6;
-const VOCAB:    usize = 2448;
+const VOCAB:    usize = 4539;
 const MLP_D:    usize = 768;  // 4 * D
 const MAX_GEN:  usize = 128;
 const CTX_WIN:  usize = 20;   // recurrent context window for kernel inference
@@ -40,8 +41,8 @@ const SCR_HMS:  usize = SCR_HFS + 32;    // DH1 = 48 → 320
 const SCR_XS:   usize = SCR_HMS + 48;    // D = 192 → 512
 const SCR_OUTS: usize = SCR_XS + 192;    // D = 192 → 704
 const SCR_FCS:  usize = SCR_OUTS + 192;  // MLP_D = 768 → 1472
-const SCR_LOGS: usize = SCR_FCS + 768;   // VOCAB = 2448 → 3920
-const SCR_TOT:  usize = SCR_LOGS + 2448; // 3920
+const SCR_LOGS: usize = SCR_FCS + 768;   // VOCAB = 4539 → 6007
+const SCR_TOT:  usize = SCR_LOGS + 4539; // 6007
 
 static mut SCRATCH: [f32; SCR_TOT] = [0.0; SCR_TOT];
 
@@ -131,7 +132,10 @@ struct Model {
     d:       usize,
 }
 
-static mut MODEL: Option<Model> = None;
+// Store model pointer in a mutable static with pointer provenance.
+// The pointer itself is never aliased because only inference code touches it.
+#[no_mangle]
+static mut MODPTR: *mut Model = core::ptr::null_mut();
 
 // ── Binary parser ─────────────────────────────────────────────────────────
 fn read_u32(data: &[u8], off: &mut usize) -> u32 {
@@ -247,7 +251,8 @@ fn load_weights(data: &[u8]) -> bool {
     };
 
     unsafe {
-        MODEL = Some(Model { emb, blocks, lnf_w, lnf_b, pos_emb, vocab, d });
+        let model = alloc::boxed::Box::new(Model { emb, blocks, lnf_w, lnf_b, pos_emb, vocab, d });
+        MODPTR = alloc::boxed::Box::into_raw(model);
     }
     LOADED.store(true, Ordering::Release);
     true
@@ -492,7 +497,7 @@ pub fn generate(prompt: &str) -> Option<String> {
     let prompt_len = tokens.len();
 
     unsafe {
-        let m = MODEL.as_ref()?;
+        let m = unsafe { MODPTR.as_ref()? };
         let mut out = String::with_capacity(MAX_GEN * 2);
 
         for _step in 0..MAX_GEN {
