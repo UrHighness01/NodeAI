@@ -361,7 +361,7 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     crate::lm_validator::init(); // grounded neural validator
     crate::emotional_arc::init(); // emotional arc tracking
     crate::lm_learner::init(); // conversational learning
-    crate::lm_mhs::init();       // Project-M neural voice engine (6.6MB INT8)
+    // crate::lm_mhs::init();       // Project-M — disabled: static mut aliasing bug (#PF)
     crate::lm_projectk::init();  // Project-K nano model (1.6MB INT4)
     crate::lm_memory::init(); // conversation memory for kernel LM
     // ── Phase EW-0: EW Sensory Cortex ────────────────────────────────────────

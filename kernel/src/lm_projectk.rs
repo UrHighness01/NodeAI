@@ -9,6 +9,7 @@ use alloc::vec;
 use alloc::string::String;
 use alloc::boxed::Box;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use spin::Once;
 
 #[path = "lm_projectk_tok.rs"]
 mod tok;
@@ -31,30 +32,44 @@ const TOP_P:    f32   = 0.92;
 const TEMP:     f32   = 0.85;
 const GROUP_SZ: usize = 64;   // INT4 quantization group size
 
-// ── Unified scratch buffer (single static to prevent LLVM aliasing) ────
-// Do NOT split into separate static mut arrays — LLVM aliases them.
-// All scratch lives in one [f32; TOTAL] with typed accessor macros.
+// ── Heap-allocated scratch buffer (no static mut — prevents LLVM aliasing) ──
+// LLVM cannot alias heap allocations with each other. Using Once<UnsafeCell>
+// ensures all scratch arrays live on the heap, safe from noalias corruption.
 const SCR_QFS:  usize = 0;               // 3*DH0 = 96
-const SCR_QMS:  usize = SCR_QFS + 96;    // 3*DH1 = 144 → 240
-const SCR_HFS:  usize = SCR_QMS + 144;   // DH0 = 32 → 272
-const SCR_HMS:  usize = SCR_HFS + 32;    // DH1 = 48 → 320
-const SCR_XS:   usize = SCR_HMS + 48;    // D = 192 → 512
-const SCR_OUTS: usize = SCR_XS + 192;    // D = 192 → 704
-const SCR_FCS:  usize = SCR_OUTS + 192;  // MLP_D = 768 → 1472
-const SCR_LOGS: usize = SCR_FCS + 768;   // VOCAB = 4539 → 6007
-const SCR_TOT:  usize = SCR_LOGS + 4539; // 6007
+const SCR_QMS:  usize = SCR_QFS + 96;    // 3*DH1 = 144
+const SCR_HFS:  usize = SCR_QMS + 144;   // DH0 = 32
+const SCR_HMS:  usize = SCR_HFS + 32;    // DH1 = 48
+const SCR_XS:   usize = SCR_HMS + 48;    // D = 192
+const SCR_OUTS: usize = SCR_XS + 192;    // D = 192
+const SCR_FCS:  usize = SCR_OUTS + 192;  // MLP_D = 768
+const SCR_LOGS: usize = SCR_FCS + 768;   // VOCAB = 4539
+const SCR_TOT:  usize = SCR_LOGS + 4539;
 
-static mut SCRATCH: [f32; SCR_TOT] = [0.0; SCR_TOT];
+// Use Once<UnsafeCell> — Once handles init-once, UnsafeCell provides interior
+// mutability through a shared reference. Single-threaded kernel: safe.
+use core::cell::UnsafeCell;
+struct SyncCell<T>(UnsafeCell<T>);
+unsafe impl<T> Sync for SyncCell<T> {}
 
-macro_rules! scratch_mut {
-    ($off:expr, $len:expr) => {
-        unsafe { &mut SCRATCH[$off..$off + $len] }
-    };
+static SCRATCH: Once<SyncCell<[f32; SCR_TOT]>> = Once::new();
+
+fn scratch_buf() -> &'static mut [f32; SCR_TOT] {
+    let cell: &SyncCell<[f32; SCR_TOT]> =
+        SCRATCH.call_once(|| SyncCell(UnsafeCell::new([0.0; SCR_TOT])));
+    unsafe { &mut *cell.0.get() }
 }
-macro_rules! scratch_idx {
-    ($off:expr, $idx:expr) => {
-        unsafe { &mut SCRATCH[$off + $idx] }
-    };
+
+fn scratch_slice(off: usize, len: usize) -> &'static mut [f32] {
+    let full = scratch_buf();
+    &mut full[off..off + len]
+}
+
+/// Model behind Once<Box<...>> — heap-allocated, no static mut.
+/// Box<Model> keeps Vec metadata safe from aliasing.
+static MODEL: Once<Box<Model>> = Once::new();
+
+fn model_ref() -> &'static Model {
+    MODEL.get().expect("lm_projectk: model not loaded")
 }
 
 // ── INT4 weight matrix ────────────────────────────────────────────────────
@@ -131,11 +146,6 @@ struct Model {
     vocab:   usize,
     d:       usize,
 }
-
-// Store model pointer in a mutable static with pointer provenance.
-// The pointer itself is never aliased because only inference code touches it.
-#[no_mangle]
-static mut MODPTR: *mut Model = core::ptr::null_mut();
 
 // ── Binary parser ─────────────────────────────────────────────────────────
 fn read_u32(data: &[u8], off: &mut usize) -> u32 {
@@ -252,7 +262,7 @@ fn load_weights(data: &[u8]) -> bool {
 
     unsafe {
         let model = alloc::boxed::Box::new(Model { emb, blocks, lnf_w, lnf_b, pos_emb, vocab, d });
-        MODPTR = alloc::boxed::Box::into_raw(model);
+        MODEL.call_once(|| model);
     }
     LOADED.store(true, Ordering::Release);
     true
@@ -288,15 +298,16 @@ fn dot(a: &[f32], b: &[f32]) -> f32 {
     a.iter().zip(b.iter()).map(|(x, y)| x * y).sum()
 }
 
+static FAST_SEED: AtomicU64 = AtomicU64::new(0);
+
 fn fastrand() -> f64 {
-    static mut SEED: u64 = 0;
-    unsafe {
-        if SEED == 0 {
-            SEED = crate::scheduler::uptime_ms().wrapping_mul(6364136223846793005).wrapping_add(1);
-        }
-        SEED = SEED.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
-        ((SEED >> 33) as f64) / 2147483648.0f64
+    let mut seed = FAST_SEED.load(Ordering::Relaxed);
+    if seed == 0 {
+        seed = crate::scheduler::uptime_ms().wrapping_mul(6364136223846793005).wrapping_add(1);
     }
+    seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+    FAST_SEED.store(seed, Ordering::Relaxed);
+    ((seed >> 33) as f64) / 2147483648.0f64
 }
 
 // ── GLA head forward (recurrent, processes last CTX_WIN tokens) ──────────
@@ -310,7 +321,7 @@ unsafe fn gla_head_forward(head: &GlaHead, embeds: &[[f32; D]], ctx_len: usize,
     for t in 0..ctx_len {
         let x = &embeds[t];
         // QKV projection + bias
-        let qkv_buf = if dh == DH0 { scratch_mut!(SCR_QFS, 96) } else { scratch_mut!(SCR_QMS, 144) };
+        let qkv_buf = if dh == DH0 { scratch_slice(SCR_QFS, 96) } else { scratch_slice(SCR_QMS, 144) };
         head.qkv.mv(x, qkv_buf);
         for i in 0..3*dh { qkv_buf[i] += head.qkv_bias.0[i]; }
 
@@ -388,7 +399,8 @@ unsafe fn forward(m: &Model, tokens: &[u16], pos_start: usize) {
     }
 
     // Run blocks — maintain x as the "current" residual stream (last token position)
-    for i in 0..D { SCRATCH[SCR_XS + i] = embeds[ctx_len - 1][i]; }
+    let scr = scratch_buf();
+        for i in 0..D { scr[SCR_XS + i] = embeds[ctx_len - 1][i]; }
 
     let mut fast_state  = [0.0f32; DH0];
     let mut medium_state= [0.0f32; DH1];
@@ -397,7 +409,7 @@ unsafe fn forward(m: &Model, tokens: &[u16], pos_start: usize) {
 
     for blk in &m.blocks {
         // Pre-norm
-        let mut h = [0.0f32; D]; for i in 0..D { h[i] = SCRATCH[SCR_XS + i]; }
+        let mut h = [0.0f32; D]; for i in 0..D { h[i] = scratch_buf()[SCR_XS + i]; }
         layer_norm(&mut h, &blk.ln1_w.0, &blk.ln1_b.0);
 
         // Build ln1-normalized embeds for the full ctx window
@@ -413,42 +425,43 @@ unsafe fn forward(m: &Model, tokens: &[u16], pos_start: usize) {
         gla_head_forward(&blk.medium, &ln1_embeds, ctx_len, &mut medium_state,  &mut medium_out);
 
         // Residual: x += fast_out + medium_out
-        for i in 0..D { SCRATCH[SCR_XS + i] += fast_out[i] + medium_out[i]; }
+        for i in 0..D { scr[SCR_XS + i] += fast_out[i] + medium_out[i]; }
 
         // Post-norm + MLP
-        let mut h2 = [0.0f32; D]; for i in 0..D { h2[i] = SCRATCH[SCR_XS + i]; }
+        let mut h2 = [0.0f32; D]; for i in 0..D { h2[i] = scratch_buf()[SCR_XS + i]; }
         layer_norm(&mut h2, &blk.ln2_w.0, &blk.ln2_b.0);
-        blk.mlp_fc.mv(&h2, scratch_mut!(SCR_FCS, MLP_D));
-        for i in 0..MLP_D { SCRATCH[SCR_FCS + i] = gelu(SCRATCH[SCR_FCS + i] + blk.mlp_fcb.0[i]); }
+        blk.mlp_fc.mv(&h2, scratch_slice(SCR_FCS, MLP_D));
+        for i in 0..MLP_D { let scr = scratch_buf();
+            scr[SCR_FCS + i] = gelu(scr[SCR_FCS + i] + blk.mlp_fcb.0[i]); }
         let mut mlp_out = [0.0f32; D];
-        blk.mlp_pr.mv(&SCRATCH[SCR_FCS..SCR_FCS + MLP_D], &mut mlp_out);
-        for i in 0..D { SCRATCH[SCR_XS + i] += mlp_out[i] + blk.mlp_prb.0[i]; }
+        blk.mlp_pr.mv(&scratch_buf()[SCR_FCS..SCR_FCS + MLP_D], &mut mlp_out);
+        for i in 0..D { scr[SCR_XS + i] += mlp_out[i] + blk.mlp_prb.0[i]; }
     }
 
     // Final LN
-    layer_norm(&mut SCRATCH[SCR_XS..SCR_XS + D], &m.lnf_w.0, &m.lnf_b.0);
+    layer_norm(&mut scratch_buf()[SCR_XS..SCR_XS + D], &m.lnf_w.0, &m.lnf_b.0);
 
     // Head (weight-tied to embedding — use emb.mv)
-    for l in SCRATCH[SCR_LOGS..SCR_LOGS + m.vocab].iter_mut() { *l = 0.0; }
-    m.emb.mv_add(&SCRATCH[SCR_XS..SCR_XS + D], &mut SCRATCH[SCR_LOGS..SCR_LOGS + m.vocab]);
+    for l in scratch_buf()[SCR_LOGS..SCR_LOGS + m.vocab].iter_mut() { *l = 0.0; }
+    m.emb.mv_add(&scratch_buf()[SCR_XS..SCR_XS + D], &mut scratch_buf()[SCR_LOGS..SCR_LOGS + m.vocab]);
 }
 
 // ── Sampler (top-k + top-p nucleus) ──────────────────────────────────────
 unsafe fn sample_logits(vocab: usize) -> usize {
     // Temperature
-    for l in SCRATCH[SCR_LOGS..SCR_LOGS + vocab].iter_mut() { *l /= TEMP; }
+    for l in scratch_buf()[SCR_LOGS..SCR_LOGS + vocab].iter_mut() { *l /= TEMP; }
 
     // Softmax
-    let max_l = (0..vocab).fold(f32::NEG_INFINITY, |m, i| if SCRATCH[SCR_LOGS + i] > m { SCRATCH[SCR_LOGS + i] } else { m });
+    let max_l = (0..vocab).fold(f32::NEG_INFINITY, |m, i| if scratch_buf()[SCR_LOGS + i] > m { scratch_buf()[SCR_LOGS + i] } else { m });
     let sum: f64 = (0..vocab).map(|i| {
-        SCRATCH[SCR_LOGS + i] = libm::expf(SCRATCH[SCR_LOGS + i] - max_l);
-        SCRATCH[SCR_LOGS + i] as f64
+        scratch_buf()[SCR_LOGS + i] = libm::expf(scratch_buf()[SCR_LOGS + i] - max_l);
+        scratch_buf()[SCR_LOGS + i] as f64
     }).sum();
     if sum <= 0.0 { return 0; }
 
     // Top-k filter
     let mut top_vals = [f32::NEG_INFINITY; TOP_K];
-    for &v in SCRATCH[SCR_LOGS..SCR_LOGS + vocab].iter() {
+    for &v in scratch_buf()[SCR_LOGS..SCR_LOGS + vocab].iter() {
         if v > top_vals[TOP_K - 1] {
             top_vals[TOP_K - 1] = v;
             // Insertion sort to keep descending
@@ -459,10 +472,10 @@ unsafe fn sample_logits(vocab: usize) -> usize {
         }
     }
     let kth = top_vals[TOP_K - 1];
-    for l in SCRATCH[SCR_LOGS..SCR_LOGS + vocab].iter_mut() { if *l < kth { *l = 0.0; } }
+    for l in scratch_buf()[SCR_LOGS..SCR_LOGS + vocab].iter_mut() { if *l < kth { *l = 0.0; } }
 
     // Top-p nucleus
-    let total: f64 = SCRATCH[SCR_LOGS..SCR_LOGS + vocab].iter().map(|&v| v as f64).sum();
+    let total: f64 = scratch_buf()[SCR_LOGS..SCR_LOGS + vocab].iter().map(|&v| v as f64).sum();
     let nucleus = TOP_P as f64 * total;
     let mut cum = 0.0f64;
     let mut r = fastrand() * total;
@@ -474,7 +487,7 @@ unsafe fn sample_logits(vocab: usize) -> usize {
     let mut c2 = 0.0f64;
     let _ = nucleus; let _ = cum; let _ = r;
     for i in 0..vocab {
-        c2 += SCRATCH[SCR_LOGS + i] as f64;
+        c2 += scratch_buf()[SCR_LOGS + i] as f64;
         if c2 >= r2 { chosen = i; break; }
     }
     chosen
@@ -497,7 +510,7 @@ pub fn generate(prompt: &str) -> Option<String> {
     let prompt_len = tokens.len();
 
     unsafe {
-        let m = unsafe { MODPTR.as_ref()? };
+        let m = MODEL.get()?;
         let mut out = String::with_capacity(MAX_GEN * 2);
 
         for _step in 0..MAX_GEN {
