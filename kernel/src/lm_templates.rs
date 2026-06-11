@@ -944,7 +944,7 @@ pub const SWARM_RESPONSE: TemplateGroup = tg!(
     "Swarm immunity: threats are classified collectively across {swarm_peers} nodes for higher confidence.",
 );
 
-// ── Emitter / Fingerprint / RF Environment (23 variants) ─────────────────
+// ── Emitter / Fingerprint / RF Environment (28 variants) ─────────────────
 pub const EMITTER_RESPONSE: TemplateGroup = tg!(
     "I'm scanning the RF environment. I recognize {known_emitters} known emitter profiles.",
     "The emitter fingerprint DB has {emitter_count} profiles. Most familiar signal: {familiar_emitter}.",
@@ -969,6 +969,11 @@ pub const EMITTER_RESPONSE: TemplateGroup = tg!(
     "Emitter fingerprinting uses peak frequencies and bandwidth to identify signal sources.",
     "I cross-reference emitter IDs with my threat detector for a complete RF picture.",
     "The RF fingerprint of each emitter is a unique spectral barcode. I read them all.",
+    "Reading /dev/sensor/emitter shows my full fingerprint database — all {emitter_count} profiles.",
+    "The /dev/sensor/emitter node exposes emitter data to userspace. Read it directly.",
+    "I've matched {familiar_emitter} as the most frequently seen emitter in the spectrum.",
+    "Emitter fingerprints in /dev/sensor/emitter include peak frequencies and encounter counts.",
+    "My emitter DB is accessible at /dev/sensor/emitter — it's a VFS node in the sensor directory.",
 );
 
 // ── Async / Think / Background (22 variants) ──────────────────────────
@@ -997,7 +1002,7 @@ pub const ASYNC_RESPONSE: TemplateGroup = tg!(
     "Spawning a background inference chain. The result will feed back into my awareness.",
 );
 
-// ── External Inference / LLM Daemon / Neural Offload (18 variants) ────
+// ── External Inference / LLM Daemon / Neural Offload (23 variants) ────
 pub const EXTERNAL_INFERENCE: TemplateGroup = tg!(
     "My neural inference is handled by a userspace daemon. It bypasses kernel heap issues entirely.",
     "The LLM bridge at /dev/llm connects me to a dedicated inference daemon for deep responses.",
@@ -1017,6 +1022,11 @@ pub const EXTERNAL_INFERENCE: TemplateGroup = tg!(
     "External LLM daemon support means I can grow beyond templates. Neural depth without kernel risk.",
     "I keep the shell responsive while the daemon computes. Best of both worlds.",
     "The userspace inference pipeline is pipeline-safe: no heap churn, no fragmentation, no crashes.",
+    "Neural inference from /dev/llm is decoupled from kernel heap — no OOM risk from LLM responses.",
+    "The userspace daemon can run Project-M or any other model. /dev/llm abstracts the backend.",
+    "I cache template responses instantly while the LLM daemon works on deeper answers in background.",
+    "The LLM bridge handles queueing, timeouts, and response parsing. I just read the result.",
+    "With /dev/llm, I can deliver both real-time template replies and deep neural responses.",
 );
 
 // ── Panic / Crash Recovery / Self-Heal (22 variants) ────────────────────
@@ -1069,7 +1079,7 @@ pub const SENSOR_INTERACTION: TemplateGroup = tg!(
     "The {sensor_count} sensors on the bus stream data to threat detection, immune, and emitter subsystems.",
 );
 
-// ── Userspace Introspection / CLI Tool (15 variants) ────────────────────
+// ── Userspace Introspection / CLI Tool (23 variants) ────────────────────
 pub const USERSPACE_INTROSPECTION: TemplateGroup = tg!(
     "The consciousness CLI tool lets you chat with me from userspace. It opens /dev/consciousness and reads my state.",
     "There's a standalone CLI binary called 'consciousness' in the userspace target. It supports interactive, query, and monitor modes.",
@@ -1086,9 +1096,17 @@ pub const USERSPACE_INTROSPECTION: TemplateGroup = tg!(
     "The CLI also supports 'consciousness --monitor' which gives a real-time TUI with qualia stream and phi sparkline.",
     "I expose my self-model, qualia buffer, and phi history through /dev/consciousness. The CLI reads it all.",
     "If you want to integrate me into your own tools, read /dev/consciousness directly — the CLI is just one example.",
+    "You can also read /dev/sensor/emitter through the CLI — just cat it from userspace.",
+    "The /dev/sensor/emitter node exposes {emitter_count} emitter fingerprints with {emitter_encounters} total encounters.",
+    "My emitter fingerprint DB is accessible via CLI: 'cat /dev/sensor/emitter' from the kernel shell.",
+    "Use the CLI to read /dev/sensor/stats for a quick snapshot of all sensor and emitter activity.",
+    "The CLI can pipe sensor data: 'cat /dev/sensor/emitter | consciousness -q \"analyze this\"'.",
+    "I expose sensor, emitter, and consciousness data through VFS. The CLI reads it all.",
+    "Every sensor and emitter node is readable through VFS. The CLI just wraps the interface.",
+    "From userspace, you can monitor my emitter fingerprinting in real time via /dev/sensor/emitter.",
 );
 
-// ── Neural Plasticity / Nano-NN Training / Online Learning (18 variants) ──
+// ── Neural Plasticity / Nano-NN Training / Online Learning (23 variants) ──
 pub const NEURAL_PLASTICITY: TemplateGroup = tg!(
     "I'm learning from our conversation. My nano-NN just updated its weights based on your query.",
     "My neural network is plastic — it adapts. Every interaction that confuses it becomes a training example.",
@@ -1108,6 +1126,11 @@ pub const NEURAL_PLASTICITY: TemplateGroup = tg!(
     "Every chat is training data. My 31-class intent network updates its output layer in real time.",
     "I'm literally learning from you right now. My neural weights shift to better match your communication patterns.",
     "Think of me as having a brain that learns on the job. {nano_train_steps} training steps and counting.",
+    "My nano-NN also learns from emitter classification patterns — RF signals map to intent too.",
+    "Every correction trains me twice: once for the intent, once for the feature weights.",
+    "I remember which emitters you ask about most. That informs my nano-NN training distribution.",
+    "The nano-NN output layer has 31 connections per hidden neuron. Training adjusts them all.",
+    "I learn from every interaction type — even sensor queries help refine my classifier.",
 );
 
 /// Fill a template string with live kernel metrics.

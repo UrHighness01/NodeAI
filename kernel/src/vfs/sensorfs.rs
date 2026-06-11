@@ -54,6 +54,7 @@ impl VfsNode for SensorDir {
         let base_ino = SENSORFS_INO.load(Ordering::Relaxed);
 
         entries.push(DirEntry { ino: base_ino + 1, name: String::from("stats"), is_dir: false });
+        entries.push(DirEntry { ino: base_ino + 100, name: String::from("emitter"), is_dir: false });
 
         for i in 0..stats.num_sensors {
             entries.push(DirEntry {
@@ -68,6 +69,7 @@ impl VfsNode for SensorDir {
     fn lookup(&self, name: &str) -> VfsResult<Arc<dyn VfsNode>> {
         match name {
             "stats" => Ok(Arc::new(SensorStatsNode)),
+            "emitter" => Ok(Arc::new(EmitterDataNode)),
             name if name.starts_with("ambient_rf_") => {
                 Ok(Arc::new(SensorDataNode { label: String::from(name) }))
             }
@@ -142,12 +144,17 @@ impl FileHandle for SensorDataHandle {
             "sensor:     {}\n\
              signals:    {}\n\
              jams:       {}\n\
+             emitters:   {} known, {} encounters\n\
              spectrum:   {} samples\n\
+             familiar:   {}\n\
              timestamp:  {}s\n",
             self.label,
             stats.signals_detected,
             stats.jams_detected,
+            stats.emitter_count,
+            stats.emitter_encounters,
             stats.last_spectrum_count,
+            stats.familiar_emitter,
             crate::scheduler::uptime_ms() / 1000,
         );
         let bytes = s.as_bytes();
@@ -159,5 +166,36 @@ impl FileHandle for SensorDataHandle {
     fn seek(&mut self, pos: u64) -> VfsResult<u64> { Ok(pos) }
     fn stat(&self) -> VfsResult<Stat> {
         Ok(Stat { ino: SENSORFS_INO.load(Ordering::Relaxed) + 2, size: 0, is_dir: false, nlink: 1, uid: 0, gid: 0, mode: 0o444 })
+    }
+}
+
+/// /dev/sensor/emitter — emitter fingerprint data node.
+struct EmitterDataNode;
+
+impl VfsNode for EmitterDataNode {
+    fn stat(&self) -> VfsResult<Stat> {
+        Ok(Stat { ino: SENSORFS_INO.load(Ordering::Relaxed) + 100, size: 0, is_dir: false, nlink: 1, uid: 0, gid: 0, mode: 0o444 })
+    }
+    fn open(&self) -> VfsResult<Box<dyn FileHandle>> { Ok(Box::new(EmitterDataHandle)) }
+    fn readdir(&self) -> VfsResult<Vec<DirEntry>> { Err(VfsError::NotADirectory) }
+    fn lookup(&self, _: &str) -> VfsResult<Arc<dyn VfsNode>> { Err(VfsError::NotADirectory) }
+    fn create_file(&self, _: &str) -> VfsResult<Arc<dyn VfsNode>> { Err(VfsError::NotADirectory) }
+    fn mkdir(&self, _: &str) -> VfsResult<Arc<dyn VfsNode>> { Err(VfsError::NotADirectory) }
+    fn unlink(&self, _: &str) -> VfsResult<()> { Err(VfsError::NotADirectory) }
+}
+
+struct EmitterDataHandle;
+
+impl FileHandle for EmitterDataHandle {
+    fn read(&mut self, buf: &mut [u8]) -> VfsResult<usize> {
+        let data = crate::sensor_emitter::format_report();
+        let n = data.len().min(buf.len());
+        buf[..n].copy_from_slice(&data[..n]);
+        Ok(n)
+    }
+    fn write(&mut self, _: &[u8]) -> VfsResult<usize> { Ok(0) }
+    fn seek(&mut self, pos: u64) -> VfsResult<u64> { Ok(pos) }
+    fn stat(&self) -> VfsResult<Stat> {
+        Ok(Stat { ino: SENSORFS_INO.load(Ordering::Relaxed) + 100, size: 0, is_dir: false, nlink: 1, uid: 0, gid: 0, mode: 0o444 })
     }
 }

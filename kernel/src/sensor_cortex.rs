@@ -212,6 +212,9 @@ pub fn stats() -> SensorStats {
             signals_detected: inner.total_signals_detected,
             jams_detected: inner.total_jams_detected,
             last_spectrum_count: inner.last_spectrum.len(),
+            emitter_count: crate::sensor_emitter::emitter_count(),
+            emitter_encounters: crate::sensor_emitter::total_encounters(),
+            familiar_emitter: crate::sensor_emitter::most_familiar_emitter(),
         },
         None => SensorStats::default(),
     }
@@ -223,13 +226,17 @@ pub struct SensorStats {
     pub signals_detected: u64,
     pub jams_detected: u64,
     pub last_spectrum_count: usize,
+    pub emitter_count: usize,
+    pub emitter_encounters: u64,
+    pub familiar_emitter: alloc::string::String,
 }
 
 impl SensorStats {
     pub fn fmt_report(&self) -> String {
         format!(
-            "sensors={} signals={} jams={} spectrum_samples={}",
-            self.num_sensors, self.signals_detected, self.jams_detected, self.last_spectrum_count
+            "sensors={} signals={} jams={} emitters={} spectrum_samples={} familiar={}",
+            self.num_sensors, self.signals_detected, self.jams_detected,
+            self.emitter_count, self.last_spectrum_count, self.familiar_emitter
         )
     }
 }
@@ -241,6 +248,9 @@ impl Default for SensorStats {
             signals_detected: 0,
             jams_detected: 0,
             last_spectrum_count: 0,
+            emitter_count: 0,
+            emitter_encounters: 0,
+            familiar_emitter: alloc::string::String::new(),
         }
     }
 }
