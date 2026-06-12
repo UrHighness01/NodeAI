@@ -440,6 +440,9 @@ fn idle_loop() -> ! {
     loop {
         // Process hardware input events outside of IRQ context
         crate::desktop::process_input_events();
+        // Yield to scheduler immediately after input processing
+        // so PS/2 keyboard/mouse interrupts are serviced promptly
+        x86_64::instructions::interrupts::enable_and_hlt();
         net::poll();
         wifi::poll();
         mem_pressure::tick();
