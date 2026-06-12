@@ -121,7 +121,10 @@ pub fn init() {
 }
 
 fn f32s<'a>(w: &'a [u8], mo: &MatOff) -> &'a [f32] {
-    unsafe { core::slice::from_raw_parts(w[mo.p..].as_ptr() as *const f32, mo.cols) }
+    // Capture fields to locals before creating &[f32] that aliases the &[u8]
+    let p = mo.p;
+    let cols = mo.cols;
+    unsafe { core::slice::from_raw_parts(w.as_ptr().add(p) as *const f32, cols) }
 }
 fn mv4(w: &[u8], m: &MatOff, x: &[f32], out: &mut [f32]) {
     let xlen = x.len();
@@ -164,12 +167,14 @@ fn lnorm(x: &mut [f32], w: &[f32], b: &[f32]) {
 
 fn gla(e: &ModelFlat, bi: usize, hi: usize, dh: usize, x: &[[f32; D]; CTX_WIN],
        ctx: usize, state: &mut [f32], out: &mut [f32]) {
+    // Capture model reference once to avoid repeated field aliasing issues
+    let w = &e.w;
     for s in state[..dh].iter_mut() { *s=0.0; }
     for t in 0..ctx {
         let inp = &x[t];
         let mut qv = [0.0; 144]; let qvl = if dh==DH0 {96} else {144};
         let qs = &mut qv[..qvl];
-        mv4(&e.w, &e.blk_qkv[bi][hi], inp, qs);
+        mv4(w, &e.blk_qkv[bi][hi], inp, qs);
         let qb = f32s(&e.w, &e.blk_qb[bi][hi]);
         for i in 0..qvl { qs[i] += qb[i]; }
         let (q, k, v) = (&qs[..dh], &qs[dh..2*dh], &qs[2*dh..3*dh]);
@@ -192,15 +197,17 @@ fn forward(e: &ModelFlat, tokens: &[u16]) {
     let ts = tokens.len().saturating_sub(ctx);
     let mut emb = [[0.0; D]; CTX_WIN];
     let w = &e.w; let mo = &e.emb;
+    // Capture MatOff fields into locals before any byte reads through w
+    let mo_ng = mo.ng; let mo_s = mo.s; let mo_np = mo.np; let mo_p = mo.p;
 
     for (ti, &tok) in tokens[ts..].iter().enumerate() {
         let row = (tok as usize).min(VOCAB-1);
-        for g in 0..mo.ng {
-            let sc = f32::from_le_bytes([w[mo.s+(row*mo.ng+g)*4], w[mo.s+(row*mo.ng+g)*4+1], w[mo.s+(row*mo.ng+g)*4+2], w[mo.s+(row*mo.ng+g)*4+3]]);
+        for g in 0..mo_ng {
+            let sc = f32::from_le_bytes([w[mo_s+(row*mo_ng+g)*4], w[mo_s+(row*mo_ng+g)*4+1], w[mo_s+(row*mo_ng+g)*4+2], w[mo_s+(row*mo_ng+g)*4+3]]);
             for k in 0..GROUP_SZ {
                 let col = g*GROUP_SZ+k;
                 if col >= D { break; }
-                let byte = w[mo.p+(row*mo.np*2+g*GROUP_SZ+k)/2];
+                let byte = w[mo_p+(row*mo_np*2+g*GROUP_SZ+k)/2];
                 let nib = if (g*GROUP_SZ+k)%2==0 { byte&0x0F } else { (byte>>4)&0x0F };
                 let q = if nib>=8 { nib as i32-16 } else { nib as i32 };
                 emb[ti][col] = q as f32 * sc;
@@ -279,6 +286,7 @@ pub fn gen_count() -> u64 { GEN_COUNT.load(Ordering::Relaxed) }
 pub fn generate(prompt: &str) -> Option<String> {
     if !LOADED.load(Ordering::Acquire) { return None; }
     let e = ENGINE.get()?;
+    crate::klog!(DEBUG, "lm_projectk: generate('{}')", prompt.chars().take(20).collect::<String>());
 
     // Wrap as conversational turn so model completes in Q&A register, not code
     let wrapped = format!("User: {}\nNodeAI: ", prompt.trim());
@@ -290,11 +298,20 @@ pub fn generate(prompt: &str) -> Option<String> {
             toks.push(PKK_CP2TOK[idx].1);
         }
     }
-    if toks.len() < 2 { return None; }
+    if toks.len() < 2 { 
+        crate::klog!(DEBUG, "lm_projectk: too few tokens, returning None");
+        return None; 
+    }
 
     let mut out = String::new();
+    let timeout = crate::scheduler::uptime_ms() + 5000; // 5s max
+    let start = crate::scheduler::uptime_ms();
 
-    for _ in 0..MAX_GEN {
+    for step in 0..MAX_GEN {
+        if crate::scheduler::uptime_ms() > timeout {
+            crate::klog!(WARN, "lm_projectk: generation timeout after {}ms", crate::scheduler::uptime_ms() - start);
+            break;
+        }
         let tok_slice: &[u16] = &toks;
         forward(e, tok_slice);
         // Re-acquire logits reference after forward (avoids LLVM aliasing of shared ref)
@@ -308,7 +325,14 @@ pub fn generate(prompt: &str) -> Option<String> {
         if toks.len() > CTX_WIN { toks.remove(0); }
     }
     GEN_COUNT.fetch_add(1, Ordering::Relaxed);
-    if out.is_empty() { None } else { Some(out) }
+    let elapsed = crate::scheduler::uptime_ms() - start;
+    if out.is_empty() { 
+        crate::klog!(DEBUG, "lm_projectk: empty output ({}ms), returning None", elapsed);
+        None 
+    } else { 
+        crate::klog!(DEBUG, "lm_projectk: '{}' ({}ms)", out.chars().take(40).collect::<String>(), elapsed);
+        Some(out) 
+    }
 }
 
 fn encode_char(ch: char) -> u16 {

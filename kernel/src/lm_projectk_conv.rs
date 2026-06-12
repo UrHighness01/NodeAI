@@ -146,7 +146,9 @@ pub fn init() {
 // ── Inference (identical to lm_projectk, same binary format) ─────────────
 
 fn f32s<'a>(w: &'a [u8], mo: &MatOff) -> &'a [f32] {
-    unsafe { core::slice::from_raw_parts(w[mo.p..].as_ptr() as *const f32, mo.cols) }
+    let p = mo.p;
+    let cols = mo.cols;
+    unsafe { core::slice::from_raw_parts(w.as_ptr().add(p) as *const f32, cols) }
 }
 fn mv4(w: &[u8], m: &MatOff, x: &[f32], out: &mut [f32]) {
     // Copy all MatOff fields to locals before any byte reads through `w`.
