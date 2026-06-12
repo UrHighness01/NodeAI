@@ -436,8 +436,11 @@ pub fn generate_response(query: &str, _max_words: usize) -> String {
     }
 
     // ── QWEN3.5 PRIMARY VOICE ─────────────────────────────────────────────
-    // Qwen3.5 0.6B obliterated runs first (Gated Delta Net SSM).
-    if crate::lm_qwen35::is_loaded() {
+    // PROTOTYPE: Locked behind const flag — QEMU emulation is too slow for
+    // 0.6B+ parameter model inference (minutes per query). Enable on real
+    // hardware with KVM support.
+    const QWEN_INFERENCE_ENABLED: bool = false;
+    if QWEN_INFERENCE_ENABLED && crate::lm_qwen35::is_loaded() {
         crate::klog!(INFO, "kernel_lm: Qwen35 inferring for '{}'... (may take several seconds in QEMU)",
             query.chars().take(20).collect::<String>());
         if let Some(resp) = crate::lm_qwen35::generate(query) {
@@ -453,7 +456,8 @@ pub fn generate_response(query: &str, _max_words: usize) -> String {
     }
 
     // ── QWEN2.5 FALLBACK VOICE ────────────────────────────────────────────
-    if crate::lm_qwen::is_loaded() {
+    // PROTOTYPE: Same const flag as Qwen3.5
+    if QWEN_INFERENCE_ENABLED && crate::lm_qwen::is_loaded() {
         if let Some(resp) = crate::lm_qwen::generate(query) {
             let r = resp.trim().to_string();
             if r.len() > 2 {

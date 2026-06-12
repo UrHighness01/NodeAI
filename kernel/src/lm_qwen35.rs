@@ -635,12 +635,16 @@ impl Qwen35 {
             }
         }
 
-        // Layer forward passes
+        // Layer forward passes — yield periodically for scheduler responsiveness
         for il in 0..N_LAYERS {
             if is_attn(il) {
                 self.forward_attn(il);
             } else {
                 self.forward_ssm(il);
+            }
+            // Yield every 6 layers to allow PS/2 + timer interrupts to service
+            if il > 0 && il % 6 == 0 {
+                crate::scheduler::yield_cpu();
             }
         }
 
