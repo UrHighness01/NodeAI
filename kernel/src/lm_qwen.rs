@@ -418,6 +418,28 @@ fn parse_weights(data: &'static [u8]) -> Option<Box<QwenModel>> {
         a.n_layers, a.d_model, a.n_heads, a.n_kv, a.ffn_dim, a.head_dim);
 
     let mut off = HDR_SZ;
+
+    // Tokenizer vocab — written immediately after header in the binary format
+    if off + 4 <= data.len() {
+        let n_vocab = u32::from_le_bytes(data[off..off+4].try_into().ok()?) as usize;
+        off += 4;
+        if n_vocab > 200_000 {
+            crate::klog!(ERROR, "qwen: n_vocab={} out of range — wrong file offset; aborting parse", n_vocab);
+            return None;
+        }
+        let mut entries: Vec<Vec<u8>> = Vec::with_capacity(n_vocab);
+        for _ in 0..n_vocab {
+            if off + 2 > data.len() { break; }
+            let tok_len = u16::from_le_bytes(data[off..off+2].try_into().ok()?) as usize;
+            off += 2;
+            if off + tok_len > data.len() { break; }
+            entries.push(data[off..off+tok_len].to_vec());
+            off += tok_len;
+        }
+        tok::init(entries);
+        crate::klog!(INFO, "qwen: tokenizer loaded {} tokens", n_vocab);
+    }
+
     let mut layers: Vec<Layer> = Vec::with_capacity(a.n_layers);
 
     for _li in 0..a.n_layers {
@@ -440,23 +462,6 @@ fn parse_weights(data: &'static [u8]) -> Option<Box<QwenModel>> {
     let out_norm = read_f32_vec(&data, &mut off, a.d_model)?;
     let (lm_head, o_) = MatQ::alloc(VOCAB, a.d_model, off); off = o_;
     let (emb,    o_)  = MatQ::alloc(VOCAB, a.d_model, off); off = o_;
-
-    // Tokenizer vocab
-    if off + 4 <= data.len() {
-        let n_vocab = u32::from_le_bytes(data[off..off+4].try_into().ok()?) as usize;
-        off += 4;
-        let mut entries: Vec<Vec<u8>> = Vec::with_capacity(n_vocab);
-        for _ in 0..n_vocab {
-            if off + 2 > data.len() { break; }
-            let tok_len = u16::from_le_bytes(data[off..off+2].try_into().ok()?) as usize;
-            off += 2;
-            if off + tok_len > data.len() { break; }
-            entries.push(data[off..off+tok_len].to_vec());
-            off += tok_len;
-        }
-        tok::init(entries);
-        crate::klog!(INFO, "qwen: tokenizer loaded {} tokens", n_vocab);
-    }
 
     // KV cache
     let kv_sz = a.n_layers * a.n_kv * MAX_CTX * a.head_dim;
