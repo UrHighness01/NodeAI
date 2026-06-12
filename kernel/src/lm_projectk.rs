@@ -125,14 +125,19 @@ fn f32s<'a>(w: &'a [u8], mo: &MatOff) -> &'a [f32] {
 }
 fn mv4(w: &[u8], m: &MatOff, x: &[f32], out: &mut [f32]) {
     let xlen = x.len();
-    for i in 0..m.rows.min(out.len()) {
+    // READ ALL MatOff FIELDS INTO LOCALS FIRST — prevents LLVM from re-reading
+    // corrupted values when &[f32] from f32s() aliases &[u8] from w.
+    let rows = m.rows; let cols = m.cols; let ng = m.ng;
+    let np = m.np; let s_base = m.s; let p_base = m.p;
+    for i in 0..rows.min(out.len()) {
         let mut acc = 0.0;
-        for g in 0..m.ng {
-            let sc = f32::from_le_bytes([w[m.s+(i*m.ng+g)*4], w[m.s+(i*m.ng+g)*4+1], w[m.s+(i*m.ng+g)*4+2], w[m.s+(i*m.ng+g)*4+3]]);
+        for g in 0..ng {
+            let soff = s_base + (i * ng + g) * 4;
+            let sc = f32::from_le_bytes([w[soff], w[soff+1], w[soff+2], w[soff+3]]);
             for k in 0..GROUP_SZ {
                 let col = g*GROUP_SZ+k;
-                if col >= m.cols || col >= xlen { break; }
-                let byte = w[m.p+(i*m.np*2+g*GROUP_SZ+k)/2];
+                if col >= cols || col >= xlen { break; }
+                let byte = w[p_base + (i * np * 2 + g * GROUP_SZ + k) / 2];
                 let nib = if (g*GROUP_SZ+k)%2==0 { byte & 0x0F } else { (byte>>4)&0x0F };
                 let q = if nib>=8 { nib as i32-16 } else { nib as i32 };
                 acc += q as f32 * sc * x[col];
@@ -142,7 +147,8 @@ fn mv4(w: &[u8], m: &MatOff, x: &[f32], out: &mut [f32]) {
     }
 }
 fn mv4_out(w: &[u8], m: &MatOff, x: &[f32], out: &mut [f32]) {
-    for o in out[..m.rows].iter_mut() { *o = 0.0; }
+    let rows = m.rows;
+    for o in out[..rows].iter_mut() { *o = 0.0; }
     mv4(w, m, x, out);
 }
 fn elu1(x: f32) -> f32 { if x>=0.0 { x } else { libm::expf(x)-1.0 } }
