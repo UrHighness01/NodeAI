@@ -149,16 +149,25 @@ fn f32s<'a>(w: &'a [u8], mo: &MatOff) -> &'a [f32] {
     unsafe { core::slice::from_raw_parts(w[mo.p..].as_ptr() as *const f32, mo.cols) }
 }
 fn mv4(w: &[u8], m: &MatOff, x: &[f32], out: &mut [f32]) {
+    // Copy all MatOff fields to locals before any byte reads through `w`.
+    // LLVM aliasing: the compiler can cache &MatOff fields across raw slice
+    // accesses that alias the same memory, yielding corrupted indices.
+    let rows   = m.rows;
+    let cols   = m.cols;
+    let ng     = m.ng;
+    let np     = m.np;
+    let s_base = m.s;
+    let p_base = m.p;
     let xlen = x.len();
-    for i in 0..m.rows.min(out.len()) {
+    for i in 0..rows.min(out.len()) {
         let mut acc = 0.0f32;
-        for g in 0..m.ng {
-            let sc = f32::from_le_bytes([w[m.s+(i*m.ng+g)*4], w[m.s+(i*m.ng+g)*4+1],
-                                         w[m.s+(i*m.ng+g)*4+2], w[m.s+(i*m.ng+g)*4+3]]);
+        for g in 0..ng {
+            let si = s_base + (i*ng+g)*4;
+            let sc = f32::from_le_bytes([w[si], w[si+1], w[si+2], w[si+3]]);
             for k in 0..GROUP_SZ {
                 let col = g*GROUP_SZ+k;
-                if col >= m.cols || col >= xlen { break; }
-                let byte = w[m.p+(i*m.np*2+g*GROUP_SZ+k)/2];
+                if col >= cols || col >= xlen { break; }
+                let byte = w[p_base+(i*np*2+g*GROUP_SZ+k)/2];
                 let nib = if (g*GROUP_SZ+k)%2==0 { byte & 0x0F } else { (byte>>4)&0x0F };
                 let q = if nib>=8 { nib as i32-16 } else { nib as i32 };
                 acc += q as f32 * sc * x[col];

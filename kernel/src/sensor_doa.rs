@@ -48,15 +48,20 @@ pub fn music_spectrum(
         return spectrum;
     }
 
+    // Copy parameters to locals before any heap writes — LLVM alias analysis
+    // incorrectly reloads these from the stack when Vec writes occur nearby.
+    let na = num_antennas;
+    let na_sq = na * na;
+
     // Step 1: Eigendecomposition of covariance matrix (simplified — power iteration)
     // We need the noise subspace eigenvectors.
     // For simplicity, we use the eigenvectors corresponding to the (N - num_sources)
     // smallest eigenvalues.
-    let noise_dim = num_antennas - num_sources;
+    let noise_dim = na - num_sources;
 
     // Compute eigenvalues and eigenvectors via Jacobi iteration (simplified)
-    let mut eigvals = vec![0.0f32; num_antennas];
-    let mut eigvecs = vec![0.0f32; num_antennas * num_antennas];
+    let mut eigvals = vec![0.0f32; na];
+    let mut eigvecs = vec![0.0f32; na_sq];
 
     // Copy covariance to working matrix
     let mut work = covariance.to_vec();
@@ -64,11 +69,11 @@ pub fn music_spectrum(
     // Simple iterative Jacobi eigenvalue algorithm (reduced to 8 iterations for speed)
     for _iter in 0..8 {
         let mut max_off = 0.0f32;
-        let mut p = 0;
-        let mut q = 1;
-        for i in 0..num_antennas {
-            for j in (i + 1)..num_antennas {
-                let val = work[i * num_antennas + j].abs();
+        let mut p = 0usize;
+        let mut q = 1usize;
+        for i in 0..na {
+            for j in (i + 1)..na {
+                let val = work[i * na + j].abs();
                 if val > max_off {
                     max_off = val;
                     p = i;
@@ -78,60 +83,65 @@ pub fn music_spectrum(
         }
         if max_off < 1e-6 { break; }
 
-        let app = work[p * num_antennas + p];
-        let aqq = work[q * num_antennas + q];
-        let apq = work[p * num_antennas + q];
+        // Copy loop variables to locals before any write — prevents LLVM from
+        // reloading them from the stack after Vec element writes alias their slots.
+        let pp = p; let qq = q;
+        let app = work[pp * na + pp];
+        let aqq = work[qq * na + qq];
+        let apq = work[pp * na + qq];
 
         let theta = 0.5 * libm::atanf(2.0 * apq / (aqq - app).max(1e-10));
         let c = libm::cosf(theta);
         let s = libm::sinf(theta);
 
         // Apply Jacobi rotation to work matrix
-        for i in 0..num_antennas {
-            if i != p && i != q {
-                let aip = work[i * num_antennas + p];
-                let aiq = work[i * num_antennas + q];
-                work[i * num_antennas + p] = c * aip - s * aiq;
-                work[p * num_antennas + i] = work[i * num_antennas + p];
-                work[i * num_antennas + q] = s * aip + c * aiq;
-                work[q * num_antennas + i] = work[i * num_antennas + q];
+        for i in 0..na {
+            if i != pp && i != qq {
+                let aip = work[i * na + pp];
+                let aiq = work[i * na + qq];
+                let new_p = c * aip - s * aiq;
+                let new_q = s * aip + c * aiq;
+                work[i  * na + pp] = new_p;
+                work[pp * na + i ] = new_p;
+                work[i  * na + qq] = new_q;
+                work[qq * na + i ] = new_q;
             }
         }
         let app_new = c * c * app + s * s * aqq - 2.0 * s * c * apq;
         let aqq_new = s * s * app + c * c * aqq + 2.0 * s * c * apq;
-        work[p * num_antennas + p] = app_new;
-        work[q * num_antennas + q] = aqq_new;
-        work[p * num_antennas + q] = 0.0;
-        work[q * num_antennas + p] = 0.0;
+        work[pp * na + pp] = app_new;
+        work[qq * na + qq] = aqq_new;
+        work[pp * na + qq] = 0.0;
+        work[qq * na + pp] = 0.0;
 
         // Update eigenvectors (accumulate rotations)
         if _iter == 0 {
             // Initialize eigenvectors to identity
-            for i in 0..num_antennas {
-                eigvecs[i * num_antennas + i] = 1.0;
+            for i in 0..na {
+                eigvecs[i * na + i] = 1.0;
             }
         }
-        for i in 0..num_antennas {
-            let vip = eigvecs[i * num_antennas + p];
-            let viq = eigvecs[i * num_antennas + q];
-            eigvecs[i * num_antennas + p] = c * vip - s * viq;
-            eigvecs[i * num_antennas + q] = s * vip + c * viq;
+        for i in 0..na {
+            let vip = eigvecs[i * na + pp];
+            let viq = eigvecs[i * na + qq];
+            eigvecs[i * na + pp] = c * vip - s * viq;
+            eigvecs[i * na + qq] = s * vip + c * viq;
         }
     }
 
     // Extract eigenvalues from diagonal
-    for i in 0..num_antennas {
-        eigvals[i] = work[i * num_antennas + i];
+    for i in 0..na {
+        eigvals[i] = work[i * na + i];
     }
 
     // Sort eigenvectors by eigenvalue (ascending — noise subspace first)
-    let mut indices: Vec<usize> = (0..num_antennas).collect();
+    let mut indices: Vec<usize> = (0..na).collect();
     indices.sort_by(|a, b| eigvals[*a].partial_cmp(&eigvals[*b]).unwrap_or(core::cmp::Ordering::Equal));
 
     // Build noise subspace matrix (columns = noise eigenvectors)
     let noise_vecs: Vec<f32> = (0..noise_dim).flat_map(|ni| {
         let col = indices[ni]; // column of noise eigenvector
-        (0..num_antennas).map(|row| eigvecs[row * num_antennas + col]).collect::<Vec<_>>()
+        (0..na).map(|row| eigvecs[row * na + col]).collect::<Vec<_>>()
     }).collect();
 
     // Steering vectors and MUSIC spectrum
@@ -141,8 +151,8 @@ pub fn music_spectrum(
         let angle_rad = angle_deg * core::f32::consts::PI / 180.0;
 
         // Steering vector for this angle
-        let mut steering = Vec::with_capacity(num_antennas);
-        for i in 0..num_antennas {
+        let mut steering = Vec::with_capacity(na);
+        for i in 0..na {
             let phase = -2.0 * core::f32::consts::PI * (i as f32) * d * libm::sinf(angle_rad);
             let (s, c) = (libm::sinf(phase), libm::cosf(phase));
             // Store as complex pair (real, imag) — we just need magnitude^2
@@ -155,10 +165,10 @@ pub fn music_spectrum(
         for ni in 0..noise_dim {
             let mut real_sum = 0.0f32;
             let mut imag_sum = 0.0f32;
-            for i in 0..num_antennas {
+            for i in 0..na {
                 let a_real = steering[i * 2];
                 let a_imag = steering[i * 2 + 1];
-                let en = noise_vecs[ni * num_antennas + i];
+                let en = noise_vecs[ni * na + i];
                 // Complex multiply: conj(a) * en
                 real_sum += a_real * en;
                 imag_sum += -a_imag * en;
@@ -262,62 +272,68 @@ pub fn esprit_doa(
         return results;
     }
 
+    // Copy parameter to local before any heap writes — same LLVM aliasing fix as music_spectrum.
+    let na = num_antennas;
+
     // Extract signal subspace via eigendecomposition (same Jacobi as MUSIC)
-    let mut eigvals = vec![0.0f32; num_antennas];
-    let mut eigvecs = vec![0.0f32; num_antennas * num_antennas];
+    let mut eigvals = vec![0.0f32; na];
+    let mut eigvecs = vec![0.0f32; na * na];
     let mut work = covariance.to_vec();
 
     for _iter in 0..8 {
         let mut max_off = 0.0f32;
         let mut p = 0; let mut q = 1;
-        for i in 0..num_antennas {
-            for j in (i + 1)..num_antennas {
-                let val = work[i * num_antennas + j].abs();
+        for i in 0..na {
+            for j in (i + 1)..na {
+                let val = work[i * na + j].abs();
                 if val > max_off { max_off = val; p = i; q = j; }
             }
         }
         if max_off < 1e-6 { break; }
-        let app = work[p * num_antennas + p];
-        let aqq = work[q * num_antennas + q];
-        let apq = work[p * num_antennas + q];
+        let pp = p; let qq = q;
+        let app = work[pp * na + pp];
+        let aqq = work[qq * na + qq];
+        let apq = work[pp * na + qq];
         let theta = 0.5 * libm::atanf(2.0 * apq / (aqq - app).max(1e-10));
         let c = libm::cosf(theta);
         let s = libm::sinf(theta);
-        for i in 0..num_antennas {
-            if i != p && i != q {
-                let aip = work[i * num_antennas + p];
-                let aiq = work[i * num_antennas + q];
-                work[i * num_antennas + p] = c * aip - s * aiq;
-                work[p * num_antennas + i] = work[i * num_antennas + p];
-                work[i * num_antennas + q] = s * aip + c * aiq;
-                work[q * num_antennas + i] = work[i * num_antennas + q];
+        for i in 0..na {
+            if i != pp && i != qq {
+                let aip = work[i * na + pp];
+                let aiq = work[i * na + qq];
+                let new_p = c * aip - s * aiq;
+                let new_q = s * aip + c * aiq;
+                work[i  * na + pp] = new_p;
+                work[pp * na + i ] = new_p;
+                work[i  * na + qq] = new_q;
+                work[qq * na + i ] = new_q;
             }
         }
         let app_new = c * c * app + s * s * aqq - 2.0 * s * c * apq;
         let aqq_new = s * s * app + c * c * aqq + 2.0 * s * c * apq;
-        work[p * num_antennas + p] = app_new;
-        work[q * num_antennas + q] = aqq_new;
-        work[p * num_antennas + q] = 0.0;
-        work[q * num_antennas + p] = 0.0;
+        work[pp * na + pp] = app_new;
+        work[qq * na + qq] = aqq_new;
+        work[pp * na + qq] = 0.0;
+        work[qq * na + pp] = 0.0;
         if _iter == 0 {
-            for i in 0..num_antennas { eigvecs[i * num_antennas + i] = 1.0; }
+            for i in 0..na { eigvecs[i * na + i] = 1.0; }
         }
-        for i in 0..num_antennas {
-            let vip = eigvecs[i * num_antennas + p];
-            let viq = eigvecs[i * num_antennas + q];
-            eigvecs[i * num_antennas + p] = c * vip - s * viq;
-            eigvecs[i * num_antennas + q] = s * vip + c * viq;
+        for i in 0..na {
+            let vip = eigvecs[i * na + pp];
+            let viq = eigvecs[i * na + qq];
+            eigvecs[i * na + pp] = c * vip - s * viq;
+            eigvecs[i * na + qq] = s * vip + c * viq;
         }
     }
-    for i in 0..num_antennas { eigvals[i] = work[i * num_antennas + i]; }
+    for i in 0..na { eigvals[i] = work[i * na + i]; }
 
     // Sort by eigenvalue descending (signal subspace first)
-    let mut indices: Vec<usize> = (0..num_antennas).collect();
+    let mut indices: Vec<usize> = (0..na).collect();
     indices.sort_by(|a, b| eigvals[*b].partial_cmp(&eigvals[*a]).unwrap_or(core::cmp::Ordering::Equal));
 
     // ESPRIT: partition signal subspace into A1 (first N-1 rows) and A2 (last N-1 rows)
     let d = 0.5; // half-wavelength
-    for si in 0..num_sources.min(num_antennas - 1) {
+    for si in 0..num_sources.min(na - 1) {
         let col = indices[si];
 
         // Extract the two sub-arrays from the signal eigenvector
@@ -326,9 +342,9 @@ pub fn esprit_doa(
         let mut mag1 = 0.0f32;
         let mut mag2 = 0.0f32;
 
-        for i in 0..num_antennas - 1 {
-            let e1 = eigvecs[i * num_antennas + col];
-            let e2 = eigvecs[(i + 1) * num_antennas + col];
+        for i in 0..na - 1 {
+            let e1 = eigvecs[i * na + col];
+            let e2 = eigvecs[(i + 1) * na + col];
             a1 += e1 * e2;
             mag1 += e1 * e1;
             mag2 += e2 * e2;
