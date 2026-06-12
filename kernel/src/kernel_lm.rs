@@ -438,6 +438,8 @@ pub fn generate_response(query: &str, _max_words: usize) -> String {
     // ── QWEN3.5 PRIMARY VOICE ─────────────────────────────────────────────
     // Qwen3.5 0.6B obliterated runs first (Gated Delta Net SSM).
     if crate::lm_qwen35::is_loaded() {
+        crate::klog!(INFO, "kernel_lm: Qwen35 inferring for '{}'... (may take several seconds in QEMU)",
+            query.chars().take(20).collect::<String>());
         if let Some(resp) = crate::lm_qwen35::generate(query) {
             let r = resp.trim().to_string();
             if r.len() > 2 {

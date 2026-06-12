@@ -27,7 +27,7 @@ const GS: usize        = 32;    // Q8_0 group size
 const BSIZE: usize     = 34;    // Q8_0 block bytes: 2(f16) + 32(i8)
 const ROPE_PAIRS: usize = 32;   // 64 dims of RoPE per head
 const ROPE_THETA: f32  = 1e7;
-const MAX_NEW: usize   = 256;
+const MAX_NEW: usize   = 48;   // max tokens to generate per query (keep responsive in QEMU)
 const RMS_EPS: f32     = 1e-6;
 const N_SSM: usize     = 18;    // SSM layers (N_LAYERS - N_ATTN)
 const N_ATTN: usize    = 6;     // full attention layers
@@ -747,9 +747,15 @@ pub fn generate(query: &str) -> Option<String> {
     // Generate
     let mut out_tokens = Vec::new();
     let mut last = *tokens.last().unwrap();
-    for _ in 0..MAX_NEW {
+    let _gen_start = crate::scheduler::uptime_ms();
+    for i in 0..MAX_NEW {
         let logits = model.forward(last);
         let next = Qwen35::sample_greedy(logits);
+        // Log progress every 8 tokens
+        if i > 0 && i % 8 == 0 {
+            let elapsed = crate::scheduler::uptime_ms() - _gen_start;
+            crate::klog!(DEBUG, "lm_qwen35: generating token {}/{} ({}ms)", i, MAX_NEW, elapsed);
+        }
         // EOS check (Qwen3.5 EOS = 151645 ... wait, Qwen3.5 has different token IDs)
         // From GGUF: eos_token_id is in metadata. Use common Qwen special tokens.
         if next >= VOCAB as u32 { break; }
