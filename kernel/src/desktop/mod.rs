@@ -2438,15 +2438,9 @@ pub fn app_special_key(key: drivers::input::SpecialKey) {
 /// Poll hardware input queues and route events to the desktop or shell.
 /// Called safely from the main idle loop (out of interrupt context).
 pub fn process_input_events() {
-    // Process Mouse — yield every 4 events to keep scheduler responsive
-    let mut mouse_count = 0u8;
+    // Process Mouse
     while let Some(ev) = drivers::input::poll_mouse_event() {
         mouse_event(ev.dx, ev.dy, ev.left, ev.right);
-        mouse_count += 1;
-        if mouse_count >= 4 {
-            mouse_count = 0;
-            x86_64::instructions::interrupts::enable_and_hlt();
-        }
     }
 
     // Process Keyboard
