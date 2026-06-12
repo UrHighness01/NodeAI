@@ -734,21 +734,40 @@ pub fn generate(query: &str) -> Option<String> {
     let model = unsafe { MODEL.as_mut()? };
     model.reset_state();
 
-    // Build chat prompt
+    // Build chat prompt (short system message for faster prefill)
     let prompt = build_prompt(query);
     let tokens = tok35::encode(&prompt);
     if tokens.is_empty() { return None; }
 
-    // Prefill
-    for &t in &tokens {
+    // ── Hard timeout: bail after 120s total (prefill + generate) ────────────
+    // Prevents waiting forever in QEMU emulation. Templates will handle fallback.
+    let _timeout = crate::scheduler::uptime_ms() + 120_000;
+
+    // Prefill (log progress for diagnostics)
+    let _prefill_start = crate::scheduler::uptime_ms();
+    for (ti, &t) in tokens.iter().enumerate() {
+        if crate::scheduler::uptime_ms() > _timeout {
+            crate::klog!(WARN, "lm_qwen35: prefill timeout at token {}/{} ({}ms)", ti, tokens.len(), crate::scheduler::uptime_ms() - _prefill_start);
+            return None;
+        }
         let _ = model.forward(t);
+        if ti > 0 && ti % 10 == 0 {
+            let elapsed = crate::scheduler::uptime_ms() - _prefill_start;
+            crate::klog!(DEBUG, "lm_qwen35: prefilling token {}/{} ({}ms)", ti, tokens.len(), elapsed);
+        }
     }
+    let prefill_ms = crate::scheduler::uptime_ms() - _prefill_start;
+    crate::klog!(INFO, "lm_qwen35: prefill done ({} tokens, {}ms)", tokens.len(), prefill_ms);
 
     // Generate
     let mut out_tokens = Vec::new();
     let mut last = *tokens.last().unwrap();
     let _gen_start = crate::scheduler::uptime_ms();
     for i in 0..MAX_NEW {
+        if crate::scheduler::uptime_ms() > _timeout {
+            crate::klog!(WARN, "lm_qwen35: generation timeout at token {}/{} ({}ms)", i, MAX_NEW, crate::scheduler::uptime_ms() - _gen_start);
+            break;
+        }
         let logits = model.forward(last);
         let next = Qwen35::sample_greedy(logits);
         // Log progress every 8 tokens
