@@ -2071,6 +2071,7 @@ fn read_consciousness_device() {
 
 /// Write a query to /dev/consciousness and print the response on the terminal.
 fn write_consciousness_query(query: &str) {
+    crate::klog!(DEBUG, "shell: consc query '{}'", query.chars().take(30).collect::<String>());
     let mut msg = alloc::vec::Vec::from(query.as_bytes());
     msg.push(b'\n');
     use crate::vfs;

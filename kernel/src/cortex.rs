@@ -104,6 +104,7 @@ fn build_snapshot() -> Vec<u8> {
 
 // ── CI-1: Intent Parser ───────────────────────────────────────────────────────
 
+#[derive(Debug)]
 enum Intent {
     SetValue(String, f32),
     BoostPid(u64),
@@ -350,11 +351,14 @@ impl crate::vfs::FileHandle for ConscHandle {
     fn write(&mut self, buf: &[u8]) -> crate::vfs::VfsResult<usize> {
         if let Ok(s) = core::str::from_utf8(buf) {
             let query = alloc::string::String::from(s);
+            // Breadcrumb: trace consc dispatch
+            crate::klog!(DEBUG, "cortex: write '{}'", query.trim().chars().take(30).collect::<String>());
             let intent = parse_intent(&query);
+            crate::klog!(DEBUG, "cortex: intent={:?}", intent);
             let response = handle_intent(intent, &query);
             // Store response so shell can read() it back after write()
             store_response(&response);
-            crate::klog!(INFO, "consciousness: {}", response);
+            crate::klog!(INFO, "consciousness: {}", response.chars().take(200).collect::<String>());
         }
         Ok(buf.len())
     }
