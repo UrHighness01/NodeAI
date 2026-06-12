@@ -497,28 +497,32 @@ fn read_f32_vec(data: &[u8], off: &mut usize, n: usize) -> Option<Vec<f32>> {
 
 // ── Init ──────────────────────────────────────────────────────────────────────
 
-/// Load Qwen weights from QEMU drive (index 2) at boot time.
-/// Uses drive 2 to avoid conflict with Qwen3.5 on drive 1.
+/// Load Qwen weights from QEMU drive (index 2) at boot time in background.
+/// Spawns a kernel thread so boot isn't blocked by slow AHCI reads.
 pub fn init() {
-    match crate::storage::read_all(2) {
-        Ok(data) => {
-            crate::klog!(INFO, "qwen: read {} MB from weight disk, parsing...",
-                data.len() / 1024 / 1024);
-            match parse_weights(data) {
-                Some(m) => {
-                    unsafe { ENGINE = Some(m); }
-                    LOADED.store(true, Ordering::SeqCst);
-                    let (d, l) = unsafe {
-                        let e = ENGINE.as_ref().unwrap();
-                        (e.arch.d_model, e.arch.n_layers)
-                    };
-                    crate::klog!(INFO, "qwen: Qwen2.x ready (D={} L={} VOCAB={})", d, l, VOCAB);
+    crate::klog!(INFO, "qwen: spawning background loader for drive 2...");
+    crate::scheduler::spawn_kernel_thread("qwen25-loader", || {
+        match crate::storage::read_all(2) {
+            Ok(data) => {
+                crate::klog!(INFO, "qwen: read {} MB from weight disk, parsing...",
+                    data.len() / 1024 / 1024);
+                match parse_weights(data) {
+                    Some(m) => {
+                        unsafe { ENGINE = Some(m); }
+                        LOADED.store(true, Ordering::SeqCst);
+                        let (d, l) = unsafe {
+                            let e = ENGINE.as_ref().unwrap();
+                            (e.arch.d_model, e.arch.n_layers)
+                        };
+                        crate::klog!(INFO, "qwen: Qwen2.x ready (D={} L={} VOCAB={})", d, l, VOCAB);
+                    }
+                    None => crate::klog!(ERROR, "qwen: weight parse failed"),
                 }
-                None => crate::klog!(ERROR, "qwen: weight parse failed"),
             }
+            Err(e) => crate::klog!(WARN, "qwen: no weight disk ({:?}) — template fallback", e),
         }
-        Err(e) => crate::klog!(WARN, "qwen: no weight disk ({:?}) — template fallback", e),
-    }
+        loop { x86_64::instructions::hlt(); }
+    });
 }
 
 pub fn is_loaded()  -> bool { LOADED.load(Ordering::Relaxed) }

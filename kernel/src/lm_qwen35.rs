@@ -679,32 +679,35 @@ pub fn is_loaded() -> bool {
 }
 
 pub fn init() {
-    crate::klog!(INFO, "lm_qwen35: loading from drive 1...");
-    let data = match crate::storage::read_all(1) {
-        Ok(d) => d,
-        Err(e) => { crate::klog!(ERROR, "lm_qwen35: read_all failed: {}", e); return; }
-    };
-    if data.len() < 64 {
-        crate::klog!(ERROR, "lm_qwen35: data too small ({}B)", data.len()); return;
-    }
-    let magic = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
-    if magic != MAGIC {
-        crate::klog!(ERROR, "lm_qwen35: bad magic {:08x}", magic); return;
-    }
-    crate::klog!(INFO, "lm_qwen35: binary OK ({} MB), parsing tokenizer...", data.len() / 1048576);
+    crate::klog!(INFO, "lm_qwen35: spawning background loader for drive 1...");
+    crate::scheduler::spawn_kernel_thread("qwen35-loader", || {
+        let data = match crate::storage::read_all(1) {
+            Ok(d) => d,
+            Err(e) => {
+                crate::klog!(WARN, "lm_qwen35: read_all failed: {} (no model disk attached?)", e);
+                loop { x86_64::instructions::hlt(); }
+            }
+        };
+        if data.len() < 64 || parse_and_init(data).is_none() {
+            crate::klog!(ERROR, "lm_qwen35: model load failed");
+        } else {
+            crate::klog!(INFO, "lm_qwen35: ready");
+        }
+        loop { x86_64::instructions::hlt(); }
+    });
+}
 
-    // Parse tokenizer from end of binary and pass to tokenizer module
+fn parse_and_init(data: Vec<u8>) -> Option<()> {
+    let magic = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
+    if magic != MAGIC { crate::klog!(ERROR, "lm_qwen35: bad magic {:08x}", magic); return None; }
+
     let vocab = parse_tokenizer(&data);
-    if vocab.len() < 100 {
-        crate::klog!(ERROR, "lm_qwen35: tokenizer parse failed ({} entries)", vocab.len()); return;
-    }
-    // Move vocab into tokenizer — no clone, no second copy
+    if vocab.len() < 100 { crate::klog!(ERROR, "lm_qwen35: tokenizer parse failed"); return None; }
     tok35::init(vocab);
-    crate::klog!(INFO, "lm_qwen35: tokenizer OK, loading model...");
 
     let model = Qwen35::alloc(data);
     unsafe { MODEL = Some(model); }
-    crate::klog!(INFO, "lm_qwen35: ready");
+    Some(())
 }
 
 fn parse_tokenizer(data: &[u8]) -> Vec<Vec<u8>> {
