@@ -177,7 +177,8 @@ fn mv4(w: &[u8], m: &MatOff, x: &[f32], out: &mut [f32]) {
     }
 }
 fn mv4_out(w: &[u8], m: &MatOff, x: &[f32], out: &mut [f32]) {
-    for o in out[..m.rows].iter_mut() { *o = 0.0; }
+    let rows = m.rows;
+    for o in out[..rows].iter_mut() { *o = 0.0; }
     mv4(w, m, x, out);
 }
 fn elu1(x: f32) -> f32 { if x>=0.0 { x } else { libm::expf(x)-1.0 } }

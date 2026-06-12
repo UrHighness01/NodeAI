@@ -555,7 +555,7 @@ pub fn read_all_pmm(drive_idx: usize) -> Result<&'static [u8], &'static str> {
     for chunk_idx in 0..n_chunks {
         // Yield every 256 chunks (8 MiB) so other tasks (desktop, idle) stay
         // responsive during large model loads.
-        if chunk_idx > 0 && chunk_idx % 16 == 0 {
+        if chunk_idx > 0 && chunk_idx % 4 == 0 {
             crate::scheduler::yield_cpu();
         }
 
