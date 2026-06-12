@@ -436,92 +436,73 @@ pub fn generate_response(query: &str, _max_words: usize) -> String {
     }
 
     // ── QWEN3.5 PRIMARY VOICE ─────────────────────────────────────────────
-    // PROTOTYPE: Locked behind const flag — QEMU emulation is too slow for
-    // 0.6B+ parameter model inference (minutes per query). Enable on real
-    // hardware with KVM support.
+    // PROTOTYPE: Locked — QEMU emulation too slow. Enable on real hardware.
     const QWEN_INFERENCE_ENABLED: bool = false;
     if QWEN_INFERENCE_ENABLED && crate::lm_qwen35::is_loaded() {
-        crate::klog!(INFO, "kernel_lm: Qwen35 inferring for '{}'... (may take several seconds in QEMU)",
-            query.chars().take(20).collect::<String>());
+        crate::klog!(INFO, "kernel_lm: Qwen35 inferring for '{}'...", query.chars().take(20).collect::<String>());
         if let Some(resp) = crate::lm_qwen35::generate(query) {
             let r = resp.trim().to_string();
             if r.len() > 2 {
-                crate::klog!(INFO, "kernel_lm: Qwen35 → '{}...' ({}B)",
-                    r.chars().take(60).collect::<String>(), r.len());
+                crate::klog!(INFO, "kernel_lm: Qwen35 → '{}...' ({}B)", r.chars().take(60).collect::<String>(), r.len());
                 crate::lm_memory::record(query, &r);
                 return r;
             }
         }
-        crate::klog!(DEBUG, "kernel_lm: Qwen35 returned empty, falling back");
     }
 
     // ── QWEN2.5 FALLBACK VOICE ────────────────────────────────────────────
-    // PROTOTYPE: Same const flag as Qwen3.5
     if QWEN_INFERENCE_ENABLED && crate::lm_qwen::is_loaded() {
         if let Some(resp) = crate::lm_qwen::generate(query) {
             let r = resp.trim().to_string();
             if r.len() > 2 {
-                crate::klog!(INFO, "kernel_lm: Qwen25 → '{}...' ({}B)",
-                    r.chars().take(60).collect::<String>(), r.len());
+                crate::klog!(INFO, "kernel_lm: Qwen25 → '{}...' ({}B)", r.chars().take(60).collect::<String>(), r.len());
                 crate::lm_memory::record(query, &r);
                 return r;
             }
         }
-        crate::klog!(DEBUG, "kernel_lm: Qwen25 returned empty, falling back");
     }
 
-    // ── DUAL-MODEL FALLBACK (Project-K A + B) ────────────────────────────
-    let use_conv_first = matches!(intent,
-        Intent::HowAreYou | Intent::Greeting | Intent::NameQuery |
-        Intent::CreatorQuery | Intent::Curious | Intent::Emotional |
-        Intent::Philosophical | Intent::DreamQuery | Intent::Humor |
-        Intent::Advice | Intent::Learning | Intent::Thanks | Intent::Sorry |
-        Intent::Farewell | Intent::Sleep | Intent::Sarcastic | Intent::Unknown
-    );
+    // ── PROJECT-K NEURAL VOICE ────────────────────────────────────────────
+    // PROTOTYPE: Locked — LLVM aliasing causes crashes. Enable when fix confirmed.
+    const PROJECTK_INFERENCE_ENABLED: bool = false;
+    if PROJECTK_INFERENCE_ENABLED {
+        let use_conv_first = matches!(intent,
+            Intent::HowAreYou | Intent::Greeting | Intent::NameQuery |
+            Intent::CreatorQuery | Intent::Curious | Intent::Emotional |
+            Intent::Philosophical | Intent::DreamQuery | Intent::Humor |
+            Intent::Advice | Intent::Learning | Intent::Thanks | Intent::Sorry |
+            Intent::Farewell | Intent::Sleep | Intent::Sarcastic | Intent::Unknown
+        );
 
-    let try_neural = |model: u8| -> Option<String> {
-        let resp = if model == 0 {
-            crate::lm_projectk::generate(query)
-        } else {
-            crate::lm_projectk_conv::generate(query)
+        let try_neural = |model: u8| -> Option<String> {
+            let resp = if model == 0 { crate::lm_projectk::generate(query) }
+                       else { crate::lm_projectk_conv::generate(query) };
+            if let Some(ref s) = resp { let c = s.trim(); if c.len() > 2 { return Some(c.to_string()); } }
+            None
         };
-        if let Some(ref s) = resp {
-            let c = s.trim();
-            if c.len() > 2 { return Some(c.to_string()); }
+
+        let (first, second) = if use_conv_first { (1u8, 0u8) } else { (0u8, 1u8) };
+        let model_name = ["A(code)", "B(conv)"];
+
+        if let Some(cleaned) = try_neural(first).or_else(|| try_neural(second)) {
+            let which = if use_conv_first { model_name[1] } else { model_name[0] };
+            crate::klog!(INFO, "kernel_lm: model {} → '{}' ({}B)", which, cleaned.chars().take(60).collect::<String>(), cleaned.len());
+            crate::lm_memory::record(query, &cleaned);
+            return cleaned;
         }
-        None
-    };
 
-    let (first, second) = if use_conv_first { (1u8, 0u8) } else { (0u8, 1u8) };
-    let model_name = ["A(code)", "B(conv)"];
-
-    let neural = if crate::lm_projectk_conv::is_loaded() || crate::lm_projectk::is_loaded() {
-        try_neural(first).or_else(|| try_neural(second))
-    } else {
-        None
-    };
-
-    if let Some(cleaned) = neural {
-        let which = if use_conv_first { model_name[1] } else { model_name[0] };
-        crate::klog!(INFO, "kernel_lm: model {} → '{}' ({}B)",
-            which,
-            cleaned.chars().take(60).collect::<String>(),
-            cleaned.len());
-        crate::lm_memory::record(query, &cleaned);
-        return cleaned;
+        if crate::lm_projectk::is_loaded() || crate::lm_projectk_conv::is_loaded() {
+            crate::klog!(INFO, "kernel_lm: both models empty for '{}', using template", query.chars().take(30).collect::<String>());
+        }
     }
 
-    if crate::lm_projectk::is_loaded() || crate::lm_projectk_conv::is_loaded() {
-        crate::klog!(INFO, "kernel_lm: both models empty for '{}', using template",
-            query.chars().take(30).collect::<String>());
-    }
-
+    // ── TEMPLATE-ONLY FALLBACK ────────────────────────────────────────────
+    // Always available, instant, no crashes. This is the default chat path.
     let base_seed = hash_seed(query, uptime_secs);
     let seed = crate::lm_learner::template_bias(intent, base_seed);
 
     let template = match intent {
         Intent::Greeting => {
-            // If we recovered from a crash, use panic recovery templates for greeting
             if crate::crash_recovery::has_recovered() && seed % 2 == 0 {
                 crate::lm_templates::PANIC_RECOVERY.pick(seed)
             } else {
