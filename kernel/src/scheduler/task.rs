@@ -7,6 +7,7 @@ use alloc::vec::Vec;
 /// Must be 16-byte aligned; repr(C,align(16)) ensures this.
 #[repr(C, align(16))]
 #[derive(Clone, Copy)]
+#[repr(align(16))]
 pub struct FpuState(pub [u8; 512]);
 
 impl FpuState {
@@ -243,6 +244,49 @@ impl Task {
             stack_canary:      0,
             stack_canary_addr: 0,
             mhs_snapshot:      None,
+        }
+    }
+
+    /// Create the idle task entry for the boot/idle execution context.
+    ///
+    /// Does NOT allocate a stack — the idle task runs on the existing boot stack.
+    /// `kernel_stack_top = 0` is a sentinel that tells `schedule_from_interrupt`
+    /// to skip `update_rsp0` (idle never enters from ring-3).
+    /// `saved_kernel_rsp` starts at 0 and is filled in on the first preemption.
+    pub fn new_idle(pid: Pid) -> Self {
+        let cr3: u64;
+        unsafe { core::arch::asm!("mov {}, cr3", out(reg) cr3, options(nomem, nostack)); }
+        Task {
+            pid,
+            name:                   String::from("idle"),
+            state:                  TaskState::Running,
+            priority:               0,
+            kernel_stack_top:       0,   // boot stack — skip update_rsp0
+            saved_kernel_rsp:       0,   // filled in on first timer preemption
+            cr3,
+            context:                CpuContext::default(),
+            ai_profile:             AiProfile::default(),
+            fds:                    Vec::new(),
+            signal_mask:            0,
+            signal_handlers:        [0u64; 64],
+            uid:  0, euid: 0, gid: 0, egid: 0,
+            parent_pid:             0,
+            exit_code:              None,
+            robust_list_head:       0,
+            robust_list_len:        0,
+            intent:                 0,
+            intent_hint:            0,
+            pending_signals:        0,
+            fpu_state:              FpuState::default_state(),
+            user_brk:               0,
+            fs_base:                0,
+            woke_by:                None,
+            runnable_at:            0,
+            sched_latency_total_us: 0,
+            sched_count:            0,
+            stack_canary:           0,
+            stack_canary_addr:      0,
+            mhs_snapshot:           None,
         }
     }
 

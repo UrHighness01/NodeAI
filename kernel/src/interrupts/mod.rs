@@ -235,6 +235,10 @@ unsafe extern "C" fn timer_handler() {
         "2:",
 
          // ── Restore GPRs and return ────────────────────────────────────────
+         // NOTE: EOI is already sent at the top of schedule_from_interrupt.
+         // Do NOT call apic_eoi here — a `call` after GPR restore would push a
+         // return address onto the stack and corrupt the IRET frame, causing
+         // iretq to load the wrong RIP/RSP/RFLAGS and crash.
          "pop r15",
          "pop r14",
          "pop r13",
@@ -250,11 +254,9 @@ unsafe extern "C" fn timer_handler() {
          "pop rdx",
          "pop rcx",
          "pop rax",
-         "call {apic_eoi}",
          "iretq",
 
          schedule = sym crate::scheduler::schedule_from_interrupt,
-         apic_eoi = sym apic::eoi,
          fpu_off  = const GS_FPU_PTR,
     );
 }

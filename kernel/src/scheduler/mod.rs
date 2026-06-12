@@ -14,6 +14,9 @@ pub(crate) static TASKS: Mutex<BTreeMap<Pid, Task>> = Mutex::new(BTreeMap::new()
 static NEXT_PID: core::sync::atomic::AtomicU64 =
     core::sync::atomic::AtomicU64::new(1);
 
+/// The PID reserved for the boot/idle execution context.
+pub const IDLE_PID: Pid = 0;
+
 /// Monotonic uptime counter — incremented once per `tick()` call (~1 ms).
 static UPTIME_MS: core::sync::atomic::AtomicU64 =
     core::sync::atomic::AtomicU64::new(0);
@@ -66,6 +69,18 @@ pub fn spawn_kernel_thread(name: &str, entry: fn() -> !) {
         crate::consciousness::qualia::KernelEventType::TaskCreated, None);
 }
 
+/// Register the boot/idle stack as a schedulable task (PID 0).
+///
+/// Must be called once, just before entering idle_loop(), with interrupts
+/// still disabled. After this call the APIC timer handler will treat the idle
+/// execution context like any other task: save its RSP, switch to queued
+/// kernel threads, and return to idle when the queue is empty.
+pub fn register_idle_task() {
+    let task = task::Task::new_idle(IDLE_PID);
+    TASKS.lock().insert(IDLE_PID, task);
+    runqueue::set_current(IDLE_PID);
+}
+
 /// Called from the naked APIC timer handler with interrupts disabled.
 ///
 /// 1. Saves `old_rsp` (bottom of the saved interrupt frame on the current task's
@@ -89,17 +104,9 @@ pub unsafe extern "C" fn schedule_from_interrupt(old_rsp: u64) -> u64 {
     // Step 1: save old_rsp into the CURRENT (outgoing) task.
     let old_pid = runqueue::current_pid();
 
-    // CRITICAL: if there is no current task (we are on the idle/boot stack),
-    // do NOT attempt a context switch. The idle stack has no Task entry, so
-    // we cannot save its RSP. If we switch away here we permanently lose the
-    // idle execution context — idle_loop never wakes, uptime advances but
-    // the heartbeat never fires. Always return old_rsp when old_pid is None.
+    // If there is no current task the idle task was not registered yet (very
+    // early boot). Just keep running on the boot stack — no switch possible.
     if old_pid.is_none() {
-        // Still do per-tick subsystem work — but ONLY call interrupt-safe
-        // functions here. desktop::tick() and telemetry::tick() both use
-        // fb::with() which takes the framebuffer spin-lock. If the idle loop
-        // holds that lock when the timer fires (e.g. inside browser_fetch_tick),
-        // re-acquiring it from interrupt context deadlocks the CPU forever.
         crate::audio::tick();
         return old_rsp;
     }
@@ -325,7 +332,11 @@ pub unsafe extern "C" fn schedule_from_interrupt(old_rsp: u64) -> u64 {
 
                 // Feed actual scheduling latency back to transformer as 4th target.
                 crate::transformer_sched::record_wait(next_pid, wait_us);
-                crate::gdt::update_rsp0(t.kernel_stack_top);
+                // kernel_stack_top == 0 marks the idle task (boot stack).
+                // Idle never enters from ring-3, so TSS.RSP0 is irrelevant.
+                if t.kernel_stack_top != 0 {
+                    crate::gdt::update_rsp0(t.kernel_stack_top);
+                }
                 let cr3    = t.cr3;
                 let fs     = t.fs_base;
                 let rsp    = t.saved_kernel_rsp;
@@ -394,9 +405,11 @@ pub fn set_quantum_ms(ms: u64) {
 
 /// Voluntarily yield the CPU to the next runnable task.
 pub fn yield_cpu() {
-    x86_64::instructions::interrupts::disable();
-    let _ = runqueue::dequeue_next();
-    x86_64::instructions::interrupts::enable();
+    // With preemptive scheduling the right way to yield is to halt and let the
+    // next timer interrupt do the context switch.  The old dequeue_next() path
+    // mutated current_pid without actually switching stacks, which confused the
+    // timer handler when it tried to save RSP for the wrong task.
+    x86_64::instructions::interrupts::enable_and_hlt();
 }
 
 /// Put the current task to sleep (remove from run queue).

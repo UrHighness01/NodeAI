@@ -420,6 +420,10 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     // Boot overlay elements (ALIVE box, phi, heap) are hidden by default.
     // Use 'consc splash' at the shell to show them.
 
+    // Register the idle execution context as a schedulable task so the APIC
+    // timer handler can preempt it and run queued kernel threads.
+    crate::scheduler::register_idle_task();
+
     // All subsystems initialized — enable hardware interrupts now so the
     // APIC timer can fire safely (scheduler, AI engine, telemetry all ready).
     x86_64::instructions::interrupts::enable();

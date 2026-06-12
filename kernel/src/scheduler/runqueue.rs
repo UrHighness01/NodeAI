@@ -81,6 +81,11 @@ pub fn init() {
     // Queue starts empty; the idle task is a special case handled by main.
 }
 
+/// Mark `pid` as the currently executing task (used to register the idle task).
+pub fn set_current(pid: Pid) {
+    RUNQUEUE.lock().current_pid = Some(pid);
+}
+
 pub fn enqueue(pid: Pid) {
     RUNQUEUE.lock().enqueue(pid);
 }
