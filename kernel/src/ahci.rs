@@ -500,6 +500,118 @@ pub fn read_all(drive_idx: usize) -> Result<Vec<u8>, &'static str> {
     Ok(out)
 }
 
+/// Base virtual address for PMM-backed model weight arenas.
+/// Placed in the kernel upper half, well above the bootloader's 2 GiB physical-
+/// memory direct map (which typically sits at 0xFFFF_8000_0000_0000 + 2 GiB).
+const MODEL_WEIGHT_VA: u64 = 0xFFFF_E000_0000_0000;
+static MODEL_WEIGHT_VA_BUMP: core::sync::atomic::AtomicU64 =
+    core::sync::atomic::AtomicU64::new(MODEL_WEIGHT_VA);
+
+/// Read an entire drive into PMM-backed memory, bypassing the 128 MiB kernel heap.
+///
+/// Each 32 KiB chunk is backed by a physically-contiguous PMM allocation (order=3),
+/// which satisfies the AHCI PRDT single-entry DMA constraint.  The chunks are mapped
+/// at consecutive virtual addresses so callers get a flat `&'static [u8]`.
+///
+/// Pages are never freed — model weights are permanent for the kernel lifetime.
+pub fn read_all_pmm(drive_idx: usize) -> Result<&'static [u8], &'static str> {
+    use x86_64::{
+        structures::paging::{Page, PhysFrame, PageTableFlags, Size4KiB},
+        VirtAddr, PhysAddr,
+    };
+    use core::sync::atomic::Ordering;
+
+    const CHUNK_SECTORS: u16  = 64;               // 32 KiB per AHCI read
+    const CHUNK_BYTES:   usize = CHUNK_SECTORS as usize * SECTOR_SIZE;
+    const PAGES_PER_CHUNK: u64 = CHUNK_BYTES as u64 / 4096; // = 8
+
+    if drive_count() <= drive_idx {
+        return Err("drive not found");
+    }
+    let total_sectors = {
+        let ports = AHCI_PORTS.lock();
+        ports.get(drive_idx).map(|p| p.sectors).unwrap_or(0)
+    };
+    if total_sectors == 0 {
+        return Err("drive has zero capacity");
+    }
+
+    let total_bytes = (total_sectors as usize * SECTOR_SIZE).min(900 * 1024 * 1024);
+    let n_chunks    = (total_bytes + CHUNK_BYTES - 1) / CHUNK_BYTES;
+
+    // Reserve a contiguous virtual address range (bump allocator, never released).
+    let va_base = MODEL_WEIGHT_VA_BUMP.fetch_add(
+        n_chunks as u64 * CHUNK_BYTES as u64 + 4096, // +1 guard page
+        Ordering::SeqCst,
+    );
+
+    let flags = PageTableFlags::PRESENT
+              | PageTableFlags::WRITABLE
+              | PageTableFlags::NO_EXECUTE;
+
+    let mut written           = 0usize;
+    let mut consecutive_zero  = 0usize;
+
+    for chunk_idx in 0..n_chunks {
+        // Allocate 8 physically-contiguous 4 KiB pages (= 32 KiB) from PMM.
+        // The buddy allocator guarantees alignment and contiguity for order-3 blocks,
+        // so a single PRDT entry covers the whole chunk.
+        let pa = match crate::memory::alloc_frames(3) {
+            Some(a) => a,
+            None => {
+                crate::klog!(ERROR, "ahci: PMM OOM during weight load at chunk {}", chunk_idx);
+                break;
+            }
+        };
+
+        // Map all 8 pages to consecutive VAs so callers see a flat slice.
+        let chunk_va = va_base + chunk_idx as u64 * CHUNK_BYTES as u64;
+        for p in 0..PAGES_PER_CHUNK {
+            let page  = Page::<Size4KiB>::containing_address(VirtAddr::new(chunk_va + p * 4096));
+            let frame = PhysFrame::containing_address(PhysAddr::new(pa + p * 4096));
+            if crate::memory::map_page(page, frame, flags).is_err() {
+                crate::klog!(ERROR, "ahci: VA map failed chunk={} page={}", chunk_idx, p);
+                return Err("VA mapping failed");
+            }
+        }
+
+        // Read sectors directly into the mapped VA (DMA uses translate() to find PA).
+        let chunk_buf = unsafe {
+            core::slice::from_raw_parts_mut(chunk_va as *mut u8, CHUNK_BYTES)
+        };
+        let lba = chunk_idx as u64 * CHUNK_SECTORS as u64;
+
+        let ok = {
+            let mut ports = AHCI_PORTS.lock();
+            match ports.get_mut(drive_idx) {
+                Some(port) => unsafe { port.read_sectors(lba, CHUNK_SECTORS, chunk_buf) },
+                None       => break,
+            }
+        };
+        if !ok { break; }
+
+        let all_zero = chunk_buf.iter().all(|&b| b == 0);
+        if all_zero {
+            consecutive_zero += 1;
+            if consecutive_zero >= 4 { break; }
+        } else {
+            consecutive_zero = 0;
+        }
+        written += CHUNK_BYTES;
+    }
+
+    if written == 0 { return Err("read returned empty"); }
+
+    // Trim trailing zeros to get exact weight file length.
+    let raw = unsafe { core::slice::from_raw_parts(va_base as *const u8, written) };
+    let actual_len = raw.iter().rposition(|&b| b != 0).map(|p| p + 1).unwrap_or(0);
+    if actual_len == 0 { return Err("weight data is all zeros"); }
+
+    crate::klog!(INFO, "ahci: PMM weight load OK: {} MiB from drive {}",
+        actual_len / (1024 * 1024), drive_idx);
+    Ok(unsafe { core::slice::from_raw_parts(va_base as *const u8, actual_len) })
+}
+
 /// Write `data` (must be a multiple of 512 bytes) to drive `drive_idx` at `lba`.
 pub fn write_sectors(drive_idx: usize, lba: u64, data: &[u8]) -> bool {
     let count = (data.len() / SECTOR_SIZE) as u16;

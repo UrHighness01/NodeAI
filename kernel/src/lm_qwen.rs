@@ -82,7 +82,7 @@ struct Layer {
 // ── Full model ────────────────────────────────────────────────────────────────
 struct QwenModel {
     arch:       Arch,
-    w:          Vec<u8>,          // raw weight bytes (INT4 + scales)
+    w:          &'static [u8],    // raw weight bytes (INT4 + scales)
     layers:     Vec<Layer>,
     out_norm:   Vec<f32>,
     lm_head:    MatQ,
@@ -202,7 +202,7 @@ fn matmul_add(w: &[u8], m: &MatQ, x: &[f32], y: &mut [f32]) {
 
 fn forward(e: &mut QwenModel, token_id: u32, kv_pos: usize) {
     let a    = e.arch;
-    let w    = &e.w as *const Vec<u8>;
+    let w    = e.w as *const [u8];
 
     // Token embedding
     e.scratch_x.iter_mut().for_each(|v| *v = 0.0);
@@ -388,7 +388,7 @@ fn lcg_f32(rng: &AtomicU64) -> f32 {
 
 const HDR_SZ: usize = 40; // 10 × u32
 
-fn parse_weights(data: Vec<u8>) -> Option<Box<QwenModel>> {
+fn parse_weights(data: &'static [u8]) -> Option<Box<QwenModel>> {
     if data.len() < HDR_SZ { return None; }
     let u32_at = |i: usize| -> usize {
         u32::from_le_bytes([data[i*4], data[i*4+1], data[i*4+2], data[i*4+3]]) as usize
@@ -502,7 +502,7 @@ fn read_f32_vec(data: &[u8], off: &mut usize, n: usize) -> Option<Vec<f32>> {
 pub fn init() {
     crate::klog!(INFO, "qwen: spawning background loader for drive 2...");
     crate::scheduler::spawn_kernel_thread("qwen25-loader", || {
-        match crate::storage::read_all(2) {
+        match crate::storage::read_all_pmm(2) {
             Ok(data) => {
                 crate::klog!(INFO, "qwen: read {} MB from weight disk, parsing...",
                     data.len() / 1024 / 1024);

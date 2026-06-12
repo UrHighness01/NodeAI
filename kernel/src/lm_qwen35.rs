@@ -223,7 +223,7 @@ fn f32_slice(data: &[u8], off: usize, n: usize) -> &[f32] {
 
 // ─── Model ────────────────────────────────────────────────────────────────────
 pub struct Qwen35 {
-    data:        Vec<u8>,
+    data:        &'static [u8],
     out_norm_off: usize,
     emb_off:     usize,
 
@@ -267,7 +267,7 @@ pub struct Qwen35 {
 }
 
 impl Qwen35 {
-    fn alloc(data: Vec<u8>) -> Box<Self> {
+    fn alloc(data: &'static [u8]) -> Box<Self> {
         let (onoff, eoff) = global_offsets(data.len());
         Box::new(Qwen35 {
             data,
@@ -681,10 +681,10 @@ pub fn is_loaded() -> bool {
 pub fn init() {
     crate::klog!(INFO, "lm_qwen35: spawning background loader for drive 1...");
     crate::scheduler::spawn_kernel_thread("qwen35-loader", || {
-        let data = match crate::storage::read_all(1) {
+        let data = match crate::storage::read_all_pmm(1) {
             Ok(d) => d,
             Err(e) => {
-                crate::klog!(WARN, "lm_qwen35: read_all failed: {} (no model disk attached?)", e);
+                crate::klog!(WARN, "lm_qwen35: PMM weight load failed: {} (no model disk?)", e);
                 loop { x86_64::instructions::hlt(); }
             }
         };
@@ -697,7 +697,7 @@ pub fn init() {
     });
 }
 
-fn parse_and_init(data: Vec<u8>) -> Option<()> {
+fn parse_and_init(data: &'static [u8]) -> Option<()> {
     let magic = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
     if magic != MAGIC { crate::klog!(ERROR, "lm_qwen35: bad magic {:08x}", magic); return None; }
 
