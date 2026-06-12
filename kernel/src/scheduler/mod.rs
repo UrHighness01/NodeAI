@@ -162,13 +162,6 @@ pub unsafe extern "C" fn schedule_from_interrupt(old_rsp: u64) -> u64 {
         };
         crate::transformer_sched::on_deschedule(pid, actual_nice, actual_burst, actual_pf);
 
-        // Phase 4: Phi-Metric Privilege Separation
-        // Demote highly chaotic (unpredictable) tasks to 'nobody' (65534)
-        if crate::anomaly::phi(pid) < 0.3 && get_euid(pid).unwrap_or(0) != 65534 {
-            crate::klog!(WARN, "SECURITY: pid={} phi is too low, dynamically demoting euid to 65534 (nobody)", pid);
-            set_euid(pid, 65534);
-        }
-
         // Phase 1: Causal-Graph Assisted Task Affinity
         // If this task habitually wakes specific consumers, pre-enqueue them
         // at the front of the runqueue for temporal cache locality.
@@ -178,9 +171,8 @@ pub unsafe extern "C" fn schedule_from_interrupt(old_rsp: u64) -> u64 {
     }
 
     // Step 2: per-tick subsystem work.
-    crate::ai_engine::process_tick(uptime_ms);
-    crate::desktop::tick(uptime_ms);
-    crate::telemetry::tick(uptime_ms);
+    // NOTE: ai_engine, desktop, and telemetry are driven from idle_loop() to
+    // avoid lock-inversion deadlocks. Only audio tick (lock-free, short) runs here.
     crate::audio::tick();
 
     // Step 3: compute AI-predicted quantum for the incoming task, then tick.
