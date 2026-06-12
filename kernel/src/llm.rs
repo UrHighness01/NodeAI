@@ -23,8 +23,7 @@ use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 // ── State ─────────────────────────────────────────────────────────────────────
 
-const MODEL_PATH: &str = "/var/lib/llm/model.bin";
-const CTX_SIZE:   usize = 2048;   // max context tokens
+const CTX_SIZE: usize = 2048;   // max context tokens
 
 struct LlmState {
     loaded:     bool,
@@ -48,41 +47,29 @@ static TOKEN_COUNT: AtomicU64 = AtomicU64::new(0);
 // ── Init ──────────────────────────────────────────────────────────────────────
 
 pub fn init() {
-    // Attempt to load model lazily (don't block boot).
-    crate::scheduler::spawn_kernel_thread("llm-loader", load_model_bg);
-    crate::klog!(INFO, "llm: loading model in background from {}", MODEL_PATH);
-}
-
-fn load_model_bg() -> ! {
-    match crate::vfs::read_file(MODEL_PATH) {
-        Ok(data) => {
-            let size = data.len() as u64;
-            // Hand the model bytes to the AI engine.
-            if crate::ai_engine::load_llm_weights(&data) {
-                let mut state = LLM.lock();
-                state.loaded     = true;
-                state.model_size = size;
-                drop(state);
-                READY.store(true, Ordering::Relaxed);
-                crate::klog!(INFO, "llm: model loaded ({} bytes)", size);
-            } else {
-                crate::klog!(WARN, "llm: ai_engine rejected model weights");
-            }
-        }
-        Err(_) => {
-            crate::klog!(INFO, "llm: no model at {} — inference disabled", MODEL_PATH);
-        }
-    }
-    // Background thread — loop forever yielding CPU.
-    loop { crate::scheduler::yield_cpu(); }
+    // No VFS loader — real model weights are loaded from AHCI disks by
+    // lm_qwen35::init() (drive 1) and lm_qwen::init() (drive 2).
+    // Mark ready immediately; query() delegates to lm_qwen35 when loaded.
+    READY.store(true, Ordering::Relaxed);
+    crate::klog!(INFO, "llm: interface layer ready (models loaded via AHCI)");
 }
 
 // ── Core inference ────────────────────────────────────────────────────────────
 
 /// Run a free-form natural language query and return the response.
 pub fn query(prompt: &str) -> String {
-    if !READY.load(Ordering::Relaxed) {
-        return "LLM not ready — model not loaded. See /var/lib/llm/model.bin".to_owned();
+    // Prefer the Qwen3.5 voice (AHCI drive 1) when loaded; fall back to
+    // kernel_lm template engine, then ai_engine stub.
+    if crate::lm_qwen35::is_loaded() {
+        let full_prompt = build_system_prompt(prompt);
+        if let Some(reply) = crate::lm_qwen35::generate(&full_prompt) {
+            TOKEN_COUNT.fetch_add(estimate_tokens(&reply), Ordering::Relaxed);
+            let mut state = LLM.lock();
+            state.query_count += 1;
+            state.last_query   = prompt[..prompt.len().min(200)].to_owned();
+            state.last_reply   = reply[..reply.len().min(500)].to_owned();
+            return reply;
+        }
     }
     let full_prompt = build_system_prompt(prompt);
     let reply = crate::ai_engine::llm_infer(&full_prompt, CTX_SIZE);

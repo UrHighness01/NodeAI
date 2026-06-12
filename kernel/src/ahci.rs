@@ -553,6 +553,12 @@ pub fn read_all_pmm(drive_idx: usize) -> Result<&'static [u8], &'static str> {
     let mut consecutive_zero  = 0usize;
 
     for chunk_idx in 0..n_chunks {
+        // Yield every 256 chunks (8 MiB) so other tasks (desktop, idle) stay
+        // responsive during large model loads.
+        if chunk_idx > 0 && chunk_idx % 256 == 0 {
+            crate::scheduler::yield_cpu();
+        }
+
         // Allocate 8 physically-contiguous 4 KiB pages (= 32 KiB) from PMM.
         // The buddy allocator guarantees alignment and contiguity for order-3 blocks,
         // so a single PRDT entry covers the whole chunk.
