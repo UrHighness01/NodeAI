@@ -1,0 +1,176 @@
+name: CI
+
+on:
+  push:
+    branches: ["main", "master", "dev"]
+  pull_request:
+    branches: ["main", "master", "dev"]
+
+jobs:
+  build-test:
+    name: Build & Test
+    runs-on: ubuntu-latest
+    outputs:
+      failure_reason: ${{ steps.failure_context.outputs.failure_reason }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust nightly toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly
+          components: rust-src, llvm-tools-preview, rustfmt, clippy
+          targets: x86_64-unknown-none
+
+      - name: Cache Cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      - name: Build workspace
+        id: build
+        run: |
+          cargo build 2>&1 | tee /tmp/build-output.txt
+          exit ${PIPESTATUS[0]}
+
+      - name: Run tests
+        id: run_tests
+        run: |
+          cargo test 2>&1 | tee /tmp/test-output.txt
+          exit ${PIPESTATUS[0]}
+
+      - name: Capture failure context
+        id: failure_context
+        if: always()
+        run: |
+          failure_reason=""
+          if [ "${{ steps.build.conclusion }}" = "failure" ]; then
+            failure_reason="$(tail -n 40 /tmp/build-output.txt 2>/dev/null || echo 'Build failed.')"
+          elif [ "${{ steps.run_tests.conclusion }}" = "failure" ]; then
+            failure_reason="$(
+              grep -A 20 'FAILED\|failures:\|error\[' /tmp/test-output.txt 2>/dev/null \
+              | head -c 1800 \
+              || tail -n 40 /tmp/test-output.txt 2>/dev/null \
+              || echo 'Tests failed.'
+            )"
+          fi
+          {
+            echo "failure_reason<<EOF"
+            echo "$failure_reason"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+  notify:
+    name: Notify CI Result
+    runs-on: ubuntu-latest
+    needs: [build-test]
+    if: always()
+
+    steps:
+      - name: Send Discord CI report
+        continue-on-error: true
+        env:
+          DISCORD_WEBHOOK: ${{ secrets.DISCORD_DEPLOY_FAIL_WEBHOOK }}
+          CI_RESULT: ${{ needs.build-test.result }}
+          FAILURE_REASON: ${{ needs.build-test.outputs.failure_reason }}
+          SHA: ${{ github.sha }}
+          ACTOR: ${{ github.actor }}
+          COMMIT_MESSAGE: ${{ github.event.head_commit.message || '' }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${DISCORD_WEBHOOK:-}" ]; then
+            echo "DISCORD_DEPLOY_FAIL_WEBHOOK not set; skipping Discord notification."
+            exit 0
+          fi
+
+          case "$CI_RESULT" in
+            success)
+              TITLE="✅ NodeAI CI passed!"
+              SUMMARY="Build and tests green."
+              COLOR="5763719"
+              ;;
+            failure)
+              TITLE="🚨 NodeAI CI failed!"
+              SUMMARY="Build or tests failed."
+              COLOR="15548997"
+              ;;
+            cancelled)
+              TITLE="⏹️ NodeAI CI was cancelled"
+              SUMMARY="The CI run was cancelled."
+              COLOR="9807270"
+              ;;
+            *)
+              TITLE="ℹ️ NodeAI CI finished"
+              SUMMARY="CI run completed with status: $CI_RESULT."
+              COLOR="3447003"
+              ;;
+          esac
+
+          COMMIT_TITLE="$(printf '%s' "$COMMIT_MESSAGE" | head -n1)"
+          COMMIT_BODY="$(printf '%s' "$COMMIT_MESSAGE" | sed -n '2,$p')"
+          SHORT_SHA="${SHA::7}"
+
+          if [ -z "$COMMIT_TITLE" ]; then
+            COMMIT_TITLE="No commit message provided"
+          fi
+
+          COMMIT_BODY="$(printf '%s' "$COMMIT_BODY" | sed '/^[[:space:]]*$/d' | head -c 1000)"
+          FAILURE_REASON="$(printf '%s' "${FAILURE_REASON:-}" | head -c 1000)"
+          TIMESTAMP="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+          if [ -z "$COMMIT_BODY" ]; then
+            COMMIT_BODY="No description provided"
+          fi
+
+          payload="$(jq -nc \
+            --arg title "$TITLE" \
+            --arg summary "$SUMMARY" \
+            --arg failure_reason "$FAILURE_REASON" \
+            --arg sha "$SHORT_SHA" \
+            --arg commit_title "$COMMIT_TITLE" \
+            --arg commit_body "$COMMIT_BODY" \
+            --arg actor "$ACTOR" \
+            --arg timestamp "$TIMESTAMP" \
+            --argjson color "$COLOR" \
+            '{
+              username: "Major Pain",
+              allowed_mentions: { parse: [] },
+              embeds: [
+                {
+                  title: $title,
+                  color: $color,
+                  description: $summary,
+                  fields: (
+                    [
+                      { name: "Commit", value: ("`" + $sha + "`"), inline: true },
+                      { name: "Triggered by", value: $actor, inline: true },
+                      { name: "Title", value: $commit_title, inline: false },
+                      { name: "Description", value: $commit_body, inline: false }
+                    ]
+                    + (if $failure_reason != "" then [{ name: "Why it failed", value: $failure_reason, inline: false }] else [] end)
+                  ),
+                  footer: { text: "NodeAI CI" },
+                  timestamp: $timestamp
+                }
+              ]
+            }')"
+
+          http_code="$(curl --silent --show-error --output /tmp/discord-webhook-response.txt --write-out '%{http_code}' \
+            -X POST \
+            -H 'Content-Type: application/json' \
+            -d "$payload" \
+            "$DISCORD_WEBHOOK" || true)"
+
+          echo "Discord webhook status: $http_code"
+
+          if [[ ! "$http_code" =~ ^2 ]]; then
+            echo "Discord webhook response:"
+            cat /tmp/discord-webhook-response.txt 2>/dev/null || true
+          fi
