@@ -1,3 +1,5 @@
+> **In development** — APIs, syscall numbers, and kernel interfaces may change without notice. Not production-ready.
+
 # NodeAI Kernel
 
 An AI-integrated operating system kernel written in Rust, built from scratch with:
